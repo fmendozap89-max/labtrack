@@ -3,10 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LabTrack</title>
+<title>LabTrack — Gestión de Laboratorio</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
-
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 :root{--bg:#f5f4f0;--bg2:#eceae4;--surface:#fff;--border:rgba(0,0,0,.10);--border2:rgba(0,0,0,.18);--text:#1a1916;--text2:#6b6860;--text3:#9c9a94;--blue:#1a4f8a;--blue-bg:#e8eff8;--blue-text:#1a4f8a;--green:#1e5c35;--green-bg:#e4f2ea;--green-text:#1e5c35;--amber:#7a4e0a;--amber-bg:#fdf0d8;--amber-text:#7a4e0a;--red:#8a2020;--red-bg:#fce8e8;--red-text:#8a2020;--orange:#8a3c10;--orange-bg:#fdeee4;--orange-text:#8a3c10;--radius:6px;--radius-lg:10px;--font:'IBM Plex Sans',sans-serif;--mono:'IBM Plex Mono',monospace}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -150,13 +149,11 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 
   .pill.reviewed{background:#e4f2ea;color:#1e5c35}
  
-
 </style>
 </head>
 <body>
 <div id="app" style="min-height:100vh">Cargando...</div>
 <script>
-
 // ── AV COLORS (cycling) ──
 const AV_CLASSES=['av1','av2','av3','av4','av5','av6','av7','av8'];
 const CHIP_CLASSES=['c1','c2','c3','c4','c5','c6','c7','c8'];
@@ -2981,6 +2978,68 @@ function copyInformeTable(){
   });
 }
 
+async function cloudDiag() {
+  var out = [];
+  out.push('=== Diagnóstico de sincronización ===');
+  out.push('URL: ' + location.href);
+  out.push('Protocolo: ' + location.protocol);
+  out.push('');
+  out.push('CLOUD.enabled: ' + CLOUD.enabled);
+  out.push('CLOUD.apiKey: ' + (CLOUD.apiKey ? CLOUD.apiKey.slice(0,8)+'...' : 'vacío'));
+  out.push('CLOUD.binId: ' + (CLOUD.binId || 'vacío'));
+  out.push('CLOUD_PRESET.apiKey: ' + (CLOUD_PRESET.apiKey ? CLOUD_PRESET.apiKey.slice(0,8)+'...' : 'vacío'));
+  out.push('cloudInitDone: ' + cloudInitDone);
+  out.push('cloudStatus: ' + cloudStatus);
+  out.push('');
+
+  if(!CLOUD.apiKey) {
+    out.push('❌ No hay API Key configurada.');
+    out.push('   → Ir a Administración → ☁ Activar nube → pegar Master Key de jsonbin.io');
+    alert(out.join('\n')); return;
+  }
+  if(location.protocol === 'file:') {
+    out.push('❌ Protocolo file:// — no se puede conectar a internet.');
+    out.push('   → Publicar en GitHub Pages y abrir desde https://');
+    alert(out.join('\n')); return;
+  }
+
+  out.push('Probando conexión a jsonbin.io...');
+  try {
+    var r = await fetch('https://api.jsonbin.io/v3/b?type=json', {
+      headers: { 'X-Master-Key': CLOUD.apiKey }
+    });
+    out.push('HTTP status: ' + r.status);
+    if(r.status === 401) {
+      out.push('❌ API Key incorrecta o expirada.');
+      out.push('   → Verificar la Master Key en jsonbin.io → Account Settings → API Keys');
+    } else if(r.status === 200) {
+      var data = await r.json();
+      out.push('✓ Conexión OK. Bins encontrados: ' + (data.length||0));
+      var lt = (data||[]).find(function(b){ return b.name==='LabTrack'; });
+      if(lt) {
+        out.push('✓ Bin LabTrack encontrado: ' + lt.id);
+        if(!CLOUD.binId) {
+          out.push('⚠ CLOUD.binId estaba vacío — asignando...');
+          CLOUD.binId = lt.id;
+          _persistCloudConfig();
+          out.push('✓ Bin ID guardado: ' + CLOUD.binId);
+        }
+      } else {
+        out.push('⚠ No hay bin "LabTrack" todavía — se creará al guardar.');
+      }
+    } else {
+      out.push('⚠ Respuesta inesperada: ' + r.status);
+    }
+  } catch(e) {
+    out.push('❌ Error de red: ' + e.message);
+    out.push('   → Verificar conexión a internet');
+  }
+
+  out.push('');
+  out.push('localStorage lt4-cloud-cfg: ' + (localStorage.getItem('lt4-cloud-cfg')||'(vacío)'));
+  alert(out.join('\n'));
+}
+
 function renderShell(){
   const sup=isSupRole();
   const isReviewer=isReviewerRole();
@@ -4555,7 +4614,7 @@ const CLOUD = {
   syncInterval: 30000,
 };
 // ── PRESET (embedded at save-time — do not edit manually) ──
-const CLOUD_PRESET = { apiKey: '$2a$10$5ZyBUqeisp47bBP00IiP0.Dk5SshM8yK/cIMKC23RbKh/ow6ioT8W', binId: '69e52141856a6821894f0e61', enabled: true };
+const CLOUD_PRESET = { apiKey: '', binId: '', enabled: false };
 
 // ── Cloud state ──
 let cloudStatus = 'offline'; // offline|connecting|ok|error|syncing
@@ -4736,6 +4795,25 @@ let showCloudConfig = false;
 function openCloudConfig()  { showCloudConfig = true;  render(); }
 function closeCloudConfig() { showCloudConfig = false; render(); }
 
+function getShareUrl() {
+  if(!CLOUD.apiKey || !CLOUD.binId) return '';
+  var cfg = {apiKey: CLOUD.apiKey, binId: CLOUD.binId, enabled: true};
+  var encoded = encodeURIComponent(btoa(JSON.stringify(cfg)));
+  return location.origin + location.pathname + '#cloud=' + encoded;
+}
+
+function copyShareUrl() {
+  var url = getShareUrl();
+  if(!url) return;
+  navigator.clipboard.writeText(url).then(function(){
+    var btn = document.querySelector('[onclick="copyShareUrl()"]');
+    if(btn){btn.textContent='✓ Copiado';setTimeout(function(){btn.textContent='📋 Copiar';},2000);}
+  }).catch(function(){
+    var inp = document.getElementById('share-url-input');
+    if(inp){inp.select();document.execCommand('copy');}
+  });
+}
+
 function renderCloudConfig() {
   return '<div class="modal-overlay" onclick="if(event.target===this)closeCloudConfig()">'
     +'<div class="modal" style="width:500px">'
@@ -4744,9 +4822,17 @@ function renderCloudConfig() {
 
     // Status
     +(CLOUD.enabled && CLOUD.binId
-      ?'<div style="background:var(--green-bg);border-radius:var(--radius);padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between">'
-       +'<span style="color:var(--green);font-weight:600">☁ Conectado — Bin ID: <code>'+escH(CLOUD.binId)+'</code></span>'
+      ?'<div style="background:var(--green-bg);border-radius:var(--radius);padding:10px 14px;margin-bottom:14px">'
+       +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
+       +'<span style="color:var(--green);font-weight:600">☁ Conectado — Bin: <code>'+escH(CLOUD.binId.slice(0,8))+'…</code></span>'
        +'<button class="btn sm dan" onclick="cloudDisconnect()">Desconectar</button>'
+       +'</div>'
+       +'<div style="font-size:12px;color:var(--text2);margin-bottom:6px"><b>Link para compartir con otros dispositivos:</b></div>'
+       +'<div style="display:flex;gap:6px;align-items:center">'
+       +'<input type="text" id="share-url-input" value="'+escH(getShareUrl())+'" readonly style="flex:1;font-size:11px;padding:5px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg2);color:var(--text);font-family:var(--mono)">'
+       +'<button class="btn sm" onclick="copyShareUrl()">📋 Copiar</button>'
+       +'</div>'
+       +'<div style="font-size:11px;color:var(--text3);margin-top:5px">Enviá este link a cada dispositivo. Al abrirlo, la sincronización se activa automáticamente.</div>'
        +'</div>'
       :'')
 
@@ -4766,6 +4852,7 @@ function renderCloudConfig() {
 
     +'<div class="modal-btns">'
     +'<button class="btn" onclick="closeCloudConfig()">Cancelar</button>'
+    +'<button class="btn" onclick="cloudDiag()">🔍 Diagnosticar</button>'
     +'<button class="btn pri" onclick="saveCloudConfig()">Guardar y conectar</button>'
     +'</div>'
     +'</div></div>';
@@ -4819,6 +4906,20 @@ if(staleBootTs&&(now_ts-parseInt(staleBootTs))<30000){
   document.getElementById('app').innerHTML=renderRecovery('La sesión anterior se cerró inesperadamente. Esto puede deberse a un error en la importación de datos.');
 } else {
   loadCloudConfig();
+  // Check URL hash for cloud config (shared by device 1)
+  try {
+    var hash = location.hash;
+    if(hash && hash.startsWith('#cloud=')) {
+      var encoded = hash.slice(7);
+      var cfg = JSON.parse(atob(decodeURIComponent(encoded)));
+      if(cfg && cfg.apiKey) {
+        Object.assign(CLOUD, cfg);
+        _persistCloudConfig();
+        // Clean the URL without reloading
+        history.replaceState(null,'',location.pathname + location.search);
+      }
+    }
+  } catch(e) {}
   safeBoot();
   if(CLOUD.enabled){ cloudInit(); }
 }
@@ -4886,7 +4987,6 @@ async function _embedAndDownload(apiKey, binId) {
     alert('Error al descargar: ' + e.message);
   }
 }
-
 </script>
 </body>
 </html>
