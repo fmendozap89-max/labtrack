@@ -603,19 +603,19 @@ function saveExtraWorkday(dateStr, analystIds, note){
   workdayConfig.extra=workdayConfig.extra.filter(e=>(e.date||e)!==dateStr);
   workdayConfig.extra.push({date:dateStr,analysts:analystIds,note:note||''});
   workdayConfig.extra.sort((a,b)=>(a.date||a).localeCompare(b.date||b));
-  saveLS();render();
+  saveLS();_lastHtml='';render();
 }
 function saveOffDay(dateStr, note){
   workdayConfig.extra=workdayConfig.extra.filter(e=>(e.date||e)!==dateStr);
   workdayConfig.off=workdayConfig.off.filter(o=>(o.date||o)!==dateStr);
   workdayConfig.off.push({date:dateStr,note:note||''});
   workdayConfig.off.sort((a,b)=>(a.date||a).localeCompare(b.date||b));
-  saveLS();render();
+  saveLS();_lastHtml='';render();
 }
 function removeWorkdayOverride(dateStr){
   workdayConfig.extra=workdayConfig.extra.filter(e=>(e.date||e)!==dateStr);
   workdayConfig.off=workdayConfig.off.filter(o=>(o.date||o)!==dateStr);
-  saveLS();render();
+  saveLS();_lastHtml='';render();
 }
 function getAnalystScheduleDefault(analystId){
   const stored=analystSchedules[analystId];
@@ -646,7 +646,7 @@ function setAnalystDefault(analystId,sched){
   if(!analystSchedules[analystId])analystSchedules[analystId]={overrides:{}};
   else if(!analystSchedules[analystId].overrides)analystSchedules[analystId].overrides={};
   analystSchedules[analystId].default=sched;
-  saveLS();
+  saveLS();render();
 }
 function setAnalystDayOverride(analystId,dateStr,sched){
   if(!analystSchedules[analystId])analystSchedules[analystId]={default:{startTime:'08:00',endTime:'16:00',breakMinutes:60},overrides:{}};
@@ -1490,9 +1490,36 @@ function renderAllAbsencesCalendar(){
   </div>`;
 }
 
+function quickActivateDay(dateStr, analystId) {
+  // Collect all analysts assigned to tasks or mgmt on this day
+  var affectedAnalysts = new Set();
+  tasks.forEach(function(t){
+    (t.assignments||[]).forEach(function(a){
+      if(a.date===dateStr) affectedAnalysts.add(a.analyst);
+    });
+  });
+  mgmtTasks.forEach(function(mt){
+    var occs = expandMgmt(mt, dateStr, dateStr);
+    occs.forEach(function(o){ (o.analysts||[]).forEach(function(id){ affectedAnalysts.add(id); }); });
+  });
+  // Also include the specific analyst passed
+  if(analystId) affectedAnalysts.add(analystId);
+  var ids = Array.from(affectedAnalysts);
+  // Add as extra workday for these analysts
+  workdayConfig.off = workdayConfig.off.filter(function(o){ return (o.date||o)!==dateStr; });
+  workdayConfig.extra = workdayConfig.extra.filter(function(e){ return (e.date||e)!==dateStr; });
+  workdayConfig.extra.push({date:dateStr, analysts:ids, note:'Activado desde gestión de conflictos'});
+  workdayConfig.extra.sort(function(a,b){ return (a.date||a).localeCompare(b.date||b); });
+  workdayConfig_ts = Date.now();
+  saveLS();
+  _lastHtml='';
+  render();
+}
+
 function renderConflictsTab(conflicts){
   if(!conflicts.length){
-    return'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;text-align:center">'
+    return'<div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button class="btn sm" onclick="_lastHtml=\'\';render()" title="Recalcular">↻ Recalcular</button></div>'
+      +'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;text-align:center">'
       +'<div style="font-size:28px;margin-bottom:8px">\u2713</div>'
       +'<div style="font-size:14px;font-weight:500;color:var(--green)">Sin conflictos</div>'
       +'<p style="font-size:13px;color:var(--text2);margin-top:4px">Todas las actividades est\u00e1n asignadas en d\u00edas v\u00e1lidos</p></div>';
@@ -1538,12 +1565,14 @@ function renderConflictsTab(conflicts){
         :'')
       +(c.type==='analysis'
         ?'<button class="btn sm" onclick="openEdit('+c.taskId+')" title="Reasignar o cambiar fecha" style="color:var(--blue);border-color:var(--blue)">Reasignar</button>'
+         +(c.nonWorkday?'<button class="btn sm suc" onclick="quickActivateDay(\''+c.date+'\',\''+c.analystId+'\')" title="Marcar este día como laborable para este analista">✓ Activar día</button>':'')
         :'')
       +'</div>'
       +'</div>';
   }
 
-  var html='<div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:14px;font-size:13px;color:var(--amber-text)">'
+  var html='<div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button class="btn sm" onclick="_lastHtml=\'\';render()" title="Recalcular conflictos">↻ Recalcular</button></div>'
+    +'<div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:14px;font-size:13px;color:var(--amber-text)">'
     +'\u26a0 <b>'+conflicts.length+' conflicto'+(conflicts.length>1?'s':'')+'</b> detectado'+(conflicts.length>1?'s':'')+' \u2014 analistas asignados en d\u00edas en que no pueden trabajar</div>';
 
   if(anaConf.length){
