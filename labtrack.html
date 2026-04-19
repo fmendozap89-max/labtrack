@@ -1,6 +1,5 @@
 <!DOCTYPE html>
-<html lang="es">
-<head>
+<html lang="es"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LabTrack — Gestión de Laboratorio</title>
@@ -152,7 +151,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 </style>
 </head>
 <body>
-<div id="app" style="min-height:100vh">Cargando...</div>
+<div id="app" style="min-height:100vh"><div class="modal-overlay" onclick="if(event.target===this)closeCloudConfig()"><div class="modal" style="width:500px"><h3>☁ Sincronización en nube</h3><div class="sub" style="margin-bottom:16px">Compartí datos entre todos los dispositivos sin instalar nada. Gratis para hasta 10.000 guardados/mes.</div><div class="frow"><label>API Key de jsonbin.io</label><input type="password" id="cfg-apikey" value="" placeholder="$2a$10$…" style="font-family:var(--mono);font-size:12px" fdprocessedid="9pyal"></div><div style="background:var(--blue-bg);border-radius:var(--radius);padding:12px 14px;font-size:12px;margin-bottom:14px"><b>Cómo configurar (una sola vez):</b><br><br><b>1.</b> Ir a <a href="https://jsonbin.io" target="_blank" style="color:var(--blue)">jsonbin.io</a> → Sign Up (con email, gratis)<br><b>2.</b> Ir a <b>Account Settings → API Keys → Master Key</b> → copiar<br><b>3.</b> Pegar la key acá arriba y hacer clic en Guardar y conectar<br><b>4.</b> Se descargará un nuevo <b>labtrack.html</b> — subilo a OneDrive reemplazando el anterior<br><b>5.</b> Todos los dispositivos que abran ese archivo sincronizarán automáticamente ✓<br><br><span style="color:var(--text3)">Los datos quedan en un "bin" privado solo accesible con tu key. Plan gratuito: 10.000 lecturas y escrituras por mes — suficiente para 20 usuarios.</span></div><div class="modal-btns"><button class="btn" onclick="closeCloudConfig()" fdprocessedid="9mq0t">Cancelar</button><button class="btn pri" onclick="saveCloudConfig()" fdprocessedid="h730f">Guardar y conectar</button></div></div></div></div>
 <script>
 // ── AV COLORS (cycling) ──
 const AV_CLASSES=['av1','av2','av3','av4','av5','av6','av7','av8'];
@@ -4552,7 +4551,7 @@ const CLOUD = {
   syncInterval: 30000,
 };
 // ── PRESET (embedded at save-time — do not edit manually) ──
-const CLOUD_PRESET = { apiKey: '', binId: '', enabled: false };
+const CLOUD_PRESET = { apiKey: '$2a$10$5ZyBUqeisp47bBP00IiP0.Dk5SshM8yK/cIMKC23RbKh/ow6ioT8W', binId: '', enabled: true };
 
 // ── Cloud state ──
 let cloudStatus = 'offline'; // offline|connecting|ok|error|syncing
@@ -4858,5 +4857,6 @@ function openOvertimeForSup(analystId, dateStr){
   showSchedModal=false;saveLS();render();
 }
 </script>
-</body>
-</html>
+
+
+<span id="PING_IFRAME_FORM_DETECTION" style="display: none;"></span></body></html>
