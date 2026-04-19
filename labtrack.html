@@ -3,9 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LabTrack — Gestión de Laboratorio</title>
+<title>LabTrack</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
+
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 :root{--bg:#f5f4f0;--bg2:#eceae4;--surface:#fff;--border:rgba(0,0,0,.10);--border2:rgba(0,0,0,.18);--text:#1a1916;--text2:#6b6860;--text3:#9c9a94;--blue:#1a4f8a;--blue-bg:#e8eff8;--blue-text:#1a4f8a;--green:#1e5c35;--green-bg:#e4f2ea;--green-text:#1e5c35;--amber:#7a4e0a;--amber-bg:#fdf0d8;--amber-text:#7a4e0a;--red:#8a2020;--red-bg:#fce8e8;--red-text:#8a2020;--orange:#8a3c10;--orange-bg:#fdeee4;--orange-text:#8a3c10;--radius:6px;--radius-lg:10px;--font:'IBM Plex Sans',sans-serif;--mono:'IBM Plex Mono',monospace}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -149,11 +150,13 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 
   .pill.reviewed{background:#e4f2ea;color:#1e5c35}
  
+
 </style>
 </head>
 <body>
 <div id="app" style="min-height:100vh">Cargando...</div>
 <script>
+
 // ── AV COLORS (cycling) ──
 const AV_CLASSES=['av1','av2','av3','av4','av5','av6','av7','av8'];
 const CHIP_CLASSES=['c1','c2','c3','c4','c5','c6','c7','c8'];
@@ -4614,7 +4617,7 @@ const CLOUD = {
   syncInterval: 30000,
 };
 // ── PRESET (embedded at save-time — do not edit manually) ──
-const CLOUD_PRESET = { apiKey: '', binId: '', enabled: false };
+const CLOUD_PRESET = { apiKey: '$2a$10$5ZyBUqeisp47bBP00IiP0.Dk5SshM8yK/cIMKC23RbKh/ow6ioT8W', binId: '69e524e1aaba882197174d7b', enabled: true };
 
 // ── Cloud state ──
 let cloudStatus = 'offline'; // offline|connecting|ok|error|syncing
@@ -4987,6 +4990,7 @@ async function _embedAndDownload(apiKey, binId) {
     alert('Error al descargar: ' + e.message);
   }
 }
+
 </script>
 </body>
 </html>
