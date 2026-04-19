@@ -4467,12 +4467,13 @@ function downloadTemplate(){
   if(window.XLSX){go();}else{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';s.onload=go;document.head.appendChild(s);}
 }
 function doExportXLSX(){
+  function sf(v){return v?sf(String(v)):'';} // safe fmtDF
   try{
     const rows=tasks.map(function(t){
       const asigs=getAssignees(t).map(function(id){return getU(id).name;}).join(', ');
       const hEst=(t.assignments||[]).reduce(function(s,a){return s+(a.estimatedHours||0);},0)||t.estimatedHours||0;
       const hReal=(t.assignments||[]).reduce(function(s,a){return s+(a.realHours||0);},0);
-      const fechas=(t.assignments||[]).map(function(a){return getU(a.analyst).name.split(' ')[0]+': '+fmtDF(a.date);}).join(' | ');
+      const fechas=(t.assignments||[]).map(function(a){return getU(a.analyst).name.split(' ')[0]+': '+sf(a.date);}).join(' | ');
       return{
         'Producto':t.producto,
         'Lote':t.lote,
@@ -4480,11 +4481,11 @@ function doExportXLSX(){
         'Prioridad':t.priority||'',
         'Analistas':asigs,
         'Fechas de análisis':fechas,
-        'F. Ingreso':fmtDF(t.created||''),
-        'F. Vencimiento':fmtDF(t.due||''),
-        'F. Completado':t.completedTs?fmtDF(new Date(t.completedTs).toISOString().slice(0,10)):'',
-        'F. Revisión':fmtDF(t.reviewedDate||''),
-        'F. Aprobación':fmtDF(t.approvedDate||''),
+        'F. Ingreso':sf(t.created||''),
+        'F. Vencimiento':sf(t.due||''),
+        'F. Completado':t.completedTs?sf(new Date(t.completedTs).toISOString().slice(0,10)):(t.confirmedTs?sf(new Date(t.confirmedTs).toISOString().slice(0,10)):''),
+        'F. Revisión':sf(t.reviewedDate||''),
+        'F. Aprobación':sf(t.approvedDate||''),
         'H. Estimadas':hEst||'',
         'H. Reales':hReal?hReal.toFixed(1):'',
         'Notas':t.notes||''
