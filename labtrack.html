@@ -267,6 +267,7 @@ const SK={tasks:'lt4-tasks',nid:'lt4-nid',pwds:'lt4-pwds',users:'lt4-users',uid:
 function getSnapshot(){
   return JSON.stringify({
     savedAt:Date.now(),
+    v:7,
     v:6,
     tasks,nextId,nextUid,nextNotifId,nextAbsId,nextMgmtId,
     users:USERS.map(u=>({id:u.id,name:u.name,role:u.role})),
@@ -308,6 +309,151 @@ function saveLS(){
   if(_saveLSTimer)clearTimeout(_saveLSTimer);
   _saveLSTimer=setTimeout(_doSave,400);
 }
+// ══════════════════════════════════════════════════════
+// SMART MERGE — prevents data loss on concurrent edits
+// ══════════════════════════════════════════════════════
+
+function _ts(){ return Date.now(); }
+
+// Stamp a task with current timestamp
+function _stampTask(t){ t._ts = _ts(); return t; }
+
+// Merge two snapshots: prefer newer _ts per entity
+function mergeSnapshot(local, remote) {
+  try {
+    var L = typeof local === 'string' ? JSON.parse(local) : local;
+    var R = typeof remote === 'string' ? JSON.parse(remote) : remote;
+    if(!L || !R) return R || L;
+
+    var merged = Object.assign({}, R); // start from remote base
+
+    // ── Tasks: merge by id, keep newer ──
+    var taskMap = {};
+    (R.tasks||[]).forEach(function(t){ taskMap[t.id] = t; });
+    (L.tasks||[]).forEach(function(t){
+      var rt = taskMap[t.id];
+      if(!rt || (t._ts||0) > (rt._ts||0)) {
+        taskMap[t.id] = t; // local is newer
+      }
+    });
+    merged.tasks = Object.values(taskMap).filter(function(t){ return !t._deleted; });
+
+    // ── Counters: keep max ──
+    merged.nextId = Math.max(L.nextId||0, R.nextId||0);
+    merged.nextUid = Math.max(L.nextUid||0, R.nextUid||0);
+    merged.nextNotifId = Math.max(L.nextNotifId||0, R.nextNotifId||0);
+    merged.nextAbsId = Math.max(L.nextAbsId||0, R.nextAbsId||0);
+    merged.nextMgmtId = Math.max(L.nextMgmtId||0, R.nextMgmtId||0);
+    merged.nextSchedReqId = Math.max(L.nextSchedReqId||0, R.nextSchedReqId||0);
+
+    // ── Schedule requests: merge by id ──
+    var srMap = {};
+    (R.scheduleRequests||[]).forEach(function(r){ srMap[r.id] = r; });
+    (L.scheduleRequests||[]).forEach(function(r){
+      var rr = srMap[r.id];
+      if(!rr || (r._ts||0) > (rr._ts||0)) srMap[r.id] = r;
+    });
+    merged.scheduleRequests = Object.values(srMap);
+
+    // ── Replan notifs: merge by id ──
+    var rnMap = {};
+    (R.replanNotifs||[]).forEach(function(n){ rnMap[n.id] = n; });
+    (L.replanNotifs||[]).forEach(function(n){
+      var rn = rnMap[n.id];
+      if(!rn || (n._ts||0) > (rn._ts||0)) rnMap[n.id] = n;
+    });
+    merged.replanNotifs = Object.values(rnMap);
+
+    // ── MgmtTasks: merge by id ──
+    var mtMap = {};
+    (R.mgmtTasks||[]).forEach(function(t){ mtMap[t.id] = t; });
+    (L.mgmtTasks||[]).forEach(function(t){
+      var rt = mtMap[t.id];
+      if(!rt || (t._ts||0) > (rt._ts||0)) mtMap[t.id] = t;
+    });
+    merged.mgmtTasks = Object.values(mtMap).filter(function(t){ return !t._deleted; });
+
+    // ── Users: merge by id, keep newer ──
+    var uMap2 = {};
+    (R.users||[]).forEach(function(u){ uMap2[u.id] = u; });
+    (L.users||[]).forEach(function(u){
+      var ru = uMap2[u.id];
+      if(!ru || (u._ts||0) > (ru._ts||0)) uMap2[u.id] = u;
+    });
+    merged.users = Object.values(uMap2).filter(function(u){ return !u._deleted; });
+
+    // ── Passwords: merge by key, keep newer ──
+    var LP = L.passwords||{}, RP = R.passwords||{};
+    var LP_ts = L.passwords_ts||{}, RP_ts = R.passwords_ts||{};
+    var mergedPwd = Object.assign({}, RP);
+    var mergedPwdTs = Object.assign({}, RP_ts);
+    Object.keys(LP).forEach(function(uid){
+      if((LP_ts[uid]||0) > (RP_ts[uid]||0)){
+        mergedPwd[uid] = LP[uid];
+        mergedPwdTs[uid] = LP_ts[uid];
+      }
+    });
+    merged.passwords = mergedPwd;
+    merged.passwords_ts = mergedPwdTs;
+
+    // ── Absences: merge by analystId, keep newer ──
+    var LA = L.absences||{}, RA = R.absences||{};
+    var LA_ts = L.absences_ts||{}, RA_ts = R.absences_ts||{};
+    var mergedAbs = Object.assign({}, RA);
+    var mergedAbsTs = Object.assign({}, RA_ts);
+    Object.keys(LA).forEach(function(aid){
+      if((LA_ts[aid]||0) > (RA_ts[aid]||0)){
+        mergedAbs[aid] = LA[aid];
+        mergedAbsTs[aid] = LA_ts[aid];
+      }
+    });
+    merged.absences = mergedAbs;
+    merged.absences_ts = mergedAbsTs;
+
+    // ── Analyst schedules: merge by analystId ──
+    var LS = L.analystSchedules||{}, RS = R.analystSchedules||{};
+    var mergedSched = Object.assign({}, RS);
+    Object.keys(LS).forEach(function(aid){
+      var ls = LS[aid], rs = RS[aid];
+      if(!rs){ mergedSched[aid] = ls; return; }
+      // Merge default schedule
+      var lDef = ls.default||{}, rDef = rs.default||{};
+      var mergedDef = ((lDef._ts||0) > (rDef._ts||0)) ? lDef : rDef;
+      // Merge overrides by date
+      var mergedOv = Object.assign({}, rs.overrides||{});
+      Object.keys(ls.overrides||{}).forEach(function(d){
+        var lo = ls.overrides[d], ro = (rs.overrides||{})[d];
+        if(!ro || (lo._ts||0) > (ro._ts||0)) mergedOv[d] = lo;
+      });
+      mergedSched[aid] = {default: mergedDef, overrides: mergedOv};
+    });
+    merged.analystSchedules = mergedSched;
+
+    // ── Workday config: keep newer ──
+    if((L.workdayConfig_ts||0) > (R.workdayConfig_ts||0)){
+      merged.workdayConfig = L.workdayConfig;
+      merged.workdayConfig_ts = L.workdayConfig_ts;
+    }
+
+    // ── MgmtCategories: keep newer ──
+    if((L.mgmtCategories_ts||0) > (R.mgmtCategories_ts||0)){
+      merged.mgmtCategories = L.mgmtCategories;
+      merged.mgmtCategories_ts = L.mgmtCategories_ts;
+    }
+
+    // ── AbsenceTypesDef: keep newer ──
+    if((L.absenceTypesDef_ts||0) > (R.absenceTypesDef_ts||0)){
+      merged.absenceTypesDef = L.absenceTypesDef;
+      merged.absenceTypesDef_ts = L.absenceTypesDef_ts;
+    }
+
+    return merged;
+  } catch(e) {
+    console.error('mergeSnapshot error:', e);
+    return remote; // fallback: use remote
+  }
+}
+
 function _doSave(){
   _saveLSTimer=null;
   try{
@@ -712,7 +858,7 @@ function saveSchedModal(){
     scheduleRequests.push({
       id:nextSchedReqId++,analystId:schedModalAnalyst,
       dateStr:schedModalDate||null,status:'pending',
-      proposed,reason:note,ts:Date.now(),requestedBy:currentUser.id
+      proposed,reason:note,ts:Date.now(),_ts:Date.now(),requestedBy:currentUser.id
     });
     showSchedModal=false;saveLS();render();
     // No alert needed — bell will show it
@@ -4329,6 +4475,7 @@ function markDone(id){
     t.status='pending-confirm';
     t.completedBy=currentUser.id;
     t.completedTs=Date.now();
+    t._ts=Date.now();
     saveLS();render();
   } else {
     // Supervisor confirms directly
@@ -4343,7 +4490,7 @@ function markReviewed(id){
   if(t.status!=='done'){alert('Solo se pueden revisar análisis completados.');return;}
   const dateStr=prompt('Fecha de revisión (AAAA-MM-DD):', today());
   if(dateStr===null)return;
-  t.status='reviewed';
+  t.status='reviewed';t._ts=Date.now();
   t.reviewedBy=currentUser.id;
   t.reviewedTs=Date.now();
   t.reviewedDate=dateStr||today();
@@ -4355,7 +4502,7 @@ function markApproved(id){
   if(t.status!=='reviewed'){alert('Solo se pueden aprobar análisis revisados.');return;}
   const dateStr=prompt('Fecha de aprobación (AAAA-MM-DD):', today());
   if(dateStr===null)return;
-  t.status='approved';
+  t.status='approved';t._ts=Date.now();
   t.approvedBy=currentUser.id;
   t.approvedTs=Date.now();
   t.approvedDate=dateStr||today();
@@ -4369,7 +4516,7 @@ function markObserved(id){
   if(!comment.trim()){alert('La observación no puede estar vacía.');return;}
   if(!t.observations)t.observations=[];
   t.observations.push({by:currentUser.id,ts:Date.now(),comment:comment.trim(),fromStatus:t.status});
-  t.status='observed';
+  t.status='observed';t._ts=Date.now();
   t.observedBy=currentUser.id;
   t.observedTs=Date.now();
   saveLS();render();
@@ -4377,7 +4524,7 @@ function markObserved(id){
 
 function confirmDone(id){
   const t=tasks.find(x=>x.id===id);if(!t)return;
-  t.status='done';t.confirmedBy=currentUser.id;t.confirmedTs=Date.now();
+  t.status='done';t.confirmedBy=currentUser.id;t.confirmedTs=Date.now();t._ts=Date.now();
   saveLS();render();
 }
 function requestScheduleChange(analystId,dateStr){
@@ -4392,12 +4539,12 @@ function approveSchedule(reqId){
   } else {
     setAnalystDefault(req.analystId,req.proposed);
   }
-  req.status='approved';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();
+  req.status='approved';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();req._ts=Date.now();
   saveLS();render();
 }
 function rejectSchedule(reqId){
   const req=scheduleRequests.find(r=>r.id===reqId);if(!req)return;
-  req.status='rejected';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();
+  req.status='rejected';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();req._ts=Date.now();
   saveLS();render();
 }
 function setAnalystScheduleDirect(analystId){
@@ -4640,8 +4787,8 @@ function saveTask(){
       {analyst:id, date:analystDates[id]||due, estimatedHours:estH}
     );
   });
-  if(editingTask){const t=tasks.find(x=>x.id===editingTask);if(t)Object.assign(t,{producto:prod,lote,created,assignments,due,priority,status,notes,estimatedHours:assignments.reduce(function(s,a){return s+(a.estimatedHours||0);},0)||estim||t.estimatedHours||0});}
-  else tasks.push({id:nextId++,producto:prod,lote,created,assignments,due,priority,status,notes,estimatedHours:estim});
+  if(editingTask){const t=tasks.find(x=>x.id===editingTask);if(t)Object.assign(t,{producto:prod,lote,created,assignments,due,priority,status,notes,_ts:Date.now(),estimatedHours:assignments.reduce(function(s,a){return s+(a.estimatedHours||0);},0)||estim||t.estimatedHours||0});}
+  else tasks.push({id:nextId++,producto:prod,lote,created,assignments,due,priority,status,notes,_ts:Date.now(),estimatedHours:estim});
   showModal=false;editingTask=null;saveLS();render();
 }
 
@@ -4769,9 +4916,17 @@ async function cloudLoad() {
     if(!r.ok) throw new Error('Load failed: ' + r.status);
     const data = await r.json();
     const json = JSON.stringify(data.record);
-    if(applySnapshot(json)) {
-      localStorage.setItem('lt4-snap', json);
+    // Merge remote data with local — prevents overwriting concurrent changes
+    var localSnap = localStorage.getItem('lt4-snap');
+    var merged = localSnap ? mergeSnapshot(localSnap, data.record) : data.record;
+    var mergedJson = JSON.stringify(merged);
+    if(applySnapshot(mergedJson)) {
+      localStorage.setItem('lt4-snap', mergedJson);
       rebuildDerived();
+      // Push merged result back to cloud so all devices converge
+      if(cloudInitDone && CLOUD.binId) {
+        setTimeout(cloudSaveNow, 500);
+      }
     }
     cloudStatus = 'ok'; cloudLastSync = new Date(); renderCloudBadge();
     return true;
