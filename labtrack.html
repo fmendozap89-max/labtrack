@@ -1,5 +1,6 @@
 <!DOCTYPE html>
-<html lang="es"><head>
+<html lang="es">
+<head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LabTrack — Gestión de Laboratorio</title>
@@ -151,7 +152,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 </style>
 </head>
 <body>
-<div id="app" style="min-height:100vh"><div class="modal-overlay" onclick="if(event.target===this)closeCloudConfig()"><div class="modal" style="width:500px"><h3>☁ Sincronización en nube</h3><div class="sub" style="margin-bottom:16px">Compartí datos entre todos los dispositivos sin instalar nada. Gratis para hasta 10.000 guardados/mes.</div><div class="frow"><label>API Key de jsonbin.io</label><input type="password" id="cfg-apikey" value="" placeholder="$2a$10$…" style="font-family:var(--mono);font-size:12px" fdprocessedid="9pyal"></div><div style="background:var(--blue-bg);border-radius:var(--radius);padding:12px 14px;font-size:12px;margin-bottom:14px"><b>Cómo configurar (una sola vez):</b><br><br><b>1.</b> Ir a <a href="https://jsonbin.io" target="_blank" style="color:var(--blue)">jsonbin.io</a> → Sign Up (con email, gratis)<br><b>2.</b> Ir a <b>Account Settings → API Keys → Master Key</b> → copiar<br><b>3.</b> Pegar la key acá arriba y hacer clic en Guardar y conectar<br><b>4.</b> Se descargará un nuevo <b>labtrack.html</b> — subilo a OneDrive reemplazando el anterior<br><b>5.</b> Todos los dispositivos que abran ese archivo sincronizarán automáticamente ✓<br><br><span style="color:var(--text3)">Los datos quedan en un "bin" privado solo accesible con tu key. Plan gratuito: 10.000 lecturas y escrituras por mes — suficiente para 20 usuarios.</span></div><div class="modal-btns"><button class="btn" onclick="closeCloudConfig()" fdprocessedid="9mq0t">Cancelar</button><button class="btn pri" onclick="saveCloudConfig()" fdprocessedid="h730f">Guardar y conectar</button></div></div></div></div>
+<div id="app" style="min-height:100vh">Cargando...</div>
 <script>
 // ── AV COLORS (cycling) ──
 const AV_CLASSES=['av1','av2','av3','av4','av5','av6','av7','av8'];
@@ -3649,7 +3650,7 @@ function renderAdmin(){
     +'<button class="btn '+(CLOUD.enabled?'':'pri')+' sm" onclick="openCloudConfig()">'
     +(CLOUD.enabled?'⚙ Configuración':'+ Activar nube')
     +'</button>'
-    +(CLOUD.enabled&&CLOUD.apiKey?'<button class="btn sm" onclick="_embedAndDownload(CLOUD.apiKey,CLOUD.binId)" title="Descargá el HTML actualizado para subir a OneDrive">⬇ Descargar HTML</button>':'')
+    +(CLOUD.enabled&&CLOUD.apiKey?'<button class="btn sm" onclick="_embedAndDownload(CLOUD.apiKey,CLOUD.binId).catch(function(e){console.error(e);})" title="Descargá el HTML actualizado para subir a OneDrive">⬇ Descargar HTML</button>':'')
     +'</div>'
     +'</div></div>'
 
@@ -4551,7 +4552,7 @@ const CLOUD = {
   syncInterval: 30000,
 };
 // ── PRESET (embedded at save-time — do not edit manually) ──
-const CLOUD_PRESET = { apiKey: '$2a$10$5ZyBUqeisp47bBP00IiP0.Dk5SshM8yK/cIMKC23RbKh/ow6ioT8W', binId: '', enabled: true };
+const CLOUD_PRESET = { apiKey: '', binId: '', enabled: false };
 
 // ── Cloud state ──
 let cloudStatus = 'offline'; // offline|connecting|ok|error|syncing
@@ -4568,27 +4569,44 @@ async function cloudInit() {
   if(!CLOUD.enabled || !CLOUD.apiKey) return;
   if(location.protocol === 'file:') {
     cloudStatus = 'error'; renderCloudBadge();
-    console.warn('LabTrack: sincronización no disponible en file://. Abrí el archivo desde OneDrive web.');
     return;
   }
   cloudStatus = 'connecting'; renderCloudBadge();
   try {
     if(!CLOUD.binId) {
-      await cloudCreateBin();
-    } else {
-      await cloudLoad();
+      // Try to find existing LabTrack bin for this API key
+      await cloudFindOrCreateBin();
     }
+    await cloudLoad();
     cloudInitDone = true;
     cloudSyncStart();
     cloudStatus = 'ok'; cloudLastSync = new Date(); renderCloudBadge();
-    render(); // Refresh UI with cloud data
+    render();
   } catch(e) {
     console.error('cloudInit:', e);
     cloudStatus = 'error'; renderCloudBadge();
   }
+}async function cloudFindOrCreateBin() {
+  // Search for existing LabTrack bin
+  try {
+    const r = await fetch(JSONBIN_BASE + '/b?type=json', {
+      headers: { 'X-Master-Key': CLOUD.apiKey }
+    });
+    if(r.ok) {
+      const list = await r.json();
+      const existing = (list||[]).find(function(b){ return b.name === 'LabTrack'; });
+      if(existing) {
+        CLOUD.binId = existing.id;
+        _persistCloudConfig();
+        console.log('Found existing bin:', CLOUD.binId);
+        return;
+      }
+    }
+  } catch(e) { /* fallthrough to create */ }
+  // No existing bin — create one
+  await cloudCreateBin();
 }
 
-// ── Create bin on first use ──
 async function cloudCreateBin() {
   const snap = getSnapshot();
   const r = await fetch(JSONBIN_BASE + '/b', {
@@ -4607,8 +4625,6 @@ async function cloudCreateBin() {
   _persistCloudConfig();
   console.log('Bin created:', CLOUD.binId);
 }
-
-// ── Load from cloud ──
 async function cloudLoad() {
   if(!CLOUD.binId) return false;
   cloudStatus = 'syncing'; renderCloudBadge();
@@ -4751,53 +4767,20 @@ function renderCloudConfig() {
     +'</div>'
     +'</div></div>';
 }
-function saveCloudConfig() {
+
+async function saveCloudConfig() {
   const key = document.getElementById('cfg-apikey')?.value.trim() || '';
   if(!key) { alert('Ingresá la API Key.'); return; }
   CLOUD.apiKey = key;
   CLOUD.enabled = true;
+  CLOUD.binId = '';
   _persistCloudConfig();
   closeCloudConfig();
-  // Embed in HTML and offer download so all devices get the config automatically
-  _embedAndDownload(key, CLOUD.binId);
-  cloudInit();
-}async function _embedAndDownload(apiKey, binId) {
-  try {
-    // Get original HTML source directly from the DOM script content
-    const scripts = document.querySelectorAll('script:not([src])');
-    let scriptContent = null;
-    for(const s of scripts) {
-      if(s.textContent.includes('CLOUD_PRESET')) { scriptContent = s.textContent; break; }
-    }
-    if(!scriptContent) { alert('No se encontró el bloque de configuración.'); return; }
-
-    // Build full HTML by replacing only the CLOUD_PRESET line in the script
-    const htmlSource = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
-    const presetPattern = /const CLOUD_PRESET = \{[^}]+\};/;
-    const newPreset = "const CLOUD_PRESET = { apiKey: '" + apiKey.replace(/'/g,"\\'") + "', binId: '" + (binId||'').replace(/'/g,"\\'") + "', enabled: true };";
-
-    if(!presetPattern.test(htmlSource)) {
-      alert('Error: no se encontró CLOUD_PRESET en el HTML. Contactá soporte.');
-      return;
-    }
-
-    const updatedHtml = htmlSource.replace(presetPattern, newPreset);
-    const blob = new Blob([updatedHtml], {type:'text/html;charset=utf-8'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'labtrack.html';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(a.href);
-
-    setTimeout(function(){
-      alert('✓ Archivo labtrack.html descargado.\n\nReemplazá el archivo en OneDrive con este nuevo.\nTodos los dispositivos que lo abran sincronizarán automáticamente.');
-    }, 300);
-  } catch(e) {
-    console.error('embed error:', e);
-    alert('Error: ' + e.message);
-  }
+  render();
+  // Init cloud (finds/creates bin, loads data)
+  await cloudInit();
+  // Now embed config in HTML and offer download
+  await _embedAndDownload(CLOUD.apiKey, CLOUD.binId);
 }
 function cloudDisconnect() {
   if(!confirm('¿Desconectar la sincronización en nube? Los datos locales se mantienen.')) return;
@@ -4856,7 +4839,50 @@ function openOvertimeForSup(analystId, dateStr){
   });
   showSchedModal=false;saveLS();render();
 }
+async function _embedAndDownload(apiKey, binId) {
+  if(!apiKey) return;
+  try {
+    // Read the main script content directly from the DOM script tag
+    var scripts = Array.from(document.querySelectorAll('script:not([src])'));
+    var mainScript = null;
+    for(var i=0; i<scripts.length; i++){
+      if(scripts[i].textContent.includes('CLOUD_PRESET')){ mainScript=scripts[i]; break; }
+    }
+    if(!mainScript){ alert('No se encontró la configuración del script.'); return; }
+
+    var originalScript = mainScript.textContent;
+    var newPreset = "const CLOUD_PRESET = { apiKey: '" + apiKey.replace(/\\/g,'\\\\').replace(/'/g,"\\'") + "', binId: '" + (binId||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'") + "', enabled: true };";
+    var updatedScript = originalScript.replace(/const CLOUD_PRESET = \{[^}]+\};/, newPreset);
+
+    // Build minimal valid HTML
+    var styleTag = document.querySelector('style');
+    var cssContent = styleTag ? styleTag.innerHTML : '';
+    var xlsxSrc = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+
+    var html = '<!DOCTYPE html>\n<html lang="es">\n<head>\n'
+      + '<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+      + '<title>LabTrack</title>\n'
+      + '<script src="' + xlsxSrc + '"><' + '/script>\n'
+      + '<style>\n' + cssContent + '\n</style>\n'
+      + '</head>\n<body>\n'
+      + '<div id="app" style="min-height:100vh">Cargando...</div>\n'
+      + '<script>\n' + updatedScript + '\n<' + '/script>\n'
+      + '</body>\n</html>';
+
+    var blob = new Blob([html], {type: 'text/html;charset=utf-8'});
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'labtrack.html';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 2000);
+    alert('✓ labtrack.html descargado.\n\nSubilo a GitHub reemplazando el anterior.\nTodos los dispositivos sincronizarán automáticamente al abrir esa URL.');
+  } catch(e) {
+    console.error('embed error:', e);
+    alert('Error al descargar: ' + e.message);
+  }
+}
 </script>
-
-
-<span id="PING_IFRAME_FORM_DETECTION" style="display: none;"></span></body></html>
+</body>
+</html>
