@@ -3,10 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LabTrack</title>
+<title>LabTrack — Gestión de Laboratorio</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
-
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 :root{--bg:#f5f4f0;--bg2:#eceae4;--surface:#fff;--border:rgba(0,0,0,.10);--border2:rgba(0,0,0,.18);--text:#1a1916;--text2:#6b6860;--text3:#9c9a94;--blue:#1a4f8a;--blue-bg:#e8eff8;--blue-text:#1a4f8a;--green:#1e5c35;--green-bg:#e4f2ea;--green-text:#1e5c35;--amber:#7a4e0a;--amber-bg:#fdf0d8;--amber-text:#7a4e0a;--red:#8a2020;--red-bg:#fce8e8;--red-text:#8a2020;--orange:#8a3c10;--orange-bg:#fdeee4;--orange-text:#8a3c10;--radius:6px;--radius-lg:10px;--font:'IBM Plex Sans',sans-serif;--mono:'IBM Plex Mono',monospace}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -150,13 +149,11 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 
   .pill.reviewed{background:#e4f2ea;color:#1e5c35}
  
-
 </style>
 </head>
 <body>
 <div id="app" style="min-height:100vh">Cargando...</div>
 <script>
-
 // ── AV COLORS (cycling) ──
 const AV_CLASSES=['av1','av2','av3','av4','av5','av6','av7','av8'];
 const CHIP_CLASSES=['c1','c2','c3','c4','c5','c6','c7','c8'];
@@ -503,6 +500,7 @@ function setAnalystDefault(analystId,sched){
   if(!analystSchedules[analystId])analystSchedules[analystId]={overrides:{}};
   else if(!analystSchedules[analystId].overrides)analystSchedules[analystId].overrides={};
   analystSchedules[analystId].default=sched;
+  saveLS();
 }
 function setAnalystDayOverride(analystId,dateStr,sched){
   if(!analystSchedules[analystId])analystSchedules[analystId]={default:{startTime:'08:00',endTime:'16:00',breakMinutes:60},overrides:{}};
@@ -3043,6 +3041,76 @@ async function cloudDiag() {
   alert(out.join('\n'));
 }
 
+function renderNotificaciones(){
+  const isSup = isSupRole();
+  const isRev = isReviewerRole();
+
+  // Schedule requests visible to supervisor/reviewer
+  const allReqs = [...scheduleRequests].sort(function(a,b){return b.ts-a.ts;});
+  const pending = allReqs.filter(function(r){return r.status==='pending';});
+  const history = allReqs.filter(function(r){return r.status!=='pending';});
+
+  const typeLabel = function(t){
+    return t==='change'?'Cambio de horario':t==='overtime'?'Horas extra':t==='reduced'?'Horario reducido':t==='shift'?'Cambio de turno':t||'Solicitud';
+  };
+  const statusBadge = function(s){
+    if(s==='approved') return '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--green-bg);color:var(--green-text)">✓ Aprobado</span>';
+    if(s==='rejected') return '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--red-bg);color:var(--red-text)">✗ Rechazado</span>';
+    return '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--amber-bg);color:var(--amber-text)">⏳ Pendiente</span>';
+  };
+
+  const reqRow = function(r, showActions){
+    const u = getU(r.analystId);
+    const reviewer = r.reviewedBy ? getU(r.reviewedBy) : null;
+    const p = r.proposed||{};
+    var detail = typeLabel(p.type);
+    if(p.startTime && p.endTime) detail += ': '+p.startTime+'–'+p.endTime;
+    if(p.extraHours) detail += ' (+'+p.extraHours+'h)';
+    if(p.breakMinutes !== undefined) detail += ', descanso '+p.breakMinutes+'min';
+
+    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:8px">'
+      +'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+      +'<div class="av '+u.av+'" style="width:32px;height:32px;font-size:12px;flex-shrink:0">'+escH(u.avInit)+'</div>'
+      +'<div style="flex:1;min-width:0">'
+      +'<div style="font-weight:600;font-size:13px">'+escH(u.name)+'</div>'
+      +'<div style="font-size:11px;color:var(--text2)">'+escH(detail)+(r.dateStr?' · '+fmtDF(r.dateStr):'')+'</div>'
+      +(r.reason?'<div style="font-size:11px;color:var(--text3);margin-top:2px">Motivo: '+escH(r.reason)+'</div>':'')
+      +(reviewer?'<div style="font-size:10px;color:var(--text3);margin-top:2px">Procesado por '+escH(reviewer.name.split(' ')[0])+' · '+new Date(r.reviewedTs).toLocaleDateString('es')+'</div>':'')
+      +'</div>'
+      +statusBadge(r.status)
+      +(showActions && isSup
+        ?'<div style="display:flex;gap:6px">'
+          +'<button class="btn sm suc" onclick="approveSchedule('+r.id+')">✓ Aprobar</button>'
+          +'<button class="btn sm dan" onclick="rejectSchedule('+r.id+')">✗ Rechazar</button>'
+          +'</div>'
+        :'')
+      +'</div>'
+      +'<div style="font-size:10px;color:var(--text3);margin-top:6px">'+new Date(r.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'})+'</div>'
+      +'</div>';
+  };
+
+  var html = '';
+
+  // Pending section
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
+    +'<div class="sec" style="margin-bottom:0">Solicitudes pendientes ('+pending.length+')</div>'
+    +'</div>';
+
+  if(pending.length===0){
+    html += '<div class="empty" style="margin-bottom:20px">No hay solicitudes pendientes ✓</div>';
+  } else {
+    html += pending.map(function(r){return reqRow(r,true);}).join('');
+  }
+
+  // History section
+  if(history.length>0){
+    html += '<div class="sec" style="margin-top:16px;margin-bottom:10px">Historial ('+history.length+')</div>';
+    html += history.map(function(r){return reqRow(r,false);}).join('');
+  }
+
+  return html;
+}
+
 function renderShell(){
   const sup=isSupRole();
   const isReviewer=isReviewerRole();
@@ -3055,6 +3123,7 @@ function renderShell(){
     {id:'tasks',label:'Análisis / Lotes',icon:'≡',badge:pendC>0?pendC:'',bc:'w'},
     {id:'informes',label:'Informes',icon:'📊'},
     {id:'pending',label:'Pendientes',icon:'▲',badge:lateC>0?lateC:'',bc:'d'},
+    {id:'notificaciones',label:'Solicitudes',icon:'🔔',badge:(()=>{const p=scheduleRequests.filter(r=>r.status==="pending").length;return p>0?p:"";})(),bc:'w'},
     {id:'week',label:'Calendario',icon:'▦'},
     {id:'analysts',label:'Equipo',icon:'◉'},
     {id:'rrhh',label:'Gestión analistas',icon:'👤',badge:(()=>{const c=checkAbsenceConflicts();return c.length>0?c.length:'';})(),bc:'d'},
@@ -3071,8 +3140,8 @@ function renderShell(){
     {id:'tasks',label:'Mis análisis',icon:'≡',badge:lateC>0?lateC:'',bc:'d'},
     {id:'cronograma',label:'Mi cronograma',icon:'▦',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ];
-  const titles={dashboard:sup?'Panel general':'Mi día',tasks:sup?'Análisis por lote':'Mis análisis',review:'Revisión de análisis',informes:'Informes de gestión',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración'};
-  const content=({dashboard:renderDashboard,tasks:renderTasks,pending:renderPending,week:renderWeek,analysts:renderAnalysts,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderReview,informes:renderInformes,admin:renderAdmin}[currentView]||renderDashboard)();
+  const titles={dashboard:sup?'Panel general':'Mi día',tasks:sup?'Análisis por lote':'Mis análisis',review:'Revisión de análisis',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración'};
+  const content=({dashboard:renderDashboard,tasks:renderTasks,pending:renderPending,week:renderWeek,analysts:renderAnalysts,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderReview,informes:renderInformes,notificaciones:renderNotificaciones,admin:renderAdmin}[currentView]||renderDashboard)();
   return`<div class="shell">
     <div class="sidebar">
       <div class="sb-header">
@@ -4617,7 +4686,7 @@ const CLOUD = {
   syncInterval: 30000,
 };
 // ── PRESET (embedded at save-time — do not edit manually) ──
-const CLOUD_PRESET = { apiKey: '$2a$10$5ZyBUqeisp47bBP00IiP0.Dk5SshM8yK/cIMKC23RbKh/ow6ioT8W', binId: '69e524e1aaba882197174d7b', enabled: true };
+const CLOUD_PRESET = { apiKey: '', binId: '', enabled: false };
 
 // ── Cloud state ──
 let cloudStatus = 'offline'; // offline|connecting|ok|error|syncing
@@ -4990,7 +5059,6 @@ async function _embedAndDownload(apiKey, binId) {
     alert('Error al descargar: ' + e.message);
   }
 }
-
 </script>
 </body>
 </html>
