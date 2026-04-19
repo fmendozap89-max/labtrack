@@ -4467,18 +4467,52 @@ function downloadTemplate(){
   if(window.XLSX){go();}else{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';s.onload=go;document.head.appendChild(s);}
 }
 function doExportXLSX(){
-  const rows=tasks.map(t=>{
-    const asigs=getAssignees(t).map(id=>getU(id).name).join(', ');
-    const fechas=(t.assignments||[]).map(a=>getU(a.analyst).name.split(' ')[0]+': '+fmtDF(a.date)).join(' | ');
-    return{'Producto':t.producto,'Lote':t.lote,'Fecha creación':fmtDF(t.created),'Analistas':asigs,'Fechas de análisis':fechas,'Fecha entrega':fmtDF(t.due),'Prioridad':t.priority,'Estado':statusLabel(t.status),'Notas':t.notes||''};
-  });
-  const ws=XLSX.utils.json_to_sheet(rows);
-  ws['!cols']=[{wch:22},{wch:14},{wch:14},{wch:30},{wch:34},{wch:14},{wch:10},{wch:12},{wch:32}];
-  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,'Análisis',ws);
-  const res=ANALYSTS.map(a=>{const mt=tasks.filter(t=>getAssignees(t).includes(a.id));return{'Analista':a.name,'Total':mt.length,'Completados':mt.filter(t=>t.status==='done').length,'En curso':mt.filter(t=>t.status==='progress').length,'Pendientes':mt.filter(t=>t.status==='pending').length,'Vencidos':mt.filter(t=>t.status==='late').length};});
-  XLSX.utils.book_append_sheet(wb,'Resumen analistas',XLSX.utils.json_to_sheet(res));
-  xlsxDownload(wb,'labtrack_reporte_'+today()+'.xlsx');
+  try{
+    const rows=tasks.map(function(t){
+      const asigs=getAssignees(t).map(function(id){return getU(id).name;}).join(', ');
+      const hEst=(t.assignments||[]).reduce(function(s,a){return s+(a.estimatedHours||0);},0)||t.estimatedHours||0;
+      const hReal=(t.assignments||[]).reduce(function(s,a){return s+(a.realHours||0);},0);
+      const fechas=(t.assignments||[]).map(function(a){return getU(a.analyst).name.split(' ')[0]+': '+fmtDF(a.date);}).join(' | ');
+      return{
+        'Producto':t.producto,
+        'Lote':t.lote,
+        'Estado':statusLabel(t.status),
+        'Prioridad':t.priority||'',
+        'Analistas':asigs,
+        'Fechas de análisis':fechas,
+        'F. Ingreso':fmtDF(t.created||''),
+        'F. Vencimiento':fmtDF(t.due||''),
+        'F. Completado':t.completedTs?fmtDF(new Date(t.completedTs).toISOString().slice(0,10)):'',
+        'F. Revisión':fmtDF(t.reviewedDate||''),
+        'F. Aprobación':fmtDF(t.approvedDate||''),
+        'H. Estimadas':hEst||'',
+        'H. Reales':hReal?hReal.toFixed(1):'',
+        'Notas':t.notes||''
+      };
+    });
+    const ws=XLSX.utils.json_to_sheet(rows);
+    ws['!cols']=[{wch:22},{wch:14},{wch:12},{wch:10},{wch:30},{wch:34},{wch:12},{wch:12},{wch:12},{wch:12},{wch:12},{wch:10},{wch:10},{wch:30}];
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,'Análisis',ws);
+    const res=ANALYSTS.map(function(a){
+      const mt=tasks.filter(function(t){return getAssignees(t).includes(a.id);});
+      return{
+        'Analista':a.name,
+        'Total':mt.length,
+        'Completados':mt.filter(function(t){return t.status==='done'||t.status==='reviewed'||t.status==='approved';}).length,
+        'En curso':mt.filter(function(t){return t.status==='progress';}).length,
+        'Pendientes':mt.filter(function(t){return t.status==='pending';}).length,
+        'Vencidos':mt.filter(function(t){return t.status==='late';}).length
+      };
+    });
+    XLSX.utils.book_append_sheet(wb,'Resumen analistas',XLSX.utils.json_to_sheet(res));
+    xlsxDownload(wb,'labtrack_reporte_'+today()+'.xlsx');
+  }catch(e){
+    console.error('exportXLSX error:',e);
+    alert('Error al exportar: '+e.message);
+  }
 }
+
 function exportXLSX(){
   if(window.XLSX){doExportXLSX();}
   else{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';s.onload=doExportXLSX;document.head.appendChild(s);}
