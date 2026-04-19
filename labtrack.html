@@ -1,6 +1,5 @@
 <!DOCTYPE html>
-<html lang="es">
-<head>
+<html lang="es"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LabTrack — Gestión de Laboratorio</title>
@@ -150,9 +149,9 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
   .pill.reviewed{background:#e4f2ea;color:#1e5c35}
  
 </style>
-</head>
+<link type="text/css" rel="stylesheet" href="chrome-extension://fheoggkfdfchfphceeifdbepaooicaho/css/mcafee_fonts.css"></head>
 <body>
-<div id="app" style="min-height:100vh">Cargando...</div>
+<div id="app" style="min-height:100vh"><div class="modal-overlay" onclick="if(event.target===this)closeCloudConfig()"><div class="modal" style="width:500px"><h3>☁ Sincronización en nube</h3><div class="sub" style="margin-bottom:16px">Compartí datos entre todos los dispositivos sin instalar nada. Gratis para hasta 10.000 guardados/mes.</div><div style="background:var(--green-bg);border-radius:var(--radius);padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between"><span style="color:var(--green);font-weight:600">☁ Conectado — Bin ID: <code>69e513b6856a6821894ed9e9</code></span><button class="btn sm dan" onclick="cloudDisconnect()" fdprocessedid="ve9jdk">Desconectar</button></div><div class="frow"><label>API Key de jsonbin.io</label><input type="password" id="cfg-apikey" value="$2a$10$5ZyBUqeisp47bBP00IiP0.Dk5SshM8yK/cIMKC23RbKh/ow6ioT8W" placeholder="$2a$10$…" style="font-family:var(--mono);font-size:12px" fdprocessedid="qosblv"></div><div style="background:var(--blue-bg);border-radius:var(--radius);padding:12px 14px;font-size:12px;margin-bottom:14px"><b>Cómo configurar (una sola vez):</b><br><br><b>1.</b> Ir a <a href="https://jsonbin.io" target="_blank" style="color:var(--blue)">jsonbin.io</a> → Sign Up (con email, gratis)<br><b>2.</b> Ir a <b>Account Settings → API Keys → Master Key</b> → copiar<br><b>3.</b> Pegar la key acá arriba y hacer clic en Guardar y conectar<br><b>4.</b> Se descargará un nuevo <b>labtrack.html</b> — subilo a OneDrive reemplazando el anterior<br><b>5.</b> Todos los dispositivos que abran ese archivo sincronizarán automáticamente ✓<br><br><span style="color:var(--text3)">Los datos quedan en un "bin" privado solo accesible con tu key. Plan gratuito: 10.000 lecturas y escrituras por mes — suficiente para 20 usuarios.</span></div><div class="modal-btns"><button class="btn" onclick="closeCloudConfig()" fdprocessedid="ifxvx">Cancelar</button><button class="btn pri" onclick="saveCloudConfig()" fdprocessedid="v9m769">Guardar y conectar</button></div></div></div></div>
 <script>
 // ── AV COLORS (cycling) ──
 const AV_CLASSES=['av1','av2','av3','av4','av5','av6','av7','av8'];
@@ -4541,7 +4540,7 @@ const CLOUD = {
   syncInterval: 30000,
 };
 // ── PRESET (embedded at save-time — do not edit manually) ──
-const CLOUD_PRESET = { apiKey: '', binId: '', enabled: false };
+const CLOUD_PRESET = { apiKey: '$2a$10$5ZyBUqeisp47bBP00IiP0.Dk5SshM8yK/cIMKC23RbKh/ow6ioT8W', binId: '69e513b6856a6821894ed9e9', enabled: true };
 
 // ── Cloud state ──
 let cloudStatus = 'offline'; // offline|connecting|ok|error|syncing
@@ -4847,5 +4846,6 @@ function openOvertimeForSup(analystId, dateStr){
   showSchedModal=false;saveLS();render();
 }
 </script>
-</body>
-</html>
+
+
+<span id="PING_IFRAME_FORM_DETECTION" style="display: none;"></span><span id="PING_CONTENT_DLS_POPUP" style="display: none;"></span><div style="background-color: transparent; border-width: medium; border-style: none; border-color: currentcolor; border-image: initial; bottom: 15px; display: block; margin: 0px; opacity: 1; padding: 0px; position: fixed; right: 15px; z-index: 2147483647;"></div></body></html>
