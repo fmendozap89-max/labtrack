@@ -4467,86 +4467,110 @@ function downloadTemplate(){
   if(window.XLSX){go();}else{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';s.onload=go;document.head.appendChild(s);}
 }
 function doExportXLSX(){
-  // Sanitize: XLSX needs strings or numbers only, never undefined/null/array/object
   function cv(v){
-    if(v===null||v===undefined) return '';
+    if(v===null||v===undefined||v!==v) return ''; // NaN check
     if(typeof v==='boolean') return v?'Si':'No';
-    if(typeof v==='number') return isNaN(v)?'':v;
+    if(typeof v==='number') return v;
     if(typeof v==='string') return v;
-    if(Array.isArray(v)) return v.join(', ');
-    return String(v);
+    if(Array.isArray(v)) return v.map(cv).join(', ');
+    return ''+v;
   }
   function d2s(v){
-    v=cv(v); if(!v) return '';
+    v=cv(v); if(!v&&v!==0) return '';
+    v=''+v; if(v.length<10) return v;
     var p=v.slice(0,10).split('-');
     return p.length===3?p[2]+'/'+p[1]+'/'+p[0]:v;
   }
-  function ts2s(ts){
-    if(!ts) return '';
-    return d2s(new Date(ts).toISOString().slice(0,10));
-  }
+  function ts2s(ts){ return ts?d2s(new Date(ts).toISOString().slice(0,10)):''; }
+
   try{
-    var rows=tasks.map(function(t){
+    // Use aoa_to_sheet (array of arrays) — avoids XLSX formula-prefix bug
+    var hdrs=['Producto','Lote','Estado','Prioridad','Analistas','Fechas análisis',
+              'F. Ingreso','F. Vencimiento','F. Completado','F. Revisión','F. Aprobación',
+              'H. Est.','H. Real','Notas'];
+    var data=[hdrs];
+    tasks.forEach(function(t){
       var assigns=t.assignments||[];
-      var asigs=assigns.map(function(a){
-        return cv(getU(a.analyst).name);
-      }).join(', ');
+      var asigs=assigns.map(function(a){return ''+cv(getU(a.analyst).name);}).join(', ');
       var hEst=0; assigns.forEach(function(a){hEst+=parseFloat(a.estimatedHours)||0;});
       if(!hEst) hEst=parseFloat(t.estimatedHours)||0;
       var hReal=0; assigns.forEach(function(a){hReal+=parseFloat(a.realHours)||0;});
       var fechas=assigns.map(function(a){
-        return cv(getU(a.analyst).name).split(' ')[0]+': '+d2s(a.date);
+        return ''+cv(getU(a.analyst).name).split(' ')[0]+': '+d2s(a.date);
       }).join(' | ');
-      var completedDate=t.completedTs?ts2s(t.completedTs):t.confirmedTs?ts2s(t.confirmedTs):'';
-      return {
-        'Producto'       :cv(t.producto),
-        'Lote'           :cv(t.lote),
-        'Estado'         :cv(statusLabel(t.status)),
-        'Prioridad'      :cv(t.priority),
-        'Analistas'      :cv(asigs),
-        'Fechas análisis':cv(fechas),
-        'F. Ingreso'     :d2s(t.created),
-        'F. Vencimiento' :d2s(t.due),
-        'F. Completado'  :cv(completedDate),
-        'F. Revisión'    :d2s(t.reviewedDate),
-        'F. Aprobación'  :d2s(t.approvedDate),
-        'H. Est.'        :hEst>0?hEst:'',
-        'H. Real'        :hReal>0?Math.round(hReal*10)/10:'',
-        'Notas'          :cv(t.notes)
-      };
+      var compDate=t.completedTs?ts2s(t.completedTs):t.confirmedTs?ts2s(t.confirmedTs):'';
+      data.push([
+        ''+cv(t.producto),
+        ''+cv(t.lote),
+        ''+cv(statusLabel(t.status)),
+        ''+cv(t.priority),
+        ''+asigs,
+        ''+fechas,
+        ''+d2s(t.created),
+        ''+d2s(t.due),
+        ''+compDate,
+        ''+d2s(t.reviewedDate),
+        ''+d2s(t.approvedDate),
+        hEst>0?hEst:'',
+        hReal>0?Math.round(hReal*10)/10:'',
+        ''+cv(t.notes)
+      ]);
     });
-    var ws=XLSX.utils.json_to_sheet(rows);
+    var ws=XLSX.utils.aoa_to_sheet(data);
     ws['!cols']=[{wch:22},{wch:14},{wch:12},{wch:10},{wch:28},{wch:32},
                  {wch:12},{wch:12},{wch:12},{wch:12},{wch:12},{wch:8},{wch:8},{wch:30}];
-    var wb=XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb,'Análisis',ws);
-    var res=ANALYSTS.map(function(a){
+
+    var hdrs2=['Analista','Total','Completados','En curso','Pendientes','Vencidos'];
+    var data2=[hdrs2];
+    ANALYSTS.forEach(function(a){
       var mt=tasks.filter(function(t){
         return (t.assignments||[]).some(function(x){return x.analyst===a.id;});
       });
-      return{
-        'Analista'    :cv(a.name),
-        'Total'       :mt.length,
-        'Completados' :mt.filter(function(t){return t.status==='done'||t.status==='reviewed'||t.status==='approved';}).length,
-        'En curso'    :mt.filter(function(t){return t.status==='progress';}).length,
-        'Pendientes'  :mt.filter(function(t){return t.status==='pending';}).length,
-        'Vencidos'    :mt.filter(function(t){return t.status==='late';}).length
-      };
+      data2.push([
+        ''+cv(a.name),
+        mt.length,
+        mt.filter(function(t){return t.status==='done'||t.status==='reviewed'||t.status==='approved';}).length,
+        mt.filter(function(t){return t.status==='progress';}).length,
+        mt.filter(function(t){return t.status==='pending';}).length,
+        mt.filter(function(t){return t.status==='late';}).length
+      ]);
     });
-    XLSX.utils.book_append_sheet(wb,'Analistas',XLSX.utils.json_to_sheet(res));
+    var ws2=XLSX.utils.aoa_to_sheet(data2);
+
+    var wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,'Análisis',ws);
+    XLSX.utils.book_append_sheet(wb,'Analistas',ws2);
     xlsxDownload(wb,'labtrack_'+today()+'.xlsx');
   }catch(e){
-    console.error('exportXLSX:',e);
-    alert('Error al exportar: '+e.message+'\n\nDetalle en consola del navegador (F12).');
+    console.error('exportXLSX full error:',e);
+    alert('Error al exportar: '+e.message+'\nStack: '+(e.stack||'').split('\n')[1]);
   }
 }
 
 function exportXLSX(){
-  if(window.XLSX){doExportXLSX();}
-  else{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';s.onload=doExportXLSX;document.head.appendChild(s);}
+  function run(){
+    // Quick sanity test before full export
+    try{
+      var test=XLSX.utils.aoa_to_sheet([['A','B'],[1,2]]);
+      var wb_test=XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb_test,'test',test);
+      XLSX.write(wb_test,{bookType:'xlsx',type:'base64'});
+    }catch(te){
+      alert('Error en librería XLSX: '+te.message+'\nVersión XLSX: '+(XLSX.version||'?'));
+      return;
+    }
+    doExportXLSX();
+  }
+  if(window.XLSX){ run(); }
+  else{
+    var s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    s.onload=run;
+    s.onerror=function(){ alert('No se pudo cargar la librería Excel.'); };
+    document.head.appendChild(s);
+  }
 }
 
-// ── GENERAL ACTIONS ──
 function setView(v){currentView=v;render();}
 function logout(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';render();}
 function openNewTask(){editingTask=null;selectedAnalysts=[];analystDates={};showModal=true;render();}
