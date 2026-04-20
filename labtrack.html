@@ -181,6 +181,10 @@ let showModal=false,editingTask=null;
 let showNotifPanel=false;
 let mgmtView='list';
 let informeFilterStatus='';
+let auditTrail=[];
+let auditFilterUser='';
+let auditFilterAction='';
+let auditFilterEntity='';
 let mgmtListPeriod='week';
 let showImportModal=false,showChangePwd=false;
 let tasksView='lote';
@@ -2750,6 +2754,8 @@ function doLogin(){
     currentUser=uMap[uid];
     loginStep=1;loginError='';
     currentView='dashboard';
+    recordLoginSuccess(uid);
+    auditLog('LOGIN','USER',uid,{description:'Inicio de sesion desde '+location.hostname},'');
     render();
   } else {
     loginError='Contraseña incorrecta. Intentá de nuevo.';
@@ -3304,6 +3310,374 @@ function renderNotificaciones(){
   return html;
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// AUDIT TRAIL — Complete, attributable, tamper-evident change log
+// Each entry: { ts, userId, userName, action, entity, entityId, field, oldVal, newVal, reason }
+// ══════════════════════════════════════════════════════════════════════
+
+function auditLog(action, entity, entityId, details, reason) {
+  if(!currentUser) return;
+  const entry = {
+    id: 'AL' + Date.now() + Math.random().toString(36).slice(2,6),
+    ts: Date.now(),
+    userId: currentUser.id,
+    userName: currentUser.name,
+    userRole: currentUser.role,
+    action: action,       // 'CREATE'|'EDIT'|'STATUS_CHANGE'|'DELETE'|'APPROVE'|'REVIEW'|'OBSERVE'|'LOGIN'|'LOGOUT'
+    entity: entity,       // 'TASK'|'USER'|'SCHEDULE'|'ABSENCE'|'MGMT'
+    entityId: entityId,
+    details: details||{}, // { field, oldVal, newVal } or other context
+    reason: reason||''
+  };
+  if(!Array.isArray(auditTrail)) auditTrail=[];
+  auditTrail.push(entry);
+  // Keep last 2000 entries to avoid storage bloat
+  if(auditTrail.length > 2000) auditTrail = auditTrail.slice(-2000);
+  saveLS();
+}
+
+// ── Electronic signature: require reason for critical actions ──
+function requireSignature(action, label, callback) {
+  // Show confirmation modal with reason field
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML = '<div style="background:var(--surface);border-radius:var(--radius-lg);padding:24px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.3)">'
+    + '<h3 style="margin:0 0 8px;font-size:15px">Firma electrónica — '+escH(label)+'</h3>'
+    + '<p style="font-size:12px;color:var(--text2);margin:0 0 16px">Esta acción quedará registrada en el audit trail con tu identidad y fecha/hora.</p>'
+    + '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:var(--text2)">Contraseña de confirmación</label>'
+    + '<input type="password" id="sig-pwd" placeholder="Ingresá tu contraseña" style="width:100%;margin-top:4px;padding:8px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg2);color:var(--text);font-size:13px;box-sizing:border-box" autofocus></div>'
+    + '<div style="margin-bottom:16px"><label style="font-size:12px;font-weight:600;color:var(--text2)">Motivo / justificación <span style="color:var(--red)">*</span></label>'
+    + '<textarea id="sig-reason" placeholder="Ej: Resultados verificados, análisis conforme a especificaciones" rows="3" style="width:100%;margin-top:4px;padding:8px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg2);color:var(--text);font-size:13px;box-sizing:border-box;resize:vertical"></textarea></div>'
+    + '<div id="sig-err" style="color:var(--red);font-size:12px;margin-bottom:8px;display:none"></div>'
+    + '<div style="display:flex;gap:8px;justify-content:flex-end">'
+    + '<button onclick="this.closest(\'div[style*=fixed]\').remove()" style="padding:8px 16px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px">Cancelar</button>'
+    + '<button id="sig-confirm" style="padding:8px 16px;border:none;border-radius:var(--radius);background:var(--blue);color:#fff;cursor:pointer;font-size:13px;font-weight:600">Confirmar y firmar</button>'
+    + '</div></div>';
+  document.body.appendChild(overlay);
+  // Wire confirm button
+  document.getElementById('sig-confirm').onclick = function() {
+    const pwd = document.getElementById('sig-pwd').value;
+    const reason = document.getElementById('sig-reason').value.trim();
+    const errEl = document.getElementById('sig-err');
+    if(!pwd) { errEl.textContent='Ingresá tu contraseña'; errEl.style.display='block'; return; }
+    if(!reason) { errEl.textContent='El motivo es obligatorio'; errEl.style.display='block'; return; }
+    const uid = currentUser.id;
+    if(pwd !== passwords[uid]) { errEl.textContent='Contraseña incorrecta'; errEl.style.display='block'; return; }
+    overlay.remove();
+    callback(reason);
+  };
+  document.getElementById('sig-pwd').onkeydown = function(e){
+    if(e.key==='Enter') document.getElementById('sig-confirm').click();
+  };
+}
+
+// ── Immutability guard: check if a task can still be edited ──
+function canEditTask(t) {
+  // Once approved, task data is locked — only admin can override
+  if(t.status==='approved') return false;
+  return true;
+}
+function canEditField(t, field) {
+  // After review, analytical results (notes, hours) are locked
+  const lockedAfterReview = ['notes','assignments'];
+  if(['reviewed','approved'].includes(t.status) && lockedAfterReview.includes(field)) return false;
+  return true;
+}
+
+// ── Render audit trail view ──
+function renderAuditTrail() {
+  if(!isSupRole()) return '<div class="empty">Acceso restringido</div>';
+  const entries = [...(auditTrail||[])].reverse(); // newest first
+  const filterUser = auditFilterUser||'';
+  const filterAction = auditFilterAction||'';
+  const filterEntity = auditFilterEntity||'';
+  
+  let f = entries;
+  if(filterUser) f = f.filter(function(e){return e.userId===filterUser||e.userName.toLowerCase().includes(filterUser.toLowerCase());});
+  if(filterAction) f = f.filter(function(e){return e.action===filterAction;});
+  if(filterEntity) f = f.filter(function(e){return e.entity===filterEntity;});
+
+  const actionColors = {
+    CREATE:'var(--green)',EDIT:'var(--blue)',STATUS_CHANGE:'var(--amber)',
+    DELETE:'var(--red)',APPROVE:'var(--teal)',REVIEW:'var(--purple)',
+    OBSERVE:'var(--amber)',LOGIN:'var(--text3)',LOGOUT:'var(--text3)'
+  };
+  const userOpts = [...new Set(entries.map(function(e){return e.userId;}))].map(function(id){
+    const name = entries.find(function(e){return e.userId===id;}).userName;
+    return '<option value="'+id+'">'+escH(name)+'</option>';
+  }).join('');
+
+  const rows = f.slice(0,200).map(function(e){
+    const d = new Date(e.ts);
+    const dateStr = d.toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'});
+    const timeStr = d.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    const color = actionColors[e.action]||'var(--text2)';
+    const det = e.details||{};
+    let detStr = '';
+    if(det.field) detStr += escH(det.field)+': ';
+    if(det.oldVal!==undefined) detStr += '<span style="color:var(--red);text-decoration:line-through">'+escH(String(det.oldVal).slice(0,40))+'</span> → ';
+    if(det.newVal!==undefined) detStr += '<span style="color:var(--green)">'+escH(String(det.newVal).slice(0,40))+'</span>';
+    if(det.description) detStr = escH(det.description);
+    
+    return '<div style="padding:10px 14px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:140px 100px 90px 90px 1fr;gap:8px;align-items:start;font-size:12px">'
+      +'<div style="font-family:var(--mono);font-size:11px"><div>'+dateStr+'</div><div style="color:var(--text3)">'+timeStr+'</div></div>'
+      +'<div style="font-weight:600">'+escH(e.userName||'')+'<div style="font-size:10px;color:var(--text3);font-weight:400">'+escH(e.userRole||'')+'</div></div>'
+      +'<div><span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;background:'+color+'22;color:'+color+'">'+escH(e.action||'')+'</span></div>'
+      +'<div style="font-size:11px;color:var(--text2)">'+escH(e.entity||'')+' '+(e.entityId?'#'+e.entityId:'')+'</div>'
+      +'<div>'+(detStr?'<div style="font-size:11px">'+detStr+'</div>':'')
+      +(e.reason?'<div style="font-size:10px;color:var(--text3);margin-top:2px;font-style:italic">Motivo: '+escH(e.reason.slice(0,100))+'</div>':'')
+      +'</div>'
+      +'</div>';
+  }).join('');
+
+  return '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center">'
+    +'<div class="sec" style="margin-bottom:0">Audit Trail</div>'
+    +'<span style="font-size:11px;color:var(--text3)">'+f.length+' registros'+(f.length>200?' (mostrando 200 más recientes)':'')+'</span>'
+    +'<select onchange="auditFilterUser=this.value;render()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
+    +'<option value="">Todos los usuarios</option>'+userOpts+'</select>'
+    +'<select onchange="auditFilterAction=this.value;render()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
+    +'<option value="">Todas las acciones</option>'
+    +'<option value="CREATE">Crear</option><option value="EDIT">Editar</option>'
+    +'<option value="STATUS_CHANGE">Cambio de estado</option><option value="APPROVE">Aprobar</option>'
+    +'<option value="REVIEW">Revisar</option><option value="OBSERVE">Observar</option>'
+    +'<option value="DELETE">Eliminar</option><option value="LOGIN">Login</option>'
+    +'</select>'
+    +'<select onchange="auditFilterEntity=this.value;render()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
+    +'<option value="">Todas las entidades</option>'
+    +'<option value="TASK">Análisis</option><option value="USER">Usuario</option>'
+    +'<option value="SCHEDULE">Horario</option><option value="ABSENCE">Ausencia</option>'
+    +'</select>'
+    +'<button class="btn sm" onclick="copyAuditTrail()" style="margin-left:auto">📋 Exportar</button>'
+    +'</div>'
+    +'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">'
+    +'<div style="display:grid;grid-template-columns:140px 100px 90px 90px 1fr;gap:8px;padding:8px 14px;background:var(--bg2);font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase">'
+    +'<div>Fecha / Hora</div><div>Usuario</div><div>Acción</div><div>Entidad</div><div>Detalle / Motivo</div>'
+    +'</div>'
+    +(rows||'<div style="padding:20px;text-align:center;color:var(--text3)">Sin registros en el audit trail</div>')
+    +'</div>';
+}
+
+function copyAuditTrail() {
+  const entries = [...(auditTrail||[])].reverse();
+  const hdrs = ['Fecha','Hora','Usuario','Rol','Acción','Entidad','ID','Campo','Valor anterior','Valor nuevo','Motivo'];
+  const rows = entries.map(function(e){
+    const d = new Date(e.ts);
+    const det = e.details||{};
+    return [
+      d.toLocaleDateString('es'),
+      d.toLocaleTimeString('es'),
+      e.userName||'',
+      e.userRole||'',
+      e.action||'',
+      e.entity||'',
+      e.entityId||'',
+      det.field||'',
+      det.oldVal!==undefined?String(det.oldVal):'',
+      det.newVal!==undefined?String(det.newVal):'',
+      e.reason||''
+    ].join('\t');
+  });
+  const text = [hdrs.join('\t'),...rows].join('\n');
+  navigator.clipboard.writeText(text).then(function(){
+    alert('Audit trail copiado ('+entries.length+' registros).\nPodés pegarlo en Excel.');
+  }).catch(function(){
+    const ta=document.createElement('textarea');ta.value=text;
+    document.body.appendChild(ta);ta.select();document.execCommand('copy');
+    document.body.removeChild(ta);
+    alert('Copiado ('+entries.length+' registros)');
+  });
+}
+
+// ── 21 CFR Part 11: Failed login tracking ──
+let loginAttempts = {};  // {uid: {count, lastTs}}
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOGIN_LOCKOUT_MS = 15 * 60 * 1000; // 15 min
+
+function checkLoginLockout(uid) {
+  const att = loginAttempts[uid];
+  if(!att) return false;
+  if(Date.now() - att.lastTs > LOGIN_LOCKOUT_MS) { loginAttempts[uid] = null; return false; }
+  return att.count >= MAX_LOGIN_ATTEMPTS;
+}
+function recordLoginFailure(uid, name) {
+  if(!loginAttempts[uid]) loginAttempts[uid] = {count:0, lastTs:0};
+  loginAttempts[uid].count++;
+  loginAttempts[uid].lastTs = Date.now();
+  auditLog('LOGIN_FAIL','USER',uid,{
+    description:'Intento fallido de acceso ('+(loginAttempts[uid].count)+'/'+MAX_LOGIN_ATTEMPTS+')',
+    userName: name||uid
+  },'');
+  if(loginAttempts[uid].count >= MAX_LOGIN_ATTEMPTS) {
+    auditLog('ACCOUNT_LOCKED','USER',uid,{
+      description:'Cuenta bloqueada por '+MAX_LOGIN_ATTEMPTS+' intentos fallidos. Bloqueo: 15 min.'
+    },'');
+  }
+}
+function recordLoginSuccess(uid) {
+  loginAttempts[uid] = null; // reset on success
+}
+
+// ── 21 CFR Part 11: Session inactivity timeout ──
+let _lastActivityTs = Date.now();
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 min inactivity
+let _sessionTimer = null;
+
+function resetActivityTimer() {
+  _lastActivityTs = Date.now();
+}
+function startSessionWatchdog() {
+  if(_sessionTimer) clearInterval(_sessionTimer);
+  _sessionTimer = setInterval(function() {
+    if(!currentUser) return;
+    const idle = Date.now() - _lastActivityTs;
+    if(idle >= SESSION_TIMEOUT_MS) {
+      auditLog('SESSION_TIMEOUT','USER',currentUser.id,{
+        description:'Sesión cerrada automáticamente por inactividad (30 min)',
+        idleMinutes: Math.round(idle/60000)
+      },'');
+      currentUser = null;
+      selectedLoginUser = null;
+      loginStep = 1;
+      loginError = 'Sesión cerrada por inactividad (30 min). Por favor ingresá nuevamente.';
+      render();
+    }
+  }, 60000); // check every minute
+}
+
+// ── GLP: Soft delete — never destroy records ──
+function softDeleteTask(id, reason) {
+  const t = tasks.find(function(x){return x.id===id;});
+  if(!t) return;
+  t._deleted = true;
+  t._deletedBy = currentUser.id;
+  t._deletedTs = Date.now();
+  t._deletedReason = reason;
+  t._ts = Date.now();
+  auditLog('DELETE','TASK',id,{
+    description:'Anulación (borrado lógico): '+t.producto+' '+t.lote,
+    oldVal: t.status
+  }, reason);
+  closeModal(); saveLS(); render();
+}
+
+// ── GLP/ISO 17025: Record versioning — save snapshot before each edit ──
+function saveTaskVersion(t) {
+  if(!t) return;
+  if(!t._history) t._history = [];
+  t._history.push({
+    ts: Date.now(),
+    editedBy: currentUser ? currentUser.id : '?',
+    editedByName: currentUser ? currentUser.name : '?',
+    snapshot: {
+      producto: t.producto,
+      lote: t.lote,
+      status: t.status,
+      assignments: JSON.parse(JSON.stringify(t.assignments||[])),
+      notes: t.notes,
+      due: t.due,
+      priority: t.priority
+    }
+  });
+  // Keep last 20 versions
+  if(t._history.length > 20) t._history = t._history.slice(-20);
+}
+
+// ── Render task history modal ──
+function renderTaskHistory(taskId) {
+  const t = tasks.find(function(x){return x.id===taskId;});
+  if(!t||!t._history||!t._history.length) return '<div class="empty">Sin historial de ediciones previas</div>';
+  const rows = [...t._history].reverse().map(function(h,i){
+    const d = new Date(h.ts);
+    const snap = h.snapshot||{};
+    const changes = [];
+    // Compare with current
+    if(snap.status !== t.status) changes.push('Estado: '+statusLabel(snap.status)+' → '+statusLabel(t.status));
+    if(snap.notes !== t.notes) changes.push('Notas modificadas');
+    if(snap.due !== t.due) changes.push('Vencimiento: '+fmtDF(snap.due||'')+' → '+fmtDF(t.due||''));
+    if(snap.priority !== t.priority) changes.push('Prioridad: '+snap.priority+' → '+t.priority);
+    return '<div style="padding:10px 14px;border-bottom:1px solid var(--border)">'
+      +'<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">'
+      +'<span style="font-size:11px;font-family:var(--mono);color:var(--text3)">v'+(t._history.length-i)
+      +' — '+d.toLocaleDateString('es')+' '+d.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})+'</span>'
+      +'<span style="font-size:12px;font-weight:600">'+escH(h.editedByName||h.editedBy||'?')+'</span>'
+      +(changes.length?'<span style="font-size:11px;color:var(--text2)">'+escH(changes.join(' · '))+'</span>':'<span style="font-size:11px;color:var(--text3)">Sin cambios registrados</span>')
+      +'</div>'
+      +'<div style="margin-top:6px;font-size:11px;color:var(--text3)">Estado en ese momento: '
+      +'<span class="pill '+snap.status+'">'+statusLabel(snap.status)+'</span>'
+      +(snap.notes?'<br>Notas: '+escH(snap.notes.slice(0,80)):'')+'</div>'
+      +'</div>';
+  }).join('');
+  return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">'+rows+'</div>';
+}
+
+// ── 21 CFR Part 11: Data integrity hash ──
+function computeIntegrityHash(t) {
+  // Simple deterministic checksum of critical fields
+  const str = [t.id, t.producto, t.lote, t.status,
+    t.reviewedBy||'', t.reviewedDate||'', t.approvedBy||'', t.approvedDate||'',
+    (t.assignments||[]).map(function(a){return a.analyst+':'+a.date;}).join(',')
+  ].join('|');
+  // DJB2 hash
+  let hash = 5381;
+  for(let i=0;i<str.length;i++){hash=((hash<<5)+hash)+str.charCodeAt(i);hash=hash&hash;}
+  return (hash>>>0).toString(16).padStart(8,'0');
+}
+
+function verifyTaskIntegrity(t) {
+  if(!t._integrityHash) return null; // not yet hashed
+  return t._integrityHash === computeIntegrityHash(t);
+}
+
+function stampIntegrity(t) {
+  t._integrityHash = computeIntegrityHash(t);
+  t._integrityTs = Date.now();
+  t._integrityBy = currentUser ? currentUser.id : '?';
+}
+
+// ── GMP: Edit with mandatory reason ──
+function requireEditReason(callback) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML = '<div style="background:var(--surface);border-radius:var(--radius-lg);padding:24px;max-width:380px;width:90%">'
+    +'<h3 style="margin:0 0 8px;font-size:15px">Motivo de la modificación</h3>'
+    +'<p style="font-size:12px;color:var(--text2);margin:0 0 12px">Requerido por BPF/GMP — toda modificación debe justificarse.</p>'
+    +'<textarea id="edit-reason-txt" rows="3" placeholder="Ej: Corrección de error de tipeo en nombre de producto" style="width:100%;padding:8px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg2);color:var(--text);font-size:13px;box-sizing:border-box;resize:vertical"></textarea>'
+    +'<div id="edit-reason-err" style="color:var(--red);font-size:12px;margin-top:4px;display:none">El motivo es obligatorio</div>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">'
+    +'<button onclick="this.closest(\'div[style*=fixed]\').remove()" style="padding:8px 16px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);cursor:pointer">Cancelar</button>'
+    +'<button id="edit-reason-ok" style="padding:8px 16px;border:none;border-radius:var(--radius);background:var(--blue);color:#fff;cursor:pointer;font-weight:600">Continuar</button>'
+    +'</div></div>';
+  document.body.appendChild(overlay);
+  document.getElementById('edit-reason-ok').onclick = function() {
+    const reason = document.getElementById('edit-reason-txt').value.trim();
+    if(!reason){ document.getElementById('edit-reason-err').style.display='block'; return; }
+    overlay.remove();
+    callback(reason);
+  };
+}
+
+function showTaskHistoryModal(taskId) {
+  const t = tasks.find(function(x){return x.id===taskId;});
+  if(!t) return;
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  const integrity = verifyTaskIntegrity(t);
+  const integrityBadge = integrity===null
+    ? '<span style="font-size:11px;color:var(--text3)">Sin hash de integridad</span>'
+    : integrity
+      ? '<span style="font-size:11px;color:var(--green)">✓ Hash de integridad OK ('+t._integrityHash+')</span>'
+      : '<span style="font-size:11px;color:var(--red)">⚠ Hash de integridad NO COINCIDE — posible alteración</span>';
+  overlay.innerHTML = '<div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px;max-width:540px;width:95%;max-height:80vh;display:flex;flex-direction:column">'
+    +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
+    +'<h3 style="margin:0;font-size:14px">Historial de versiones — '+escH(t.producto)+' '+escH(t.lote)+'</h3>'
+    +'<button onclick="this.closest(\'div[style*=fixed]\').remove()" style="border:none;background:none;font-size:18px;cursor:pointer;color:var(--text3)">✕</button>'
+    +'</div>'
+    +'<div style="margin-bottom:12px;padding:8px 10px;background:var(--bg2);border-radius:var(--radius)">'+integrityBadge+'</div>'
+    +'<div style="overflow-y:auto">'+renderTaskHistory(taskId)+'</div>'
+    +'</div>';
+  document.body.appendChild(overlay);
+}
+
 function renderShell(){
   const sup=isSupRole();
   const isReviewer=isReviewerRole();
@@ -3322,6 +3696,7 @@ function renderShell(){
     {id:'rrhh',label:'Gestión analistas',icon:'👤',badge:(()=>{const c=checkAbsenceConflicts();return c.length>0?c.length:'';})(),bc:'d'},
     {id:'mgmt',label:'Actividades gestión',icon:'📋'},
     {id:'admin',label:'Administración',icon:'⚙'},
+    {id:'audittrail',label:'Audit Trail',icon:'📋'},
   ]:isReviewer?[
     {id:'dashboard',label:'Mi día',icon:'▪'},
     {id:'review',label:'Revisión',icon:'✓',badge:reviewPendC>0?reviewPendC:'',bc:'w'},
@@ -3333,8 +3708,8 @@ function renderShell(){
     {id:'tasks',label:'Mis análisis',icon:'≡',badge:lateC>0?lateC:'',bc:'d'},
     {id:'cronograma',label:'Mi cronograma',icon:'▦',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ];
-  const titles={dashboard:sup?'Panel general':'Mi día',tasks:sup?'Análisis por lote':'Mis análisis',review:'Revisión de análisis',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración'};
-  const content=({dashboard:renderDashboard,tasks:renderTasks,pending:renderPending,week:renderWeek,analysts:renderAnalysts,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderReview,informes:renderInformes,notificaciones:renderNotificaciones,admin:renderAdmin}[currentView]||renderDashboard)();
+  const titles={dashboard:sup?'Panel general':'Mi día',tasks:sup?'Análisis por lote':'Mis análisis',review:'Revisión de análisis',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',audittrail:'Audit Trail',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración'};
+  const content=({dashboard:renderDashboard,tasks:renderTasks,pending:renderPending,week:renderWeek,analysts:renderAnalysts,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderReview,informes:renderInformes,notificaciones:renderNotificaciones,admin:renderAdmin,audittrail:renderAuditTrail}[currentView]||renderDashboard)();
   return`<div class="shell">
     <div class="sidebar">
       <div class="sb-header">
@@ -4041,7 +4416,8 @@ function saveUserName(uid){
   const v=document.getElementById('uname-'+uid)?.value.trim();
   if(!v){alert('El nombre no puede estar vacío.');return;}
   u.name=v;
-  rebuildDerived();saveLS();render();
+  rebuildDerived();auditLog('EDIT','USER',uid,{field:'name',description:'Cambio de nombre'},'Cambio administrativo');
+  saveLS();render();
 }
 
 function saveUserRole(uid){
@@ -4053,7 +4429,8 @@ function saveUserRole(uid){
   // If changing away from supervisor, warn if this is the only one
   if(oldRole==='supervisor'&&USERS.filter(function(x){return x.role==='supervisor';}).length===0){
     alert('No puede haber cero supervisores. Se restauró el rol.');
-    u.role=oldRole;rebuildDerived();saveLS();render();return;
+    u.role=oldRole;rebuildDerived();auditLog('EDIT','USER',uid,{field:'role',description:'Cambio de rol'},'Cambio administrativo');
+  saveLS();render();return;
   }
   rebuildDerived();saveLS();render();
   const roleLabels={supervisor:'Supervisor',reviewer:'Revisor',analyst:'Analista'};
@@ -4289,7 +4666,7 @@ function renderTaskModal(){
     +(isEdit?renderHoursSummaryBlock(t):'')
     +'<div class="frow form-full"><label>Notas</label><textarea id="f-notes">'+escH(t.notes||'')+'</textarea></div>'
     +'</div>'
-    +'<div class="modal-btns">'+(isEdit&&isSupRole()?'<button class="btn dan" onclick="deleteTask('+t.id+')">Eliminar</button>':'')+'<button class="btn" onclick="closeModal()">Cerrar</button>'+(isSupRole()?'<button class="btn pri" onclick="saveTask()">Guardar análisis</button>':'')+'</div>'
+    +'<div class="modal-btns">'+(isEdit&&t&&t._history&&t._history.length?'<button class="btn sm" onclick="showTaskHistoryModal('+t.id+')">📋 Historial</button>':'')+(isEdit&&isSupRole()&&!canEditTask(t)?'<span style="font-size:11px;color:var(--amber);padding:4px 8px">🔒 Registro aprobado — solo lectura</span>':'')+(isEdit&&isSupRole()&&canEditTask(t)?'<button class="btn dan" onclick="deleteTask('+t.id+')">Anular</button>':'')+'<button class="btn" onclick="closeModal()">Cerrar</button>'+(isSupRole()?'<button class="btn pri" onclick="saveTask()">Guardar análisis</button>':'')+'</div>'
     +'</div></div>';
 }
 
@@ -4572,7 +4949,7 @@ function exportXLSX(){
 
 // ── GENERAL ACTIONS ──
 function setView(v){currentView=v;render();}
-function logout(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';render();}
+function logout(){if(currentUser)auditLog('LOGOUT','USER',currentUser.id,{description:'Cierre de sesion'},'');currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';render();}
 function openNewTask(){editingTask=null;selectedAnalysts=[];analystDates={};showModal=true;render();}
 function openEdit(id){if(!isSupRole())return;editingTask=id;showModal=true;render();}
 function closeModal(){showModal=false;editingTask=null;render();}
@@ -4589,38 +4966,74 @@ function markDone(id){
     // Analyst requests completion — needs supervisor confirmation
     t.status='pending-confirm';
     t.completedBy=currentUser.id;
+    auditLog('STATUS_CHANGE','TASK',id,{field:'status',oldVal:'progress',newVal:'pending-confirm',description:t.producto+' '+t.lote},'');
     t.completedTs=Date.now();
     saveLS();render();
   } else {
     // Supervisor confirms directly
     t.status='done';
     t.confirmedBy=currentUser.id;
+    auditLog('STATUS_CHANGE','TASK',id,{field:'status',oldVal:'progress',newVal:'done',description:t.producto+' '+t.lote},'');
     t.confirmedTs=Date.now();
     saveLS();render();
   }
 }
 function markReviewed(id){
-  const t=tasks.find(x=>x.id===id);if(!t)return;
+  const t=tasks.find(function(x){return x.id===id;});
+  if(!t)return;
   if(t.status!=='done'){alert('Solo se pueden revisar análisis completados.');return;}
   const dateStr=prompt('Fecha de revisión (AAAA-MM-DD):', today());
   if(dateStr===null)return;
-  t.status='reviewed';
-  t.reviewedBy=currentUser.id;
-  t.reviewedTs=Date.now();
-  t.reviewedDate=dateStr||today();
-  saveLS();render();
+  requireSignature(
+    'Marcar como Revisado',
+    'Revisión: '+t.producto+' '+t.lote,
+    function(reason){
+      t.status='reviewed';
+      t._ts=Date.now();
+      t.reviewedBy=currentUser.id;
+      t.reviewedTs=Date.now();
+      t.reviewedDate=dateStr||today();
+      stampIntegrity(t);
+      auditLog('REVIEW','TASK',id,{
+        field:'status',
+        oldVal:'done',
+        newVal:'reviewed',
+        description:t.producto+' '+t.lote,
+        lote:t.lote,
+        reviewedDate:t.reviewedDate
+      },reason);
+      saveLS();render();
+    }
+  );
 }
 
 function markApproved(id){
-  const t=tasks.find(x=>x.id===id);if(!t)return;
+  const t=tasks.find(function(x){return x.id===id;});
+  if(!t)return;
   if(t.status!=='reviewed'){alert('Solo se pueden aprobar análisis revisados.');return;}
   const dateStr=prompt('Fecha de aprobación (AAAA-MM-DD):', today());
   if(dateStr===null)return;
-  t.status='approved';
-  t.approvedBy=currentUser.id;
-  t.approvedTs=Date.now();
-  t.approvedDate=dateStr||today();
-  saveLS();render();
+  requireSignature(
+    'Aprobar análisis',
+    'Aprobación: '+t.producto+' '+t.lote,
+    function(reason){
+      t.status='approved';
+      t._ts=Date.now();
+      t.approvedBy=currentUser.id;
+      t.approvedTs=Date.now();
+      t.approvedDate=dateStr||today();
+      stampIntegrity(t);
+      auditLog('APPROVE','TASK',id,{
+        field:'status',
+        oldVal:'reviewed',
+        newVal:'approved',
+        description:t.producto+' '+t.lote,
+        lote:t.lote,
+        approvedDate:t.approvedDate
+      },reason);
+      saveLS();render();
+    }
+  );
 }
 
 function markObserved(id){
@@ -4632,6 +5045,7 @@ function markObserved(id){
   t.observations.push({by:currentUser.id,ts:Date.now(),comment:comment.trim(),fromStatus:t.status});
   t.status='observed';
   t.observedBy=currentUser.id;
+  auditLog('OBSERVE','TASK',id,{field:'status',oldVal:'done',newVal:'observed',description:t.producto+' '+t.lote},comment||'');
   t.observedTs=Date.now();
   saveLS();render();
 }
@@ -4685,7 +5099,18 @@ function markProg(id){
   if(!t.startDatetime)t.startDatetime=new Date().toISOString().slice(0,16);
   saveLS();render();
 }
-function deleteTask(id){if(!confirm('¿Eliminar este análisis?'))return;tasks=tasks.filter(t=>t.id!==id);showModal=false;editingTask=null;saveLS();render();}
+function deleteTask(id){
+  const t=tasks.find(function(x){return x.id===id;});
+  if(!t)return;
+  if(t.status==='approved'||t.status==='reviewed'){
+    alert('No se puede anular un análisis ya revisado o aprobado.\nEsto viola el principio de integridad de datos (ALCOA+, GLP).');
+    return;
+  }
+  requireSignature('Anular análisis','Anular (borrado lógico): '+t.producto+' '+t.lote,function(reason){
+    softDeleteTask(id, reason);
+  });
+}
+
 function doChangePwd(){
   const old=document.getElementById('cp-old').value;
   const nw=document.getElementById('cp-new').value;
@@ -4901,9 +5326,12 @@ function saveTask(){
       {analyst:id, date:analystDates[id]||due, estimatedHours:estH}
     );
   });
-  if(editingTask){const t=tasks.find(x=>x.id===editingTask);if(t)Object.assign(t,{producto:prod,lote,created,assignments,due,priority,status,notes,estimatedHours:assignments.reduce(function(s,a){return s+(a.estimatedHours||0);},0)||estim||t.estimatedHours||0});}
+  if(editingTask){const t=tasks.find(x=>x.id===editingTask);if(t){saveTaskVersion(t);Object.assign(t,{producto:prod,lote,created,assignments,due,priority,status,notes,estimatedHours:assignments.reduce(function(s,a){return s+(a.estimatedHours||0);},0)||estim||t.estimatedHours||0});}}
   else tasks.push({id:nextId++,producto:prod,lote,created,assignments,due,priority,status,notes,estimatedHours:estim});
-  showModal=false;editingTask=null;saveLS();render();
+  const _eid2=editingTask;
+  showModal=false;editingTask=null;
+  auditLog(_eid2?'EDIT':'CREATE','TASK',_eid2||nextId-1,{description:(_eid2?'Edicion':'Nuevo analisis')+': '+prod+' '+lote},'');
+  saveLS();render();
 }
 
 // ── BOOT ──
@@ -5308,6 +5736,8 @@ async function _embedAndDownload(apiKey, binId) {
     console.error('embed error:', e);
     alert('Error al descargar: ' + e.message);
   }
+  document.addEventListener('click', function(){resetActivityTimer();}, true);
+  document.addEventListener('keydown', function(){resetActivityTimer();}, true);
 }
 </script>
 </body>
