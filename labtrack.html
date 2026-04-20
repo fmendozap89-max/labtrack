@@ -2,7 +2,11 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#1a4f8a">
 <title>LabTrack — Gestión de Laboratorio</title>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <style>
@@ -10,8 +14,8 @@
 :root{--bg:#f5f4f0;--bg2:#eceae4;--surface:#fff;--border:rgba(0,0,0,.10);--border2:rgba(0,0,0,.18);--text:#1a1916;--text2:#6b6860;--text3:#9c9a94;--blue:#1a4f8a;--blue-bg:#e8eff8;--blue-text:#1a4f8a;--green:#1e5c35;--green-bg:#e4f2ea;--green-text:#1e5c35;--amber:#7a4e0a;--amber-bg:#fdf0d8;--amber-text:#7a4e0a;--red:#8a2020;--red-bg:#fce8e8;--red-text:#8a2020;--orange:#8a3c10;--orange-bg:#fdeee4;--orange-text:#8a3c10;--radius:6px;--radius-lg:10px;--font:'IBM Plex Sans',sans-serif;--mono:'IBM Plex Mono',monospace}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
-.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}
-.login-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:36px 32px;width:380px;box-shadow:0 2px 16px rgba(0,0,0,.07)}
+.login-wrap{min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+.login-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:32px 28px;width:100%;max-width:380px;box-shadow:0 2px 16px rgba(0,0,0,.07);box-sizing:border-box}
 .login-logo{display:flex;align-items:center;gap:10px;margin-bottom:28px}
 .login-logo .icon{width:36px;height:36px;background:var(--blue);border-radius:8px;display:flex;align-items:center;justify-content:center}
 .login-logo .name{font-size:18px;font-weight:600;letter-spacing:-.02em}
@@ -149,6 +153,18 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 
   .pill.reviewed{background:#e4f2ea;color:#1e5c35}
  
+
+@media (max-width:600px){
+  .login-card{padding:28px 20px;}
+  .shell{flex-direction:column;}
+  .nav{width:100%!important;height:auto!important;flex-direction:row!important;overflow-x:auto!important;overflow-y:hidden!important;padding:0 4px!important;border-right:none!important;border-bottom:1px solid var(--border)!important;min-width:0!important;}
+  .nav .nav-item{flex-direction:column!important;gap:2px!important;padding:8px 10px!important;font-size:9px!important;min-width:52px!important;white-space:nowrap!important;}
+  .nav .nav-icon{font-size:16px!important;}
+  .main{overflow:auto!important;-webkit-overflow-scrolling:touch!important;}
+  .content{padding:12px!important;}
+  .tbl,.week-grid{overflow-x:auto!important;-webkit-overflow-scrolling:touch!important;}
+  input,select,textarea{font-size:16px!important;}
+}
 </style>
 </head>
 <body>
@@ -236,6 +252,7 @@ let scheduleRequests=[];
 let nextSchedReqId=1;
 let showSchedReqModal=false;
 let analystEstimHours={};
+let multiAssigns=[]; // [{_key,analyst,date,estH}] — permite mismo analista varias veces
 let showSchedModal=false;
 let schedModalAnalyst=null;
 let schedModalDate=null;
@@ -2677,59 +2694,10 @@ function renderLogin(){
   };
   const sorted=[...USERS].sort(function(a,b){return a.name.localeCompare(b.name,'es');});
   const logo='<div class="login-logo"><div class="icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="2" y="10" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="10" width="6" height="6" rx="1.5" fill="white"/></svg></div><span class="name">Lab<span>Track</span></span></div>';
-  const errHtml=loginError?'<div class="login-err">'+escH(loginError)+'</div>':'';
-
-  // Step 1: select user
-  if(loginStep===1||!selectedLoginUser){
-    const opts=sorted.map(function(u){
-      return '<option value="'+u.id+'">'+escH(u.name)+' — '+roleLabel(u.role)+'</option>';
-    }).join('');
-    return '<div class="login-wrap"><div class="login-card">'
-      +logo
-      +'<h2 style="font-size:15px;font-weight:500;margin-bottom:18px;color:var(--text)">Iniciar sesión</h2>'
-      +'<div class="frow" style="margin-bottom:12px;text-align:left">'
-      +'<label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2)">Usuario</label>'
-      +'<select id="login-user-select" onchange="loginSelectUser(this.value)"'
-      +' style="width:100%;padding:9px 12px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:14px;margin-top:4px">'
-      +'<option value="">Seleccionar usuario…</option>'
-      +opts
-      +'</select>'
-      +'</div>'
-      +errHtml
-      +'<button id="login-next-btn" class="btn pri"'
-      +' onclick="loginGoStep2()"'
-      +' style="width:100%;margin-top:4px;padding:10px;font-size:14px">Continuar</button>'
-      +'</div></div>';
-  }
-
-  // Step 2: password
-  const u=selectedLoginUser;
-  const badgeStyle=u.role==='supervisor'?'background:var(--blue-bg);color:var(--blue)'
-    :u.role==='reviewer'?'background:var(--green-bg);color:var(--green-text)'
-    :'background:var(--bg2);color:var(--text2)';
-  return '<div class="login-wrap"><div class="login-card">'
-    +logo
-    +'<div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;background:var(--bg2);border-radius:var(--radius-lg);padding:10px 14px">'
-    +'<div class="av '+u.av+'" style="width:36px;height:36px;font-size:14px;flex-shrink:0">'+escH(u.avInit)+'</div>'
-    +'<div style="text-align:left;flex:1">'
-    +'<div style="font-weight:600;font-size:14px">'+escH(u.name)+'</div>'
-    +'<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;'+badgeStyle+'">'+roleLabel(u.role)+'</span>'
-    +'</div>'
-    +'<button class="btn sm" onclick="loginStep=1;selectedLoginUser=null;loginError=\'\';render()" style="font-size:11px">Cambiar</button>'
-    +'</div>'
-    +'<div class="frow" style="margin-bottom:12px;text-align:left">'
-    +'<label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2)">Contraseña</label>'
-    +'<input type="password" id="login-pwd" placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"'
-    +' onkeydown="if(event.key===\'Enter\')doLogin()"'
-    +' style="width:100%;padding:9px 12px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:14px;margin-top:4px;box-sizing:border-box">'
-    +'</div>'
-    +errHtml
-    +'<button class="btn pri" onclick="doLogin()" style="width:100%;padding:10px;font-size:14px">Ingresar</button>'
-    +'</div></div>';
-}
-
+  const errHtml=loginError?'<div class="login-err">'+escH(loginError)+'</div>':'';  const opts=sorted.map(function(u){    const sel=selectedLoginUser&&selectedLoginUser.id===u.id?' selected':'';    return '<option value="'+u.id+'"'+sel+'>'+escH(u.name)+' — '+roleLabel(u.role)+'</option>';  }).join('');  return '<div class="login-wrap"><div class="login-card">'    +logo    +'<h2 style="font-size:15px;font-weight:500;margin-bottom:20px;color:var(--text)">Iniciar sesión</h2>'    +'<div class="frow" style="margin-bottom:14px;text-align:left">'    +'<label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2)">Usuario</label>'    +'<select id="login-user-select" onchange="loginSelectUser(this.value)"'    +' style="width:100%;padding:11px 12px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:15px;margin-top:5px;box-sizing:border-box;-webkit-appearance:none;appearance:none">'    +'<option value="">Seleccionar usuario…</option>'    +opts    +'</select>'    +'</div>'    +'<div class="frow" style="margin-bottom:14px;text-align:left">'    +'<label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2)">Contraseña</label>'    +'<input type="password" id="login-pwd" autocomplete="current-password" placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"'    +' onkeydown="if(event.key===\'Enter\')doLogin()"'    +' style="width:100%;padding:11px 12px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:15px;margin-top:5px;box-sizing:border-box">'    +'</div>'    +errHtml    +'<button class="btn pri" onclick="doLogin()" style="width:100%;margin-top:4px;padding:12px;font-size:15px;border-radius:var(--radius)">Ingresar</button>'    +'</div></div>';}
 function loginSelectUser(uid){
   selectedLoginUser = uid ? USERS.find(function(u){return u.id===uid;}) : null;
+  loginError='';
 }
 
 function loginGoStep2(){
@@ -2742,11 +2710,14 @@ function loginGoStep2(){
   loginStep=2;loginError='';render();
 }
 
-function attachLogin(){setTimeout(function(){var i=document.getElementById('login-pwd')||document.getElementById('login-user-select');if(i)i.focus();},60);}
+function attachLogin(){setTimeout(function(){var i=document.getElementById('login-user-select');if(i)i.focus();},60);}
 function selUser(id){selectedLoginUser=id;loginError='';render();}
 function backStep(){loginStep=1;loginError='';render();}
 function goStep2(){if(!selectedLoginUser){loginError='Seleccioná un usuario para continuar.';render();return;}loginStep=2;loginError='';render();}
 function doLogin(){
+  // Single-screen: always sync the select value before validating
+  var _sel=document.getElementById('login-user-select');
+  if(_sel&&_sel.value&&!selectedLoginUser) loginSelectUser(_sel.value);
   if(!selectedLoginUser){loginError='Seleccioná un usuario.';render();return;}
   const v=(document.getElementById('login-pwd')||{}).value||'';
   const uid=selectedLoginUser.id||selectedLoginUser;
@@ -3241,72 +3212,57 @@ function quickActivateDay(dateStr, analystId) {
 }
 
 function renderNotificaciones(){
-  const isSup = isSupRole();
-  const isRev = isReviewerRole();
-
-  // Schedule requests visible to supervisor/reviewer
-  const allReqs = [...scheduleRequests].sort(function(a,b){return b.ts-a.ts;});
-  const pending = allReqs.filter(function(r){return r.status==='pending';});
-  const history = allReqs.filter(function(r){return r.status!=='pending';});
-
-  const typeLabel = function(t){
+  var isSup=isSupRole();
+  var allReqs=[...scheduleRequests].sort(function(a,b){return b.ts-a.ts;});
+  var pending=allReqs.filter(function(r){return r.status==='pending';});
+  var history=allReqs.filter(function(r){return r.status!=='pending';});
+  var typeLabel=function(t){
     return t==='change'?'Cambio de horario':t==='overtime'?'Horas extra':t==='reduced'?'Horario reducido':t==='shift'?'Cambio de turno':t||'Solicitud';
   };
-  const statusBadge = function(s){
-    if(s==='approved') return '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--green-bg);color:var(--green-text)">✓ Aprobado</span>';
-    if(s==='rejected') return '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--red-bg);color:var(--red-text)">✗ Rechazado</span>';
-    return '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--amber-bg);color:var(--amber-text)">⏳ Pendiente</span>';
+  var statusPill=function(s){
+    if(s==='approved')return'<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--green-bg);color:var(--green-text)">&#10003; Aprobado</span>';
+    if(s==='rejected')return'<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--red-bg);color:var(--red-text)">&#10007; Rechazado</span>';
+    return'<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--amber-bg);color:var(--amber-text)">&#9203; Pendiente</span>';
   };
-
-  const reqRow = function(r, showActions){
-    const u = getU(r.analystId);
-    const reviewer = r.reviewedBy ? getU(r.reviewedBy) : null;
-    const p = r.proposed||{};
-    var detail = typeLabel(p.type);
-    if(p.startTime && p.endTime) detail += ': '+p.startTime+'–'+p.endTime;
-    if(p.extraHours) detail += ' (+'+p.extraHours+'h)';
-    if(p.breakMinutes !== undefined) detail += ', descanso '+p.breakMinutes+'min';
-
-    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:8px">'
-      +'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
-      +'<div class="av '+u.av+'" style="width:32px;height:32px;font-size:12px;flex-shrink:0">'+escH(u.avInit)+'</div>'
-      +'<div style="flex:1;min-width:0">'
-      +'<div style="font-weight:600;font-size:13px">'+escH(u.name)+'</div>'
-      +'<div style="font-size:11px;color:var(--text2)">'+escH(detail)+(r.dateStr?' · '+fmtDF(r.dateStr):'')+'</div>'
-      +(r.reason?'<div style="font-size:11px;color:var(--text3);margin-top:2px">Motivo: '+escH(r.reason)+'</div>':'')
-      +(reviewer?'<div style="font-size:10px;color:var(--text3);margin-top:2px">Procesado por '+escH(reviewer.name.split(' ')[0])+' · '+new Date(r.reviewedTs).toLocaleDateString('es')+'</div>':'')
+  var cols='display:grid;grid-template-columns:90px 1fr 1fr 80px 100px'+(isSup?' 118px':'');
+  var tblHeader='<div style="'+cols+';gap:8px;padding:7px 12px;background:var(--bg2);font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;border-bottom:1px solid var(--border)">'
+    +'<div>Fecha sol.</div><div>Analista</div><div>Detalle / Motivo</div><div>Fecha asig.</div><div>Estado</div>'+(isSup?'<div>Acciones</div>':'')
+    +'</div>';
+  var tblRow=function(r,showActions){
+    var u=getU(r.analystId);
+    var p=r.proposed||{};
+    var detail=typeLabel(p.type);
+    if(p.startTime&&p.endTime)detail+=': '+p.startTime+'\u2013'+p.endTime;
+    if(p.extraHours)detail+=' (+'+p.extraHours+'h)';
+    if(p.breakMinutes!==undefined)detail+=', desc. '+p.breakMinutes+'min';
+    var reviewer=r.reviewedBy?getU(r.reviewedBy):null;
+    var ts=new Date(r.ts);
+    return'<div style="'+cols+';gap:8px;padding:9px 12px;border-bottom:1px solid var(--border);align-items:center;font-size:12px">'
+      +'<div style="font-family:var(--mono);font-size:11px">'+ts.toLocaleDateString('es',{day:'2-digit',month:'2-digit'})+'<br><span style="color:var(--text3)">'+ts.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})+'</span></div>'
+      +'<div><div style="display:flex;align-items:center;gap:5px"><div class="av '+u.av+'" style="width:22px;height:22px;font-size:9px;flex-shrink:0">'+escH(u.avInit)+'</div>'
+      +'<span style="font-weight:600">'+escH(u.name)+'</span></div>'
+      +(r.reason?'<div style="font-size:10px;color:var(--text3);margin-top:2px">'+escH(r.reason.slice(0,60))+'</div>':'')
+      +(reviewer?'<div style="font-size:10px;color:var(--text3)">\u21b3 '+escH(reviewer.name.split(' ')[0])+' \u00b7 '+new Date(r.reviewedTs).toLocaleDateString('es')+'</div>':'')
       +'</div>'
-      +statusBadge(r.status)
-      +(showActions && isSup
-        ?'<div style="display:flex;gap:6px">'
-          +'<button class="btn sm suc" onclick="approveSchedule('+r.id+')">✓ Aprobar</button>'
-          +'<button class="btn sm dan" onclick="rejectSchedule('+r.id+')">✗ Rechazar</button>'
-          +'</div>'
+      +'<div style="color:var(--text2);font-size:11px">'+escH(detail)+'</div>'
+      +'<div style="font-family:var(--mono);font-size:11px;color:var(--text3)">'+(r.dateStr?fmtDF(r.dateStr):'&mdash;')+'</div>'
+      +'<div>'+statusPill(r.status)+'</div>'
+      +(isSup
+        ?'<div style="display:flex;gap:4px">'+(showActions?'<button class="btn sm suc" onclick="approveSchedule('+r.id+')">\u2713 Aprobar</button><button class="btn sm dan" onclick="rejectSchedule('+r.id+')">\u2717 Rechazar</button>':'')+'</div>'
         :'')
-      +'</div>'
-      +'<div style="font-size:10px;color:var(--text3);margin-top:6px">'+new Date(r.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'})+'</div>'
       +'</div>';
   };
-
-  var html = '';
-
-  // Pending section
-  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
-    +'<div class="sec" style="margin-bottom:0">Solicitudes pendientes ('+pending.length+')</div>'
-    +'</div>';
-
+  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
+    +'<div class="sec" style="margin-bottom:0">Solicitudes pendientes ('+pending.length+')</div></div>';
   if(pending.length===0){
-    html += '<div class="empty" style="margin-bottom:20px">No hay solicitudes pendientes ✓</div>';
-  } else {
-    html += pending.map(function(r){return reqRow(r,true);}).join('');
+    html+='<div class="empty" style="margin-bottom:20px">Sin solicitudes pendientes &#10003;</div>';
+  }else{
+    html+='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;overflow-x:auto;margin-bottom:16px">'+tblHeader+pending.map(function(r){return tblRow(r,true);}).join('')+'</div>';
   }
-
-  // History section
   if(history.length>0){
-    html += '<div class="sec" style="margin-top:16px;margin-bottom:10px">Historial ('+history.length+')</div>';
-    html += history.map(function(r){return reqRow(r,false);}).join('');
+    html+='<div class="sec" style="margin-top:4px;margin-bottom:10px">Historial ('+history.length+')</div>';
+    html+='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;overflow-x:auto">'+tblHeader+history.map(function(r){return tblRow(r,false);}).join('')+'</div>';
   }
-
   return html;
 }
 
@@ -3331,8 +3287,10 @@ function auditLog(action, entity, entityId, details, reason) {
   };
   if(!Array.isArray(auditTrail)) auditTrail=[];
   auditTrail.push(entry);
-  // Keep last 2000 entries to avoid storage bloat
-  if(auditTrail.length > 2000) auditTrail = auditTrail.slice(-2000);
+  // Purge entries older than 30 days; floor at 500 entries for safety
+  var _cutoff30 = Date.now() - 30*24*60*60*1000;
+  var _kept = auditTrail.filter(function(e){return e.ts>=_cutoff30;});
+  auditTrail = _kept.length>=500 ? _kept : auditTrail.slice(-Math.max(500,_kept.length));
   saveLS();
 }
 
@@ -4407,6 +4365,14 @@ function renderAdmin(){
     +'</div>'
     +'</div></div>'
 
+    +'<div style="margin-top:16px;background:var(--red-bg);border:1px solid var(--red);border-radius:var(--radius-lg);padding:14px">'
+    +'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">'
+    +'<div>'
+    +'<div style="font-weight:700;margin-bottom:2px;color:var(--red)">&#128465; Reinicio de datos operativos</div>'
+    +'<div style="font-size:12px;color:var(--text2)">Elimina an&#225;lisis, solicitudes de horario y actividades de gesti&#243;n. Conserva usuarios y horarios laborales.</div>'
+    +'</div>'
+    +'<button class="btn dan sm" onclick="doSystemReset()" style="white-space:nowrap">&#9888; Reiniciar datos</button>'
+    +'</div></div>'
     +'</div>';
   return html;
 }
@@ -4494,6 +4460,60 @@ function addUser(){
   document.getElementById('nu-name').value='';
   document.getElementById('nu-pwd').value='';
   setTimeout(()=>{const m=document.getElementById('new-user-msg');if(m)m.textContent='';render();},1500);
+}
+
+function doSystemReset(){
+  if(!isSupRole()){alert('Acceso restringido.');return;}
+  // Show custom confirmation modal first (avoid nested confirm() on mobile)
+  var confirmOverlay=document.createElement('div');
+  confirmOverlay.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.55);z-index:9998;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box';
+  confirmOverlay.innerHTML='<div style="background:var(--surface);border-radius:var(--radius-lg);padding:24px;max-width:420px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.35);box-sizing:border-box">'
+    +'<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">'
+    +'<div style="width:40px;height:40px;background:var(--red-bg);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0">&#9888;</div>'
+    +'<h3 style="margin:0;font-size:15px;color:var(--red)">Reinicio de datos operativos</h3></div>'
+    +'<p style="font-size:13px;margin:0 0 8px;font-weight:600">Se eliminarán PERMANENTEMENTE:</p>'
+    +'<ul style="font-size:12px;color:var(--text2);margin:0 0 12px;padding-left:18px;line-height:1.8">'
+    +'<li>Todos los análisis y lotes</li>'
+    +'<li>Solicitudes de cambio de horario</li>'
+    +'<li>Actividades de gestión</li>'
+    +'</ul>'
+    +'<p style="font-size:13px;margin:0 0 16px;font-weight:600;color:var(--green)">Se conservarán:</p>'
+    +'<ul style="font-size:12px;color:var(--text2);margin:0 0 18px;padding-left:18px;line-height:1.8">'
+    +'<li>Usuarios y contraseñas</li>'
+    +'<li>Horarios laborales configurados</li>'
+    +'</ul>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end">'
+    +'<button id="rst-cancel" style="padding:9px 18px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px">Cancelar</button>'
+    +'<button id="rst-confirm" style="padding:9px 18px;border:none;border-radius:var(--radius);background:var(--red);color:#fff;cursor:pointer;font-size:13px;font-weight:600">Confirmar → Firmar</button>'
+    +'</div></div>';
+  document.body.appendChild(confirmOverlay);
+  document.getElementById('rst-cancel').onclick=function(){confirmOverlay.remove();};
+  document.getElementById('rst-confirm').onclick=function(){
+    confirmOverlay.remove();
+    requireSignature('Reinicio de datos','Reinicio operativo del sistema',function(reason){
+      var _users=USERS.slice();
+      var _passwords=Object.assign({},passwords);
+      var _workdayConfig=JSON.parse(JSON.stringify(workdayConfig||{}));
+      var _analystSchedules=JSON.parse(JSON.stringify(analystSchedules||{}));
+      var _absenceTypesDef=JSON.parse(JSON.stringify(typeof absenceTypesDef!=='undefined'?absenceTypesDef:[]));
+      var _nextUid=nextUid;
+      tasks=[];nextId=1;
+      replanNotifs=[];nextNotifId=1;
+      scheduleRequests=[];nextSchedReqId=1;
+      mgmtTasks=[];nextMgmtId=1;
+      absences={};
+      USERS=_users;
+      passwords=_passwords;
+      workdayConfig=_workdayConfig;
+      analystSchedules=_analystSchedules;
+      if(typeof absenceTypesDef!=='undefined')absenceTypesDef=_absenceTypesDef;
+      nextUid=_nextUid;
+      rebuildDerived();
+      auditLog('DELETE','USER','SYSTEM',{description:'Reinicio operativo del sistema'},''+reason);
+      saveLS();render();
+      setTimeout(function(){alert('Reinicio completado. Usuarios y horarios conservados.');},200);
+    });
+  };
 }
 
 // ── TASK MODAL ──
@@ -4624,7 +4644,13 @@ function renderTaskModal(){
   var isEdit=editingTask!==null;
   var t=isEdit?tasks.find(function(x){return x.id===editingTask;}):
     {producto:'',lote:'',created:today(),assignments:[],due:'',priority:'Normal',status:'pending',notes:''};
-  if(!isEdit&&selectedAnalysts.length===0){selectedAnalysts=[];analystDates={};analystEstimHours={};}
+  if(!isEdit&&selectedAnalysts.length===0){selectedAnalysts=[];analystDates={};analystEstimHours={};multiAssigns=[];}
+  else if(isEdit){
+    selectedAnalysts=getAssignees(t);analystDates={};analystEstimHours={};
+    multiAssigns=(t.assignments||[]).map(function(a,i){return{_key:a.analyst+'_'+i+'_'+Date.now(),analyst:a.analyst,date:a.date||'',estH:a.estimatedHours||0};});
+    selectedAnalysts=[...new Set(multiAssigns.map(function(r){return r.analyst;}))];
+    (t.assignments||[]).forEach(function(a){analystDates[a.analyst]=a.date;analystEstimHours[a.analyst]=a.estimatedHours||0;});
+  }
   else if(isEdit){
     selectedAnalysts=getAssignees(t);analystDates={};analystEstimHours={};
     (t.assignments||[]).forEach(function(a){analystDates[a.analyst]=a.date;analystEstimHours[a.analyst]=a.estimatedHours||0;});
@@ -4695,37 +4721,85 @@ function renderDateAssigns(){
     sec.innerHTML='<div style="font-size:12px;color:var(--text3);padding:6px 0">Seleccion\u00e1 al menos un analista arriba</div>';
     return;
   }
+  // Sync: add missing row for each selected analyst
+  selectedAnalysts.forEach(function(id){
+    if(!multiAssigns.some(function(r){return r.analyst===id;})){
+      multiAssigns.push({_key:id+'_'+Date.now(),analyst:id,date:analystDates[id]||'',estH:analystEstimHours[id]||0});
+    }
+  });
+  // Remove rows for deselected analysts
+  multiAssigns=multiAssigns.filter(function(r){return selectedAnalysts.indexOf(r.analyst)>=0;});
   var editT=editingTask!==null?tasks.find(function(x){return x.id===editingTask;}):null;
-  sec.innerHTML=selectedAnalysts.map(function(id){
-    var u=getU(id);
-    var existAss=editT?(editT.assignments||[]).find(function(a){return a.analyst===id;}):null;
+  sec.innerHTML=multiAssigns.map(function(row,idx){
+    var u=getU(row.analyst);
+    var existAss=editT?(editT.assignments||[]).find(function(a){
+      return a.analyst===row.analyst&&(a.date===row.date||!row.date);
+    }):null;
     var tl=existAss&&existAss.timeLog?existAss.timeLog:[];
     var realH=tl.reduce(function(s,e){return s+(e.hours||0);},0)||(existAss&&existAss.realHours||0);
-    var estH=analystEstimHours[id]!==undefined?analystEstimHours[id]:(existAss&&existAss.estimatedHours||0);
+    var isFirst=!multiAssigns.slice(0,idx).some(function(r){return r.analyst===row.analyst;});
+    var rowsForAnalyst=multiAssigns.filter(function(r){return r.analyst===row.analyst;}).length;
     var tlRows=tl.map(function(e){
       return'<span style="font-size:10px;color:var(--text3);font-family:var(--mono)">'+e.date+': '+e.start+'\u2013'+e.end+(e.hours?' ('+e.hours.toFixed(1)+'h)':'')+'</span>';
     }).join(' \u00b7 ');
-    var html='<div style="background:var(--bg);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px">'
+    return'<div style="background:var(--bg);border-radius:var(--radius);padding:8px 10px;margin-bottom:5px;border-left:3px solid var(--border2)">'
       +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
-      +'<div class="av '+u.av+'">'+escH(u.avInit)+'</div>'
-      +'<span style="font-weight:600;flex:1">'+escH(u.name)+'</span>'
+      +(isFirst
+        ?'<div class="av '+u.av+'" style="flex-shrink:0">'+escH(u.avInit)+'</div>'
+          +'<span style="font-weight:600;flex:1;min-width:80px">'+escH(u.name)+'</span>'
+        :'<div style="width:32px;flex-shrink:0"></div>'
+          +'<span style="flex:1;min-width:80px;font-size:11px;color:var(--text3)">\u21b3 d\u00eda adicional</span>'
+      )
       +'<label style="font-size:11px;color:var(--text2);white-space:nowrap">Fecha:</label>'
-      +'<input type="date" value="'+(analystDates[id]||'')+'" style="font-size:12px;padding:4px 7px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);width:130px" onchange="analystDates[\''+id+'\']=this.value">'
-      +'<label style="font-size:11px;color:var(--text2);white-space:nowrap">Est.&nbsp;(h):</label>'
-      +'<input type="number" id="f-aest-'+id+'" value="'+(estH||'')+'" placeholder="0" min="0" max="24" step="0.25" style="font-size:12px;padding:4px 7px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);width:60px" onchange="analystEstimHours[\''+id+'\']=parseFloat(this.value)||0">'
-      +(realH>0?'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+(realH>estH&&estH>0?'var(--red)':'var(--green)')+'">Real: '+realH.toFixed(1)+'h</span>':'')
+      +'<input type="date" value="'+escH(row.date||'')+'"'
+      +' style="font-size:12px;padding:4px 7px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);width:130px"'
+      +' onchange="updateMultiAssign(\''+row._key+'\',\'date\',this.value)">'
+      +'<label style="font-size:11px;color:var(--text2);white-space:nowrap">Est.\u00a0(h):</label>'
+      +'<input type="number" value="'+(row.estH||'')+'"'
+      +' placeholder="0" min="0" max="24" step="0.25"'
+      +' style="font-size:12px;padding:4px 7px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);width:60px"'
+      +' onchange="updateMultiAssign(\''+row._key+'\',\'estH\',parseFloat(this.value)||0)">'
+      +(realH>0?'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+(realH>row.estH&&row.estH>0?'var(--red)':'var(--green)')+'">Real: '+realH.toFixed(1)+'h</span>':'')
+      +'<button onclick="addMultiAssignRow(\''+row.analyst+'\')" title="Agregar otro d\u00eda para este analista"'
+      +' style="padding:2px 8px;border:1px dashed var(--blue);border-radius:var(--radius);background:transparent;color:var(--blue);cursor:pointer;font-size:12px;white-space:nowrap">+\u00a0d\u00eda</button>'
+      +(rowsForAnalyst>1
+        ?'<button onclick="removeMultiAssignRow(\''+row._key+'\')"'
+          +' style="padding:2px 6px;border:1px solid var(--border2);border-radius:var(--radius);background:transparent;color:var(--red-text);cursor:pointer;font-size:11px">\u2715</button>'
+        :'')
       +'</div>'
       +(tlRows?'<div style="margin-top:5px;display:flex;flex-wrap:wrap;gap:4px">'+tlRows+'</div>':'')
       +'</div>';
-    return html;
   }).join('');
+}
+function updateMultiAssign(key,field,val){
+  var r=multiAssigns.find(function(x){return x._key===key;});
+  if(r){r[field]=val;}
+}
+function addMultiAssignRow(analystId){
+  multiAssigns.push({_key:analystId+'_'+Date.now(),analyst:analystId,date:'',estH:0});
+  renderDateAssigns();
+}
+function removeMultiAssignRow(key){
+  multiAssigns=multiAssigns.filter(function(r){return r._key!==key;});
+  renderDateAssigns();
 }
 
 function toggleAna(id){
-  const i=selectedAnalysts.indexOf(id);
-  if(i>=0){selectedAnalysts.splice(i,1);delete analystDates[id];}else selectedAnalysts.push(id);
-  const el=document.querySelector(`.ana-check[onclick="toggleAna('${id}')"]`);
-  if(el)el.classList.toggle('selected',selectedAnalysts.includes(id));
+  var i=selectedAnalysts.indexOf(id);
+  if(i>=0){
+    selectedAnalysts.splice(i,1);
+    delete analystDates[id];
+    multiAssigns=multiAssigns.filter(function(r){return r.analyst!==id;});
+  }else{
+    selectedAnalysts.push(id);
+    multiAssigns.push({_key:id+'_'+Date.now(),analyst:id,date:analystDates[id]||'',estH:analystEstimHours[id]||0});
+  }
+  document.querySelectorAll('.ana-check').forEach(function(el){
+    var oc=el.getAttribute('onclick')||'';
+    if(oc.indexOf("'"+id+"'")>=0||oc.indexOf('"'+id+'"')>=0){
+      el.classList.toggle('selected',selectedAnalysts.indexOf(id)>=0);
+    }
+  });
   renderDateAssigns();
 }
 
@@ -4844,7 +4918,31 @@ function handleFile(input){
 }
 function confirmImport(){
   try{
-    const newTasks=pastePreview.map(r=>{
+    var duplicates=[];
+    var toImport=[];
+    pastePreview.forEach(function(r){
+      var prod=(r.producto||'').trim();
+      var lote=(r.lote||'').trim();
+      if(!prod||!lote)return;
+      var exists=tasks.some(function(t){
+        return!t._deleted
+          &&t.producto.trim().toLowerCase()===prod.toLowerCase()
+          &&t.lote.trim().toLowerCase()===lote.toLowerCase();
+      });
+      if(exists)duplicates.push(prod+' / Lote: '+lote);
+      else toImport.push(r);
+    });
+    if(duplicates.length>0){
+      var msg='Los siguientes registros YA EXISTEN y no seran importados (mismo Producto y Lote):\n\n'
+        +duplicates.slice(0,10).join('\n')
+        +(duplicates.length>10?'\n... y '+(duplicates.length-10)+' mas':'');
+      if(toImport.length===0){
+        alert(msg+'\n\nNo hay registros nuevos para importar.');
+        pastePreview=[];showImportModal=false;render();return;
+      }
+      if(!confirm(msg+'\n\nImportar los '+toImport.length+' registro(s) restante(s)?'))return;
+    }
+    const newTasks=toImport.map(r=>{
       const prod=(r.producto||'').trim();
       const lote=(r.lote||'').trim();
       if(!prod||!lote)return null;
@@ -4869,6 +4967,7 @@ function confirmImport(){
       return{id:nextId++,producto:prod,lote,created:today(),assignments:asgn,due,priority,status:'pending',notes:''};
     }).filter(Boolean);
     tasks=tasks.concat(newTasks);
+    if(duplicates&&duplicates.length>0&&newTasks.length>0)alert('Importacion completada. '+newTasks.length+' registro(s) importados. '+duplicates.length+' duplicado(s) omitido(s).');
     pastePreview=[];
     showImportModal=false;
     saveLS();
@@ -4950,7 +5049,7 @@ function exportXLSX(){
 // ── GENERAL ACTIONS ──
 function setView(v){currentView=v;render();}
 function logout(){if(currentUser)auditLog('LOGOUT','USER',currentUser.id,{description:'Cierre de sesion'},'');currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';render();}
-function openNewTask(){editingTask=null;selectedAnalysts=[];analystDates={};showModal=true;render();}
+function openNewTask(){editingTask=null;selectedAnalysts=[];analystDates={};analystEstimHours={};multiAssigns=[];showModal=true;render();}
 function openEdit(id){if(!isSupRole())return;editingTask=id;showModal=true;render();}
 function closeModal(){showModal=false;editingTask=null;render();}
 function setMTab(t){modalTab=t;if(t!=='template')pastePreview=[];render();}
@@ -5088,12 +5187,18 @@ function rejectDone(id){
 }
 function markProg(id){
   const t=tasks.find(x=>x.id===id);if(!t)return;
-  const ma=(t.assignments||[]).find(a=>a.analyst===currentUser.id);
-  if(ma&&(currentUser.role==='analyst'||currentUser.role==='reviewer')){
-    const assignedDate=new Date(ma.date+'T12:00:00');
-    const todayDate=new Date(today()+'T12:00:00');
-    const diffDays=Math.ceil((assignedDate-todayDate)/(1000*60*60*24));
-    if(diffDays>1){alert('Solo podés iniciar esta actividad con hasta 24 horas de anticipación.');return;}
+  if(currentUser.role==='analyst'||currentUser.role==='reviewer'){
+    var todayDate=new Date(today()+'T12:00:00');
+    var myAssigns=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id;});
+    if(myAssigns.length>0){
+      var minDiff=Infinity;
+      myAssigns.forEach(function(ma){
+        var ad=new Date((ma.date||today())+'T12:00:00');
+        var diff=Math.abs(Math.round((ad-todayDate)/(1000*60*60*24)));
+        if(diff<minDiff)minDiff=diff;
+      });
+      if(minDiff>2){alert('Solo podés iniciar esta actividad dentro de los 2 días anteriores o posteriores a la fecha asignada.');return;}
+    }
   }
   t.status='progress';t.startedTs=Date.now();
   if(!t.startDatetime)t.startDatetime=new Date().toISOString().slice(0,16);
@@ -5313,19 +5418,25 @@ function saveTask(){
   const priority=document.getElementById('f-prio').value;
   const status=document.getElementById('f-status').value;
   const notes=document.getElementById('f-notes').value;
-  const assignments=selectedAnalysts.map(function(id){
-    // Preserve existing assignment data (realHours, timeLog, etc.)
-    const editT=editingTask!==null?tasks.find(function(x){return x.id===editingTask;}):null;
-    const existing=editT?(editT.assignments||[]).find(function(a){return a.analyst===id;}):null;
-    // Read estimated hours from the input or fall back to analystEstimHours state
-    const inputEl=document.getElementById('f-aest-'+id);
-    const estH=inputEl?parseFloat(inputEl.value)||0:(analystEstimHours[id]||0);
-    return Object.assign(
-      {}, 
-      existing||{},
-      {analyst:id, date:analystDates[id]||due, estimatedHours:estH}
-    );
-  });
+  // Build assignments from multiAssigns — same analyst can appear N times (multi-day)
+  var _editForSave=editingTask!==null?tasks.find(function(x){return x.id===editingTask;}):null;
+  var _usedKeys={};
+  const assignments=multiAssigns.length>0
+    ?multiAssigns.map(function(row){
+        var d=row.date||due;
+        var existing=_editForSave?((_editForSave.assignments||[]).find(function(a){
+          return a.analyst===row.analyst&&a.date===d&&!_usedKeys[row.analyst+'|'+a.date];
+        })):null;
+        if(existing)_usedKeys[row.analyst+'|'+existing.date]=true;
+        return Object.assign({},existing||{},{analyst:row.analyst,date:d,estimatedHours:row.estH||0});
+      })
+    :selectedAnalysts.map(function(id){
+        var editT=_editForSave;
+        var existing=editT?(editT.assignments||[]).find(function(a){return a.analyst===id;}):null;
+        var inputEl=document.getElementById('f-aest-'+id);
+        var estH=inputEl?parseFloat(inputEl.value)||0:(analystEstimHours[id]||0);
+        return Object.assign({},existing||{},{analyst:id,date:analystDates[id]||due,estimatedHours:estH});
+      });
   if(editingTask){const t=tasks.find(x=>x.id===editingTask);if(t){saveTaskVersion(t);Object.assign(t,{producto:prod,lote,created,assignments,due,priority,status,notes,estimatedHours:assignments.reduce(function(s,a){return s+(a.estimatedHours||0);},0)||estim||t.estimatedHours||0});}}
   else tasks.push({id:nextId++,producto:prod,lote,created,assignments,due,priority,status,notes,estimatedHours:estim});
   const _eid2=editingTask;
