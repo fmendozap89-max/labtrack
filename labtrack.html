@@ -3679,12 +3679,17 @@ function renderTasks(){
   }
   return'<div class="filter-row" style="gap:8px;flex-wrap:wrap">'
     +searchBarHtml()
-    +(sup?'<select onchange="setFA(this.value)"><option value="">Todos los analistas</option>'+aOpts+'</select>':'')
-    +'<select onchange="setFS(this.value)"><option value="">Todos los estados</option>'
-    +'<option value="pending">Pendiente</option><option value="progress">En curso</option>'
-    +'<option value="pending-confirm">Por confirmar</option><option value="done">Completado</option>'
-    +'<option value="late">Vencido</option><option value="reviewed">Revisado</option>'
-    +'<option value="approved">Aprobado</option><option value="observed">Observado</option>'
+    +(sup?'<select onchange="setFA(this.value)"><option value=""'+(filterAnalyst===''?' selected':'')+'>Todos los analistas</option>'+aOpts+'</select>':'')
+    +'<select onchange="setFS(this.value)">'
+    +'<option value=""'+(filterStatus===''?' selected':'')+'>Todos los estados</option>'
+    +'<option value="pending"'+(filterStatus==='pending'?' selected':'')+'>Pendiente</option>'
+    +'<option value="progress"'+(filterStatus==='progress'?' selected':'')+'>En curso</option>'
+    +'<option value="pending-confirm"'+(filterStatus==='pending-confirm'?' selected':'')+'>Por confirmar</option>'
+    +'<option value="done"'+(filterStatus==='done'?' selected':'')+'>Completado</option>'
+    +'<option value="late"'+(filterStatus==='late'?' selected':'')+'>Vencido</option>'
+    +'<option value="reviewed"'+(filterStatus==='reviewed'?' selected':'')+'>Revisado</option>'
+    +'<option value="approved"'+(filterStatus==='approved'?' selected':'')+'>Aprobado</option>'
+    +'<option value="observed"'+(filterStatus==='observed'?' selected':'')+'>Observado</option>'
     +'</select>'
     +viewToggle
     +'<span class="count-lbl">'+f.length+' lote'+(f.length!==1?'s':'')+(filterSearch?' — «'+escH(filterSearch)+'»':'')+'</span>'
