@@ -454,6 +454,13 @@ function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').rep
 // ABS_TYPES now reads from editable absenceTypesDef
 function getABSTypes(){return absenceTypesDef;}
 function getAnalystAbsences(analystId){return absences[analystId]||[];}
+function getAssignHours(task, analystId, dateStr){
+  var assigns=(task.assignments||[]).filter(function(a){
+    return a.analyst===analystId&&(!dateStr||a.date===dateStr);
+  });
+  return assigns.reduce(function(s,a){return s+(a.estimatedHours||0);},0);
+}
+
 // ── WORKDAY HELPERS ──
 // isWorkday: is this date a working day for ANY analyst?
 function isWorkday(dateStr){
@@ -744,18 +751,27 @@ function saveSchedModal(){
   }
 }
 function renderSchedulesTab(){
-  const isSup=currentUser.role==='supervisor';
-  const rows=isSup
-    ?USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer';}).sort(function(a,b){return a.name.localeCompare(b.name,'es');})
-    :[USERS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
-  const pendTotal=scheduleRequests.filter(r=>r.status==='pending').length;
-
-  const viewToggle=`<div style="display:flex;gap:4px;background:var(--bg2);border-radius:var(--radius);padding:3px;width:fit-content;margin-bottom:14px">
-    <button class="btn sm" onclick="schedView='week';render()" style="${schedView==='week'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Semana</button>
-    <button class="btn sm" onclick="schedView='month';render()" style="${schedView==='month'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Mes</button>
-  </div>`;
-
-  var _sv=schedView||'week';return viewToggle+(_sv==='week'?renderSchedulesWeek(isSup,rows,pendTotal):renderSchedulesMonth(isSup,rows));
+  try{
+    const isSup=currentUser.role==='supervisor';
+    const rows=isSup
+      ?USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer';}).sort(function(a,b){return a.name.localeCompare(b.name,'es');})
+      :[USERS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
+    if(!rows||rows.length===0)return'<div class="empty">No hay analistas configurados.</div>';
+    const pendTotal=scheduleRequests.filter(r=>r.status==='pending').length;
+    var _wA=(!schedView||schedView==='week');
+    var _mA=(schedView==='month');
+    var viewToggle='<div style="display:flex;gap:4px;background:var(--bg2);border-radius:var(--radius);padding:3px;width:fit-content;margin-bottom:14px">'
+      +'<button class="btn sm" onclick="schedView=\'week\';render()" style="'+(_wA?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">'+'Semana'+'</button>'
+      +'<button class="btn sm" onclick="schedView=\'month\';render()" style="'+(_mA?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">'+'Mes'+'</button>'
+      +'</div>';
+    var _sv=schedView||'week';
+    return viewToggle+(_sv==='week'?renderSchedulesWeek(isSup,rows,pendTotal):renderSchedulesMonth(isSup,rows));
+  }catch(e){
+    console.error('renderSchedulesTab error:',e);
+    return'<div style="background:var(--red-bg);border:1px solid var(--red);border-radius:var(--radius);padding:14px;color:var(--red-text);font-size:13px">'
+      +'<b>Error al cargar Horarios:</b><br><code style="font-size:11px">'+escH(e&&e.message||String(e))+'</code>'
+      +'</div>';
+  }
 }
 
 function renderSchedulesWeek(isSup,rows,pendTotal){
