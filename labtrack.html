@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#1a4f8a">
-<title>LabTrack — Gestión de Laboratorio</title>
+<title>LabTrack — Gestión de Laboratorio v2</title>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
@@ -781,6 +781,12 @@ function renderSchedulesWeek(isSup,rows,pendTotal){
   // Pre-compute mgmt occurrences for the week (perf)
   const _dayMgmtCache={};
   wd.forEach(d=>{_dayMgmtCache[d]=mgmtTasks.flatMap(mt=>expandMgmt(mt,d,d));});
+  if(typeof getAssignHours==='undefined'){
+    getAssignHours=function(task,analystId,dateStr){
+      var assigns=(task.assignments||[]).filter(function(a){return a.analyst===analystId&&(!dateStr||a.date===dateStr);});
+      return assigns.reduce(function(s,a){return s+(a.estimatedHours||0);},0);
+    };
+  }
   function buildDayInfo(analystId,d){
     const def=getAnalystScheduleDefault(analystId);
     const ov=analystSchedules[analystId]?.overrides?.[d];
