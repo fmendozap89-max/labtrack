@@ -75,10 +75,10 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 .topbar{padding:11px 18px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0}
 .topbar-title{font-size:15px;font-weight:600;flex:1;letter-spacing:-.01em}
 .content{flex:1;overflow-y:auto;padding:18px}
-.stats-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:18px}
-.scard{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px}
+.stats-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:18px}@media(max-width:480px){.stats-row{grid-template-columns:repeat(2,1fr);gap:8px}}@media(min-width:481px) and (max-width:700px){.stats-row{grid-template-columns:repeat(4,1fr);gap:8px}}
+.scard{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px;-webkit-tap-highlight-color:transparent;user-select:none}
 .scard .sl{font-size:11px;color:var(--text3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em;font-weight:500}
-.scard .sv{font-size:26px;font-weight:600;font-family:var(--mono)}
+.scard .sv{font-size:clamp(18px,4vw,26px);font-weight:600;font-family:var(--mono)}
 .sv.ok{color:var(--green)}.sv.w{color:var(--amber)}.sv.d{color:var(--red)}
 .sec{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
 .tbl{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-bottom:16px}
@@ -91,7 +91,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 .pill{font-size:10px;padding:2px 8px;border-radius:20px;font-weight:600;display:inline-block;white-space:nowrap}
 .pill.pend{background:var(--amber-bg);color:var(--amber-text)}
 .pill.prog{background:var(--blue-bg);color:var(--blue-text)}
-.pill.done{background:var(--green-bg);color:var(--green-text)}
+.pill.done{background:var(--green-bg);color:var(--green-text)}.pill.scheduled{background:var(--blue-bg);color:var(--blue-text)}
 .pill.late{background:var(--red-bg);color:var(--red-text)}
 .pill.nor{background:var(--bg2);color:var(--text2)}
 .pill.hi{background:var(--orange-bg);color:var(--orange-text)}
@@ -440,7 +440,7 @@ const INIT_TASKS=[
 
 // ── HELPERS ──
 function getU(id){return uMap[id]||{name:id,av:'av1',avInit:'?',chip:'c1'};}
-function statusLabel(s){return{pending:'Pendiente',progress:'En curso',done:'Completado',late:'Vencido','pending-confirm':'Por confirmar',reviewed:'Revisado',approved:'Aprobado',observed:'Observado'}[s]||s;}
+function statusLabel(s){return{pending:'Pendiente',scheduled:'Programado',progress:'En curso',done:'Completado p/ revisar',late:'Vencido','pending-confirm':'Completado p/ revisar',reviewed:'Revisado p/ aprobar',approved:'Aprobado',observed:'Observado'}[s]||s;}
 function prioClass(p){return{Normal:'nor',Alta:'hi',Urgente:'urg'}[p]||'nor';}
 function getAssignees(t){return[...new Set((t.assignments||[]).map(a=>a.analyst))];}
 function isMyTask(t){
@@ -2592,7 +2592,7 @@ function getTableData(tableId){
     if(filterStatus)f=f.filter(t=>t.status===filterStatus);
     taskList=f;
   } else if(tableId==='tbl-dash'){
-    taskList=dashFilter?tasks.filter(t=>t.status===dashFilter):[...tasks].reverse().slice(0,20);
+    taskList=(dashFilter&&dashFilter!=='all')?tasks.filter(t=>t.status===dashFilter):[...tasks].reverse();
   } else if(tableId==='tbl-late'){
     taskList=tasks.filter(t=>t.status==='late');
   } else if(tableId==='tbl-pend'){
@@ -3708,12 +3708,11 @@ function renderDashboard(){
     const done=tasks.filter(t=>t.status==='done').length;
     const pend=tasks.filter(t=>t.status==='pending').length;
     const toConfirm=tasks.filter(t=>t.status==='pending-confirm').length;
-    let filtered=(dashFilter?tasks.filter(t=>t.status===dashFilter):[...tasks].reverse().slice(0,20)).filter(t=>!filterSearch||t.producto.toLowerCase().includes(filterSearch.toLowerCase())||t.lote.toLowerCase().includes(filterSearch.toLowerCase()));
+    let filtered=((dashFilter&&dashFilter!=='all')?tasks.filter(t=>t.status===dashFilter):[...tasks].reverse()).filter(t=>!filterSearch||t.producto.toLowerCase().includes(filterSearch.toLowerCase())||t.lote.toLowerCase().includes(filterSearch.toLowerCase()));
     const filterLabel={'':`Todos (${tasks.length})`,'pending':`Pendientes (${pend})`,'progress':`En análisis (${prog})`,'late':`Vencidos (${late})`,'done':`Completados (${done})`};
     return`
       <div class="stats-row">
-        <div class="scard" onclick="dashFilter=dashFilter===''?'':'';\`render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter===''?';box-shadow:0 0 0 2px var(--blue)':''}"><div class="sl">Lotes totales</div><div class="sv">${tasks.length}</div></div>
-        <div class="scard" onclick="dashFilter=dashFilter==='progress'?'':'progress';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter==='progress'?';box-shadow:0 0 0 2px var(--amber)':''}"><div class="sl">En análisis</div><div class="sv w">${prog}</div></div>
+        <div class="scard" onclick="dashFilter='all';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter==='all'?';box-shadow:0 0 0 2px var(--blue)':''}"><div class="sl">Lotes totales</div><div class="sv">${tasks.length}</div></div><div class="scard" onclick="dashFilter=dashFilter==='progress'?'':'progress';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter==='progress'?';box-shadow:0 0 0 2px var(--amber)':''}"><div class="sl">En análisis</div><div class="sv w">${prog}</div></div>
         <div class="scard" onclick="dashFilter=dashFilter==='late'?'':'late';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter==='late'?';box-shadow:0 0 0 2px var(--red)':''}"><div class="sl">Vencidos</div><div class="sv d">${late}</div></div>
         <div class="scard" onclick="dashFilter=dashFilter==='done'?'':'done';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter==='done'?';box-shadow:0 0 0 2px var(--green)':''}"><div class="sl">Completados</div><div class="sv ok">${done}</div></div>
       </div>
@@ -3995,7 +3994,7 @@ function renderTasks(){
     +'<button class="btn sm" onclick="tasksView=\'analista\';render()" style="'+(tasksView==='analista'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">Por analista</button>'
     +'</div>':'';
   const cols='grid-template-columns:1.8fr 1.1fr 1.1fr .65fr .65fr .65fr .6fr .7fr .35fr';
-  const thead='<div class="thead" style="'+cols+'"><div>Producto / Lote</div><div>Analistas</div><div>Vencimiento</div><div>Estado</div><div>Prioridad</div><div>H.Est.</div><div>H.Real</div><div></div><div></div></div>';
+  const thead='<div class="thead" style="'+cols+'"><div>Producto / Lote</div><div>Analistas</div><div>Aprob. límite</div><div>Estado</div><div>Prioridad</div><div>H.Est.</div><div>H.Real</div><div></div><div></div></div>';
   let rows='';
   if(!sup){
     rows=f.length===0?'<div class="empty">Sin análisis asignados</div>':f.map(function(t){return tRowAna(t);}).join('');
@@ -4016,6 +4015,7 @@ function renderTasks(){
     +'<select onchange="setFS(this.value)">'
     +'<option value=""'+(filterStatus===''?' selected':'')+'>Todos los estados</option>'
     +'<option value="pending"'+(filterStatus==='pending'?' selected':'')+'>Pendiente</option>'
+    +'<option value="scheduled"'+(filterStatus==='scheduled'?' selected':'')+'>Programado</option>'
     +'<option value="progress"'+(filterStatus==='progress'?' selected':'')+'>En curso</option>'
     +'<option value="pending-confirm"'+(filterStatus==='pending-confirm'?' selected':'')+'>Por confirmar</option>'
     +'<option value="done"'+(filterStatus==='done'?' selected':'')+'>Completado</option>'
@@ -4670,7 +4670,7 @@ function renderTaskModal(){
     +'<div class="frow"><label>Producto</label><input type="text" id="f-prod" value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg"></div>'
     +'<div class="frow"><label>N° de Lote</label><input type="text" id="f-lote" value="'+escH(t.lote||'')+'" placeholder="Ej: L-2024-001"></div>'
     +'<div class="frow"><label>Fecha de creación</label><input type="date" id="f-created" value="'+(t.created||today())+'"></div>'
-    +'<div class="frow"><label>Fecha límite de entrega</label><input type="date" id="f-due" value="'+(t.due||'')+'"></div>'
+    +'<div class="frow"><label>Fecha límite de aprobación</label><input type="date" id="f-due" value="'+(t.due||'')+'"></div>'
     +'<div class="frow"><label>Prioridad</label><select id="f-prio">'
     +'<option'+(t.priority==='Normal'?' selected':'')+'>Normal</option>'
     +'<option'+(t.priority==='Alta'?' selected':'')+'>Alta</option>'
@@ -4678,9 +4678,11 @@ function renderTaskModal(){
     +'</select></div>'
     +'<div class="frow"><label>Estado</label><select id="f-status">'
     +'<option value="pending"'+(t.status==='pending'?' selected':'')+'>Pendiente</option>'
+    +'<option value="scheduled"'+(t.status==='scheduled'?' selected':'')+'>Programado</option>'
     +'<option value="progress"'+(t.status==='progress'?' selected':'')+'>En curso</option>'
-    +'<option value="done"'+(t.status==='done'?' selected':'')+'>Completado</option>'
-    +'<option value="late"'+(t.status==='late'?' selected':'')+'>Vencido</option>'
+    +'<option value="pending-confirm"'+(t.status==='pending-confirm'?' selected':'')+'>Completado p/ revisar</option>'
+    +'<option value="reviewed"'+(t.status==='reviewed'?' selected':'')+'>Revisado p/ aprobar</option>'
+    +'<option value="approved"'+(t.status==='approved'?' selected':'')+'>Aprobado</option>'
     +'</select></div>'
     +'<div class="frow form-full"><label>Analistas asignados</label>'
     +'<div class="analysts-check">'+analChecks+'</div>'
@@ -5116,11 +5118,15 @@ function markApproved(id){
     'Aprobar análisis',
     'Aprobación: '+t.producto+' '+t.lote,
     function(reason){
+      var _aDate=dateStr||today();
+      if(t.due&&_aDate>t.due){
+        if(!confirm('⚠️ La fecha de aprobación ('+fmtDF(_aDate)+') es POSTERIOR a la fecha límite ('+fmtDF(t.due)+').\n\n¿Confirmar aprobación fuera de plazo?'))return;
+      }
       t.status='approved';
       t._ts=Date.now();
       t.approvedBy=currentUser.id;
       t.approvedTs=Date.now();
-      t.approvedDate=dateStr||today();
+      t.approvedDate=_aDate;
       stampIntegrity(t);
       auditLog('APPROVE','TASK',id,{
         field:'status',
@@ -5128,7 +5134,7 @@ function markApproved(id){
         newVal:'approved',
         description:t.producto+' '+t.lote,
         lote:t.lote,
-        approvedDate:t.approvedDate
+        approvedDate:t.approvedDate,lateApproval:t.due&&t.approvedDate>t.due
       },reason);
       saveLS();render();
     }
@@ -5207,12 +5213,17 @@ function markProg(id){
 function deleteTask(id){
   const t=tasks.find(function(x){return x.id===id;});
   if(!t)return;
-  if(t.status==='approved'||t.status==='reviewed'){
-    alert('No se puede anular un análisis ya revisado o aprobado.\nEsto viola el principio de integridad de datos (ALCOA+, GLP).');
-    return;
-  }
-  requireSignature('Anular análisis','Anular (borrado lógico): '+t.producto+' '+t.lote,function(reason){
-    softDeleteTask(id, reason);
+  if(!isSupRole()){alert('Solo el supervisor puede eliminar análisis.');return;}
+  if(t.status==='approved'){alert('No se puede eliminar un análisis aprobado (ALCOA+).');return;}
+  requireSignature('Eliminar análisis','Eliminar: '+t.producto+' | Lote: '+t.lote,function(reason){
+    auditLog('DELETE','TASK',id,{
+      description:'Eliminación: '+t.producto+' | Lote: '+t.lote
+        +' | Estado: '+statusLabel(t.status)+' | Vto: '+fmtDF(t.due),
+      producto:t.producto,lote:t.lote,status:t.status
+    },reason);
+    tasks=tasks.filter(function(x){return x.id!==id;});
+    showModal=false;editingTask=null;
+    saveLS();render();
   });
 }
 
@@ -5437,8 +5448,27 @@ function saveTask(){
         var estH=inputEl?parseFloat(inputEl.value)||0:(analystEstimHours[id]||0);
         return Object.assign({},existing||{},{analyst:id,date:analystDates[id]||due,estimatedHours:estH});
       });
-  if(editingTask){const t=tasks.find(x=>x.id===editingTask);if(t){saveTaskVersion(t);Object.assign(t,{producto:prod,lote,created,assignments,due,priority,status,notes,estimatedHours:assignments.reduce(function(s,a){return s+(a.estimatedHours||0);},0)||estim||t.estimatedHours||0});}}
-  else tasks.push({id:nextId++,producto:prod,lote,created,assignments,due,priority,status,notes,estimatedHours:estim});
+  // Auto-derive status; analyst is optional
+  var _autoStatus=status;
+  if(!editingTask){
+    _autoStatus=assignments.length===0?'pending':'scheduled';
+  } else {
+    var _et2=tasks.find(function(x){return x.id===editingTask;});
+    if(_et2&&_et2.status==='pending'&&assignments.length>0)_autoStatus='scheduled';
+  }
+  // Warn if any assignment date is >= due (no time left for review + approval)
+  if(assignments.length>0&&due){
+    var _lateA=assignments.filter(function(a){return a.date&&a.date>=due;});
+    if(_lateA.length>0){
+      var _ln=_lateA.map(function(a){var u=getU(a.analyst);return(u?u.name.split(' ')[0]:'?')+': '+a.date;}).join(', ');
+      alert('⚠️ AVISO: La fecha límite es el objetivo de APROBACIÓN.\n'
+        +'Las siguientes fechas de análisis coinciden o superan esa fecha, sin dejar tiempo para revisión y aprobación:\n'
+        +_ln+'\n\nVencimiento (aprobación): '+fmtDF(due)+'\nRevisá la planificación.');
+    }
+  }
+  var _estH=assignments.reduce(function(s,a){return s+(a.estimatedHours||0);},0)||0;
+  if(editingTask){const t=tasks.find(x=>x.id===editingTask);if(t){saveTaskVersion(t);Object.assign(t,{producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes,estimatedHours:_estH||t.estimatedHours||0});}}
+  else tasks.push({id:nextId++,producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes,estimatedHours:_estH});
   const _eid2=editingTask;
   showModal=false;editingTask=null;
   auditLog(_eid2?'EDIT':'CREATE','TASK',_eid2||nextId-1,{description:(_eid2?'Edicion':'Nuevo analisis')+': '+prod+' '+lote},'');
