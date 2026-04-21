@@ -534,7 +534,7 @@ function setAnalystDayOverride(analystId,dateStr,sched){
   saveLS();render();
 }
 function removeAnalystDayOverride(analystId,dateStr){
-  if(analystSchedules[analystId]&&analystSchedules[analystId].overrides)
+  ifanalystSchedules[analystId]?.overrides
     delete analystSchedules[analystId].overrides[dateStr];
   saveLS();render();
 }
@@ -745,7 +745,9 @@ function saveSchedModal(){
 }
 function renderSchedulesTab(){
   const isSup=currentUser.role==='supervisor';
-  const rows=isSup?ANALYSTS:[ANALYSTS.find(a=>a.id===currentUser.id)].filter(Boolean);
+  const rows=isSup
+    ?USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer';}).sort(function(a,b){return a.name.localeCompare(b.name,'es');})
+    :[USERS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
   const pendTotal=scheduleRequests.filter(r=>r.status==='pending').length;
 
   const viewToggle=`<div style="display:flex;gap:4px;background:var(--bg2);border-radius:var(--radius);padding:3px;width:fit-content;margin-bottom:14px">
@@ -753,7 +755,7 @@ function renderSchedulesTab(){
     <button class="btn sm" onclick="schedView='month';render()" style="${schedView==='month'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Mes</button>
   </div>`;
 
-  return viewToggle+(schedView==='week'?renderSchedulesWeek(isSup,rows,pendTotal):renderSchedulesMonth(isSup,rows));
+  var _sv=schedView||'week';return viewToggle+(_sv==='week'?renderSchedulesWeek(isSup,rows,pendTotal):renderSchedulesMonth(isSup,rows));
 }
 
 function renderSchedulesWeek(isSup,rows,pendTotal){
@@ -774,7 +776,7 @@ function renderSchedulesWeek(isSup,rows,pendTotal){
     const pendReq=scheduleRequests.find(r=>r.analystId===analystId&&r.dateStr===d&&r.status==='pending');
     const myTasks=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===analystId&&x.date===d));
     const mgmtOccs=(_dayMgmtCache[d]||[]).filter(o=>(o.analysts||[]).includes(analystId));
-    const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,currentUser.id,d||dateStr||''),0)+mgmtOccs.reduce((a,o)=>a+(o.estimatedHours||0),0);
+    const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,analystId,d),0)+mgmtOccs.reduce((a,o)=>a+(o.estimatedHours||0),0);
     const extraH=Math.max(0,workH-h);
     return{s,h,hasOv,ov,absent,isWork,pendReq,myTasks,mgmtOccs,workH,extraH};
   }
@@ -800,7 +802,7 @@ function renderSchedulesWeek(isSup,rows,pendTotal){
       const isToday=d===todayStr;
       const isWeekend=dt2.getDay()===0||dt2.getDay()===6;
       const dayN=['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][dt2.getDay()];
-      let cellBg=absent?absTyp.color+'55':hasOv?schedTyp?.color+'88'||'#e8eff8':'var(--surface)';
+      let cellBg=absent?absTyp.color+'55':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'88':'#e8eff8')||'#e8eff8':'var(--surface)';
       if(!absent&&!hasOv&&isToday)cellBg='var(--blue-bg)';
       if(!absent&&!hasOv&&!isWork)cellBg='var(--bg2)';
       const clickFn=isSup?`openDaySchedule('${a.id}','${d}')`:currentUser.id===a.id?`requestScheduleChange('${a.id}','${d}')`:null;
@@ -940,7 +942,7 @@ function renderSchedulesMonth(isSup,rows){
             const pendReq=scheduleRequests.find(r=>r.analystId===analyst.id&&r.dateStr===d&&r.status==='pending');
             const myTasks=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===analyst.id&&x.date===d));
             const mgmtOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,d,d)).filter(o=>(o.analysts||[]).includes(analyst.id));
-            const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,currentUser.id,d||dateStr||''),0)+mgmtOccs.reduce((a,o)=>a+(o.estimatedHours||0),0);
+            const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,analyst.id,d),0)+mgmtOccs.reduce((a,o)=>a+(o.estimatedHours||0),0);
             const approvedOT=scheduleRequests.find(r=>r.analystId===analyst.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime');
             const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
             const absTyp=absent?getABSTypes()[absent.type]||{color:'#fdeee4',text:'#8a3c10',label:'Aus.'}:null;
@@ -948,7 +950,7 @@ function renderSchedulesMonth(isSup,rows){
             const isToday=d===todayStr;
             const dt2=new Date(d+'T12:00:00');
             const isWeekend=dt2.getDay()===0||dt2.getDay()===6;
-            let bg=absent?absTyp.color+'55':hasOv?schedTyp?.color+'77'||'#e8eff8':isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
+            let bg=absent?absTyp.color+'55':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'77':'#e8eff8')||'#e8eff8':isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
             const clickFn=isSup?`openDaySchedule('${analyst.id}','${d}')`:currentUser.id===analyst.id?`requestScheduleChange('${analyst.id}','${d}')`:null;
             return`<div style="border-right:1px solid var(--border);min-height:80px;padding:5px 6px;background:${bg};cursor:${clickFn?'pointer':'default'}" onclick="${clickFn||''}">
               <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px">
@@ -1861,7 +1863,7 @@ function renderCronogramaWeek(a, def){
     const isToday=d===todayStr;
     const isWE=dt2.getDay()===0||dt2.getDay()===6;
     const dayN=['Dom','Lun','Mar','M\u00edd','Jue','Vie','S\u00e1b'][dt2.getDay()];
-    const bg=absent?absTyp.color+'66':hasOv?(schedTyp?.color+'88'||'#e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
+    const bg=absent?absTyp.color+'66':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'88':'##e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
 
     grid+='<div style="border-radius:var(--radius-lg);border:'+(isToday?'2px solid var(--blue)':'1px solid var(--border)')+';background:'+bg+';overflow:hidden">';
     // Day header
@@ -1997,7 +1999,7 @@ function renderCronogramaMonth(a, def){
       const dt2=new Date(dateStr+'T12:00:00');
       const isToday=dateStr===todayStr;
       const isWE=dt2.getDay()===0||dt2.getDay()===6;
-      const bg=absent?absTyp.color+'55':hasOv?(schedTyp?.color+'77'||'#e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
+      const bg=absent?absTyp.color+'55':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'77':'##e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
 
       grid+='<div style="border-right:1px solid var(--border);min-height:100px;padding:4px;background:'+bg+';cursor:pointer" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+dateStr+'\')">';
       grid+='<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px">'
@@ -2128,7 +2130,7 @@ function renderMySchedWeek(a, def){
     const isToday=d===todayStr;
     const isWE=dt2.getDay()===0||dt2.getDay()===6;
     const dayN=['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][dt2.getDay()];
-    let bg=absent?absTyp.color+'66':hasOv?(schedTyp?.color+'88'||'#e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
+    let bg=absent?absTyp.color+'66':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'88':'##e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
 
     grid+='<div style="border-radius:var(--radius-lg);border:'+(isToday?'2px solid var(--blue)':'1px solid var(--border)')+';background:'+bg+';overflow:hidden">';
     // Day header
@@ -2235,7 +2237,7 @@ function renderMySchedMonth(a, def){
       const dt2=new Date(dateStr+'T12:00:00');
       const isToday=dateStr===todayStr;
       const isWE=dt2.getDay()===0||dt2.getDay()===6;
-      let bg=absent?absTyp.color+'55':hasOv?(schedTyp?.color+'77'||'#e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
+      let bg=absent?absTyp.color+'55':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'77':'##e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
 
       grid+='<div style="border-right:1px solid var(--border);min-height:110px;padding:4px;background:'+bg+';cursor:pointer" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+dateStr+'\')">';
       grid+='<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px">';
@@ -4246,7 +4248,7 @@ function renderAnalysts(){
   if(!ANALYSTS.length) return '<div class="empty">Sin analistas registrados</div>';
   return ANALYSTS.map(function(a){
     const myT=tasks.filter(function(t){return (t.assignments||[]).some(function(x){return x.analyst===a.id;});});
-    const pend=myT.filter(function(t){return t.status==='pending'||t.status==='late';}).length;
+    const pend=myT.filter(function(t){return t.status==='pending'||t.status==='scheduled'||t.status==='late';}).length;
     const prog=myT.filter(function(t){return t.status==='progress'||t.status==='pending-confirm';}).length;
     const done=myT.filter(function(t){return ['done','reviewed','approved'].includes(t.status);}).length;
     const hEst=myT.reduce(function(s,t){return s+(t.assignments||[]).filter(function(x){return x.analyst===a.id;}).reduce(function(s2,x){return s2+(parseFloat(x.estimatedHours)||0);},0);},0);
@@ -4494,14 +4496,18 @@ function doSystemReset(){
       var _users=USERS.slice();
       var _passwords=Object.assign({},passwords);
       var _workdayConfig=JSON.parse(JSON.stringify(workdayConfig||{}));
-      var _analystSchedules=JSON.parse(JSON.stringify(analystSchedules||{}));
+      // Preserve only base schedule (default), strip overrides (day exceptions)
+      var _analystSchedules={};
+      Object.keys(analystSchedules||{}).forEach(function(id){
+        _analystSchedules[id]={default:(analystSchedules[id]||{}).default};
+      });
       var _absenceTypesDef=JSON.parse(JSON.stringify(typeof absenceTypesDef!=='undefined'?absenceTypesDef:[]));
       var _nextUid=nextUid;
       tasks=[];nextId=1;
       replanNotifs=[];nextNotifId=1;
       scheduleRequests=[];nextSchedReqId=1;
       mgmtTasks=[];nextMgmtId=1;
-      absences={};
+      absences={};absences_ts=Date.now();
       USERS=_users;
       passwords=_passwords;
       workdayConfig=_workdayConfig;
