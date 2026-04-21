@@ -774,7 +774,7 @@ function renderSchedulesWeek(isSup,rows,pendTotal){
     const pendReq=scheduleRequests.find(r=>r.analystId===analystId&&r.dateStr===d&&r.status==='pending');
     const myTasks=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===analystId&&x.date===d));
     const mgmtOccs=(_dayMgmtCache[d]||[]).filter(o=>(o.analysts||[]).includes(analystId));
-    const workH=myTasks.reduce((a,t)=>a+(t.estimatedHours||0),0)+mgmtOccs.reduce((a,o)=>a+(o.estimatedHours||0),0);
+    const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,currentUser.id,d||dateStr||''),0)+mgmtOccs.reduce((a,o)=>a+(o.estimatedHours||0),0);
     const extraH=Math.max(0,workH-h);
     return{s,h,hasOv,ov,absent,isWork,pendReq,myTasks,mgmtOccs,workH,extraH};
   }
@@ -940,7 +940,7 @@ function renderSchedulesMonth(isSup,rows){
             const pendReq=scheduleRequests.find(r=>r.analystId===analyst.id&&r.dateStr===d&&r.status==='pending');
             const myTasks=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===analyst.id&&x.date===d));
             const mgmtOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,d,d)).filter(o=>(o.analysts||[]).includes(analyst.id));
-            const workH=myTasks.reduce((a,t)=>a+(t.estimatedHours||0),0)+mgmtOccs.reduce((a,o)=>a+(o.estimatedHours||0),0);
+            const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,currentUser.id,d||dateStr||''),0)+mgmtOccs.reduce((a,o)=>a+(o.estimatedHours||0),0);
             const approvedOT=scheduleRequests.find(r=>r.analystId===analyst.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime');
             const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
             const absTyp=absent?getABSTypes()[absent.type]||{color:'#fdeee4',text:'#8a3c10',label:'Aus.'}:null;
@@ -1657,7 +1657,7 @@ function renderMgmtWeek(isSup, wd, weekOccs){
       var dayOccs=weekOccs.filter(function(o){return o.occDate===d&&(o.analysts||[]).includes(a.id);});
       var analysisOccs=tasks.filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===a.id&&x.date===d;});});
       var mgmtH=dayOccs.reduce(function(s,o){return s+(o.estimatedHours||0);},0);
-      var analysisH=analysisOccs.reduce(function(s,t){return s+(t.estimatedHours||0);},0);
+      var analysisH=analysisOccs.reduce(function(s,t){return s+getAssignHours(t,a.id,d);},0);
       var totalH=mgmtH+analysisH;
       var pct=Math.min(totalH/WORKDAY_HOURS*100,100);
       var overload=totalH>WORKDAY_HOURS;
@@ -2228,7 +2228,7 @@ function renderMySchedMonth(a, def){
       const approvedOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='approved'&&r.proposed.type==='overtime');
       const myTasks=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===dateStr));
       const mgmtOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,dateStr,dateStr)).filter(o=>(o.analysts||[]).includes(currentUser.id));
-      const workH=myTasks.reduce((a,t)=>a+(t.estimatedHours||0),0)+mgmtOccs.reduce((a,o)=>a+(o.estimatedHours||0),0);
+      const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,currentUser.id,d||dateStr||''),0)+mgmtOccs.reduce((a,o)=>a+(o.estimatedHours||0),0);
       const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
       const absTyp=absent?getABSTypes()[absent.type]||{color:'#fdeee4',text:'#8a3c10',label:'Aus.'}:null;
       const schedTyp=hasOv?SCHED_TYPES.find(t=>t.id===ov.type)||null:null;
