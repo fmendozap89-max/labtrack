@@ -2,12 +2,14 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LabTrack</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#1a4f8a">
+<title>LabTrack — Gestión de Laboratorio v2</title>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <style>
-
-
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 :root{--bg:#f5f4f0;--bg2:#eceae4;--surface:#fff;--border:rgba(0,0,0,.10);--border2:rgba(0,0,0,.18);--text:#1a1916;--text2:#6b6860;--text3:#9c9a94;--blue:#1a4f8a;--blue-bg:#e8eff8;--blue-text:#1a4f8a;--green:#1e5c35;--green-bg:#e4f2ea;--green-text:#1e5c35;--amber:#7a4e0a;--amber-bg:#fdf0d8;--amber-text:#7a4e0a;--red:#8a2020;--red-bg:#fce8e8;--red-text:#8a2020;--orange:#8a3c10;--orange-bg:#fdeee4;--orange-text:#8a3c10;--radius:6px;--radius-lg:10px;--font:'IBM Plex Sans',sans-serif;--mono:'IBM Plex Mono',monospace}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -163,15 +165,11 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
   .tbl,.week-grid{overflow-x:auto!important;-webkit-overflow-scrolling:touch!important;}
   input,select,textarea{font-size:16px!important;}
 }
-
-
 </style>
 </head>
 <body>
 <div id="app" style="min-height:100vh">Cargando...</div>
 <script>
-
-
 // ── AV COLORS (cycling) ──
 const AV_CLASSES=['av1','av2','av3','av4','av5','av6','av7','av8'];
 const CHIP_CLASSES=['c1','c2','c3','c4','c5','c6','c7','c8'];
@@ -293,7 +291,8 @@ function getSnapshot(){
     v:6,
     tasks,nextId,nextUid,nextNotifId,nextAbsId,nextMgmtId,
     users:USERS.map(u=>({id:u.id,name:u.name,role:u.role})),
-    passwords,replanNotifs,absences,workdayConfig,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef
+    passwords,replanNotifs,absences,workdayConfig,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
+    auditTrail
   });
 }
 function applySnapshot(json){
@@ -319,6 +318,7 @@ function applySnapshot(json){
       workdayConfig.off=d.workdayConfig.off||[];
     }
     USERS.forEach(u=>{if(!passwords[u.id])passwords[u.id]='labtrack123';});
+    auditTrail=Array.isArray(d.auditTrail)?d.auditTrail:[];
     tasks=d.tasks;
     nextId=d.nextId||11;
     nextUid=d.nextUid||100;
@@ -3306,10 +3306,19 @@ function auditLog(action, entity, entityId, details, reason) {
   };
   if(!Array.isArray(auditTrail)) auditTrail=[];
   auditTrail.push(entry);
-  // Purge entries older than 30 days; floor at 500 entries for safety
-  var _cutoff30 = Date.now() - 30*24*60*60*1000;
-  var _kept = auditTrail.filter(function(e){return e.ts>=_cutoff30;});
-  auditTrail = _kept.length>=500 ? _kept : auditTrail.slice(-Math.max(500,_kept.length));
+  // Purge entries older than 15 days; alert supervisor before losing data
+  var _now15=Date.now();
+  var _cutoff15=_now15-15*24*60*60*1000;
+  var _expiring15=auditTrail.filter(function(e){return e.ts<_cutoff15;});
+  if(_expiring15.length>0&&isSupRole&&isSupRole()){
+    setTimeout(function(){
+      if(confirm('⚠️ AUDIT TRAIL: '+_expiring15.length+' registro(s) anteriores a 15 días serán eliminados.\n\n¿Desea exportar antes de continuar?')){
+        exportAuditCSV();
+      }
+    },800);
+  }
+  var _kept15=auditTrail.filter(function(e){return e.ts>=_cutoff15;});
+  auditTrail=_kept15.length>=200?_kept15:auditTrail.slice(-Math.max(200,_kept15.length));
   saveLS();
 }
 
@@ -3361,6 +3370,19 @@ function canEditField(t, field) {
   return true;
 }
 
+function exportAuditCSV(){
+  var rows=[['Fecha','Hora','Usuario','Rol','Accion','Entidad','ID','Descripcion','Motivo']];
+  [...auditTrail].sort(function(a,b){return a.ts-b.ts;}).forEach(function(e){
+    var dt=new Date(e.ts);var u=getU(e.user);
+    rows.push([dt.toLocaleDateString('es'),dt.toLocaleTimeString('es'),u?u.name:e.user,u?u.role:'',e.action,e.entity,String(e.entityId||''),(e.details&&e.details.description)||'',e.reason||'']);
+  });
+  var csv=rows.map(function(r){return r.map(function(c){return'"'+String(c||'').replace(/"/g,'""')+'"';}).join(',');}).join('\n');
+  var blob=new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'});
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='audit_trail_'+new Date().toISOString().slice(0,10)+'.csv';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+}
+
 // ── Render audit trail view ──
 function renderAuditTrail() {
   if(!isSupRole()) return '<div class="empty">Acceso restringido</div>';
@@ -3370,7 +3392,7 @@ function renderAuditTrail() {
   const filterEntity = auditFilterEntity||'';
   
   let f = entries;
-  if(filterUser) f = f.filter(function(e){return e.userId===filterUser||e.userName.toLowerCase().includes(filterUser.toLowerCase());});
+  if(filterUser) f = f.filter(function(e){return (e.userId||e.user)===filterUser||(e.userName||'').toLowerCase().includes(filterUser.toLowerCase());});
   if(filterAction) f = f.filter(function(e){return e.action===filterAction;});
   if(filterEntity) f = f.filter(function(e){return e.entity===filterEntity;});
 
@@ -3424,7 +3446,7 @@ function renderAuditTrail() {
     +'<option value="TASK">Análisis</option><option value="USER">Usuario</option>'
     +'<option value="SCHEDULE">Horario</option><option value="ABSENCE">Ausencia</option>'
     +'</select>'
-    +'<button class="btn sm" onclick="copyAuditTrail()" style="margin-left:auto">📋 Exportar</button>'
+    +'<button class="btn sm" onclick="exportAuditCSV()" style="margin-left:auto">&#11015; Exportar CSV</button>'
     +'</div>'
     +'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">'
     +'<div style="display:grid;grid-template-columns:140px 100px 90px 90px 1fr;gap:8px;padding:8px 14px;background:var(--bg2);font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase">'
@@ -5539,7 +5561,7 @@ const CLOUD = {
   syncInterval: 30000,
 };
 // ── PRESET (embedded at save-time — do not edit manually) ──
-const CLOUD_PRESET = { apiKey: '$2a$10$wpcDLSK/AEsKRRLjOUBVmOynaMDPykoA1kZ0bSNlIaY6QwBlAL8o2', binId: '69e6e1b3856a682189567d2b', enabled: true };
+const CLOUD_PRESET = { apiKey: '', binId: '', enabled: false };
 
 // ── Cloud state ──
 let cloudStatus = 'offline'; // offline|connecting|ok|error|syncing
@@ -5903,8 +5925,6 @@ async function _embedAndDownload(apiKey, binId) {
   document.addEventListener('click', function(){resetActivityTimer();}, true);
   document.addEventListener('keydown', function(){resetActivityTimer();}, true);
 }
-
-
 </script>
 </body>
 </html>
