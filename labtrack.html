@@ -3635,9 +3635,7 @@ function renderNotificaciones(){
         reviewer?reviewer.name:'—'
       ].join('	');
     });
-    var text=HDR+'
-'+rows.join('
-');
+    var text=HDR+'\n'+rows.join('\n');
     navigator.clipboard.writeText(text).catch(function(){
       var ta=document.createElement('textarea');ta.value=text;
       document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
@@ -5901,7 +5899,7 @@ function renderNotifPanel(){
       html+='<div style="background:var(--surface);border-radius:var(--radius);padding:7px 9px;margin-bottom:5px;font-size:12px">'
         +'<div style="font-weight:500">'+(req.dateStr?fmtDF(req.dateStr):'Horario predeterminado')+'</div>'
         +'<div style="color:var(--text2)">'+(req.proposed?req.proposed.startTime+' – '+req.proposed.endTime+' aprobado':'')+'</div>'
-        +'<button class="btn sm" style="margin-top:4px;font-size:10px;width:100%" onclick="req._seenByAnalyst=true;currentView='myschedule';showNotifPanel=false;render()">Ver mi cronograma →</button>'
+        +'<button class="btn sm" style="margin-top:4px;font-size:10px;width:100%" onclick="req._seenByAnalyst=true;currentView=&quot;myschedule&quot;;showNotifPanel=false;render()">Ver mi cronograma &#x2192;</button>'
         +'</div>';
     });
     html+='</div>';
