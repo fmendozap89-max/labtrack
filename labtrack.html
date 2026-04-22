@@ -4296,17 +4296,30 @@ function openReplanSuper(taskId){
   }
 }
 function tRowAna(t){
-  var ma=(t.assignments||[]).find(function(a){return a.analyst===currentUser.id;});
+  var todayStr=today();
+  var todayDate=new Date(todayStr+'T12:00:00');
+  // Todas las asignaciones de este analista en esta tarea
+  var myAssigns=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id;});
+  // Elegir la asignación más relevante: primero la de hoy, luego la más cercana a hoy
+  var ma=myAssigns.find(function(a){return a.date===todayStr;})
+    || myAssigns.slice().sort(function(a,b){
+        return Math.abs(new Date(a.date+'T12:00:00')-todayDate)
+             - Math.abs(new Date(b.date+'T12:00:00')-todayDate);
+       })[0]
+    || null;
   var md=ma?ma.date:t.due;
-  var assignedDate=new Date(md+'T12:00:00');
-  var todayDate=new Date(today()+'T12:00:00');
+  var assignedDate=new Date((md||todayStr)+'T12:00:00');
   var diffDays=Math.ceil((assignedDate-todayDate)/(1000*60*60*24));
-  var canStart=diffDays<=1&&t.status==='pending';
+  // canStart: dentro de la ventana de 2 días Y estado permite iniciar
+  var startableStatus=t.status==='pending'||t.status==='scheduled';
+  var canStart=diffDays<=1&&startableStatus;
   var pendingReplan=replanNotifs.find(function(n){return n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';});
   var replanLabel=pendingReplan?'<span style="font-size:10px;background:var(--amber-bg);color:var(--amber-text);padding:1px 5px;border-radius:4px;font-weight:500">Replan. pendiente</span>':'';
-  var estH=ma?ma.estimatedHours||0:t.estimatedHours||0;
-  var tl=ma&&ma.timeLog?ma.timeLog:[];
-  var realH=tl.reduce(function(s,e){return s+(e.hours||0);},0)||(ma&&ma.realHours||0);
+  // Agregar horas estimadas y reales de TODAS las asignaciones del analista
+  var estH=myAssigns.reduce(function(s,a){return s+(a.estimatedHours||0);},0)||t.estimatedHours||0;
+  var tl=myAssigns.flatMap(function(a){return a.timeLog||[];});
+  var realH=tl.reduce(function(s,e){return s+(e.hours||0);},0)
+    ||myAssigns.reduce(function(s,a){return s+(a.realHours||0);},0);
   var pct=estH>0?Math.min(realH/estH*100,120):0;
   var over=realH>estH&&estH>0;
   var barColor=over?'var(--red)':realH>=estH*0.9?'var(--green)':'var(--blue)';
