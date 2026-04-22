@@ -3603,112 +3603,99 @@ function renderNotificaciones(){
   var pending=allReqs.filter(function(r){return r.status==='pending';});
   var history=allReqs.filter(function(r){return r.status!=='pending';});
 
-  var typeLabel=function(t){
+  function typeLabel(t){
     return t==='change'?'Cambio de horario':t==='overtime'?'Horas extra':t==='reduced'?'Horario reducido':t==='shift'?'Guardia / Turno':t||'Solicitud';
-  };
-  var statusLabel2=function(s){
+  }
+  function statusStr(s){
     return s==='approved'?'Aprobado':s==='rejected'?'Rechazado':'Pendiente';
-  };
-
-  // ── Función para copiar tabla a Excel ──
-  function buildTsvRow(r){
-    var u=getU(r.analystId);
-    var p=r.proposed||{};
-    var detail=typeLabel(p.type);
-    if(p.startTime&&p.endTime)detail+=': '+p.startTime+'–'+p.endTime;
-    if(p.extraHours)detail+=' (+'+p.extraHours+'h)';
-    if(p.breakMinutes!==undefined)detail+=', desc. '+p.breakMinutes+'min';
-    var reviewer=r.reviewedBy?getU(r.reviewedBy):null;
-    var ts=new Date(r.ts);
-    var cols=[
-      ts.toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}),
-      u.name,
-      ts.toLocaleString('es',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}),
-      r.dateStr?fmtDF(r.dateStr):'—',
-      detail,
-      r.reason||'',
-      statusLabel2(r.status),
-      reviewer?reviewer.name:'—'
-    ];
-    return cols.join('\t');
   }
-  function copyAllToTsv(){
-    var header='Analista\tFecha de solicitud\tFecha asig.\tDetalle / Motivo\tComentario analista\tEstado\tAprobado por';
-    var rows=allReqs.map(buildTsvRow);
-    var text=header+'\n'+rows.join('\n');
-    navigator.clipboard.writeText(text).then(function(){
-      var btn=document.getElementById('btn-copy-solicitudes');
-      if(btn){btn.textContent='✓ Copiado';setTimeout(function(){btn.textContent='📋 Copiar para Excel';},2000);}
-    }).catch(function(){
-      var ta=document.createElement('textarea');
-      ta.value=header+'\n'+rows.join('\n');
-      document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);
+  function buildDetail(p){
+    if(!p)return'—';
+    var d=typeLabel(p.type);
+    if(p.startTime&&p.endTime)d+=': '+p.startTime+'–'+p.endTime;
+    if(p.extraHours)d+=' (+'+p.extraHours+'h extra)';
+    if(p.breakMinutes!==undefined)d+=', pausa '+p.breakMinutes+'min';
+    return d;
+  }
+
+  // Copiar al portapapeles como TSV para Excel
+  function copyTsv(){
+    var HDR='Analista	Fecha de solicitud	Fecha asig.	Detalle / Motivo	Comentario analista	Estado	Aprobado por';
+    var rows=allReqs.map(function(r){
+      var u=getU(r.analystId);
+      var reviewer=r.reviewedBy?getU(r.reviewedBy):null;
+      var ts=new Date(r.ts);
+      return [
+        u.name,
+        ts.toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'})+' '+ts.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'}),
+        r.dateStr?fmtDF(r.dateStr):'—',
+        buildDetail(r.proposed),
+        r.reason||'',
+        statusStr(r.status),
+        reviewer?reviewer.name:'—'
+      ].join('	');
     });
+    var text=HDR+'
+'+rows.join('
+');
+    navigator.clipboard.writeText(text).catch(function(){
+      var ta=document.createElement('textarea');ta.value=text;
+      document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
+    });
+    var btn=document.getElementById('btn-copy-sol');
+    if(btn){btn.textContent='✓ Copiado';setTimeout(function(){btn.textContent='📋 Copiar para Excel';},2000);}
   }
+  // Guardar referencia global para el onclick
+  window._ltCopyTsv=copyTsv;
 
-  // ── Fila de tabla ──
-  var COLS='grid-template-columns:110px 130px 90px 130px 1fr 120px'+(isSup?' 120px':'');
-  function tblHeader(){
+  // Tabla HTML
+  var COLS='display:grid;grid-template-columns:120px 100px 80px 140px 1fr 90px 110px'+(isSup?' 100px':'');
+  function thead(){
     return'<div style="'+COLS+';gap:6px;padding:7px 12px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">'
-      +'<div>Analista</div>'
-      +'<div>Fecha sol.</div>'
-      +'<div>Fecha asig.</div>'
-      +'<div>Detalle</div>'
-      +'<div>Comentario analista</div>'
-      +'<div>Estado / Aprobado por</div>'
+      +'<div>Analista</div><div>Fecha sol.</div><div>Fecha asig.</div><div>Detalle / Motivo</div>'
+      +'<div>Comentario analista</div><div>Estado</div><div>Aprobado por</div>'
       +(isSup?'<div>Acciones</div>':'')
       +'</div>';
   }
-  function tblRow(r,showActions){
+  function trow(r, showActions){
     var u=getU(r.analystId);
-    var p=r.proposed||{};
-    var detail=typeLabel(p.type);
-    if(p.startTime&&p.endTime)detail+=': '+p.startTime+'–'+p.endTime;
-    if(p.extraHours)detail+=' (+'+p.extraHours+'h extra)';
-    if(p.breakMinutes!==undefined)detail+=', pausa '+p.breakMinutes+'min';
     var reviewer=r.reviewedBy?getU(r.reviewedBy):null;
     var ts=new Date(r.ts);
-    var statusColor=r.status==='approved'?'var(--green)':r.status==='rejected'?'var(--red)':'var(--amber)';
+    var sc=r.status==='approved'?'var(--green)':r.status==='rejected'?'var(--red)':'var(--amber)';
     return'<div style="'+COLS+';gap:6px;padding:9px 12px;border-bottom:1px solid var(--border);font-size:12px;align-items:start">'
       // Analista
-      +'<div style="display:flex;align-items:center;gap:5px"><div class="av '+u.av+'" style="width:22px;height:22px;font-size:9px;flex-shrink:0">'+escH(u.avInit)+'</div><span style="font-weight:600">'+escH(u.name)+'</span></div>'
-      // Fecha sol.
-      +'<div style="font-family:var(--mono);font-size:11px">'+ts.toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'})+'<br><span style="color:var(--text3)">'+ts.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})+'</span></div>'
-      // Fecha asig.
+      +'<div style="display:flex;align-items:center;gap:5px"><div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px;flex-shrink:0">'+escH(u.avInit)+'</div><span style="font-weight:600;font-size:11px">'+escH(u.name)+'</span></div>'
+      // Fecha solicitud
+      +'<div style="font-family:var(--mono);font-size:10px">'+ts.toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'})+'<br><span style="color:var(--text3)">'+ts.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})+'</span></div>'
+      // Fecha asig
       +'<div style="font-family:var(--mono);font-size:11px">'+(r.dateStr?fmtDF(r.dateStr):'<span style="color:var(--text3)">—</span>')+'</div>'
       // Detalle
-      +'<div style="color:var(--text2)">'+escH(detail)+'</div>'
-      // Comentario analista
-      +'<div style="color:var(--text2)">'+(r.reason?escH(r.reason):'<span style="color:var(--text3)">—</span>')+'</div>'
-      // Estado / Aprobado por
-      +'<div><span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:'+statusColor+'22;color:'+statusColor+'">'+statusLabel2(r.status)+'</span>'
-      +(reviewer?'<div style="font-size:10px;color:var(--text3);margin-top:2px">↳ '+escH(reviewer.name)+'</div>':'')
-      +'</div>'
+      +'<div style="font-size:11px;color:var(--text2)">'+escH(buildDetail(r.proposed))+'</div>'
+      // Comentario / motivo analista
+      +'<div style="font-size:11px;color:var(--text2)">'+(r.reason?escH(r.reason):'<span style="color:var(--text3)">—</span>')+'</div>'
+      // Estado
+      +'<div><span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;background:'+sc+'22;color:'+sc+'">'+statusStr(r.status)+'</span></div>'
+      // Aprobado por
+      +'<div style="font-size:11px;color:var(--text3)">'+(reviewer?escH(reviewer.name):'—')+'</div>'
       // Acciones
-      +(isSup?'<div style="display:flex;gap:4px">'
-        +(showActions?'<button class="btn sm suc" onclick="approveSchedule('+r.id+')">✓ Apr.</button>'
-          +'<button class="btn sm dan" onclick="rejectSchedule('+r.id+')">✗ Rec.</button>':'')
-        +'</div>':'')
+      +(isSup?'<div style="display:flex;gap:3px">'+(showActions?'<button class="btn sm suc" onclick="approveSchedule('+r.id+')" style="padding:2px 7px">✓</button><button class="btn sm dan" onclick="rejectSchedule('+r.id+')" style="padding:2px 7px">✗</button>':'')+'</div>':'')
       +'</div>';
   }
 
   var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">'
-    +'<div class="sec" style="margin-bottom:0">Solicitudes de cambio de horario</div>'
-    +'<button id="btn-copy-solicitudes" class="btn sm" onclick="('+copyAllToTsv.toString()+')()">📋 Copiar para Excel</button>'
+    +'<div class="sec" style="margin-bottom:0">Solicitudes de cambio de horario ('+allReqs.length+')</div>'
+    +'<button id="btn-copy-sol" class="btn sm" onclick="window._ltCopyTsv&&window._ltCopyTsv()">📋 Copiar para Excel</button>'
     +'</div>';
 
-  html+='<div class="sec" style="margin-bottom:8px;color:var(--amber)">Pendientes ('+pending.length+')</div>';
+  html+='<div style="font-size:12px;font-weight:600;color:var(--amber);margin-bottom:8px">Pendientes ('+pending.length+')</div>';
   if(pending.length===0){
-    html+='<div class="empty" style="margin-bottom:20px">Sin solicitudes pendientes ✓</div>';
+    html+='<div class="empty" style="margin-bottom:16px">Sin solicitudes pendientes ✓</div>';
   }else{
-    html+='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;overflow-x:auto;margin-bottom:20px">'
-      +tblHeader()+pending.map(function(r){return tblRow(r,true);}).join('')+'</div>';
+    html+='<div class="tbl" style="margin-bottom:20px;overflow-x:auto">'+thead()+pending.map(function(r){return trow(r,true);}).join('')+'</div>';
   }
-
   if(history.length>0){
-    html+='<div class="sec" style="margin-bottom:8px">Historial ('+history.length+')</div>';
-    html+='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;overflow-x:auto">'
-      +tblHeader()+history.map(function(r){return tblRow(r,false);}).join('')+'</div>';
+    html+='<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">Historial ('+history.length+')</div>';
+    html+='<div class="tbl" style="overflow-x:auto">'+thead()+history.map(function(r){return trow(r,false);}).join('')+'</div>';
   }
   return html;
 }
@@ -5843,118 +5830,129 @@ function rejectReplan(notifId){
 }
 function renderNotifPanel(){
   const isSup=currentUser.role==='supervisor';
-  // Incluir notificaciones de observación además de replanificación
-  const myNotifs=isSup
-    ?replanNotifs.filter(function(n){return n.status==='pending';}).sort(function(a,b){return b.ts-a.ts;})
-    :replanNotifs.filter(function(n){
-        return n.analystId===currentUser.id;
-     }).sort(function(a,b){return b.ts-a.ts;});
-  // Separar observaciones de replanificaciones
-  const myObsNotifs=myNotifs.filter(function(n){return n.type==='observation';});
-  const myReplanNotifs=myNotifs.filter(function(n){return n.type!=='observation';});
-  const pendCount=replanNotifs.filter(n=>n.status==='pending').length;
-  const confirmCount=tasks.filter(t=>t.status==='pending-confirm').length;
+  const myObsNotifs=replanNotifs.filter(function(n){
+    return n.type==='observation'&&(isSup||(n.analystId===currentUser.id));
+  }).sort(function(a,b){return b.ts-a.ts;});
+  const pendReplan=replanNotifs.filter(function(n){
+    return n.type!=='observation'&&n.status==='pending'&&(isSup||(n.analystId===currentUser.id));
+  }).sort(function(a,b){return b.ts-a.ts;});
+  const schedPend=isSup
+    ?scheduleRequests.filter(function(r){return r.status==='pending';})
+    :scheduleRequests.filter(function(r){return r.analystId===currentUser.id&&r.status==='pending';});
+  const schedApproved=!isSup
+    ?scheduleRequests.filter(function(r){return r.analystId===currentUser.id&&r.status==='approved'&&!r._seenByAnalyst;})
+    :[];
+  const confirmPend=isSup?tasks.filter(function(t){return t.status==='pending-confirm';}):[];
+  const totalBadge=myObsNotifs.filter(function(n){return n.status==='pending';}).length
+    +pendReplan.length+schedPend.length+schedApproved.length+confirmPend.length;
+
   if(!showNotifPanel){
-    return`<div style="position:relative;display:inline-block">
-      <button class="btn" onclick="showNotifPanel=true;render()" style="position:relative">
-        🔔 Solicitudes${pendCount>0?`<span style="position:absolute;top:-4px;right:-4px;background:var(--red);color:#fff;border-radius:50%;width:16px;height:16px;font-size:9px;display:flex;align-items:center;justify-content:center;font-weight:700">${pendCount}</span>`:''}
-      </button>
-    </div>`;
+    return'<div style="position:relative;display:inline-block">'
+      +'<button class="btn" onclick="showNotifPanel=true;render()" style="position:relative">'
+      +'🔔 Solicitudes'
+      +(totalBadge>0?'<span style="position:absolute;top:-4px;right:-4px;background:var(--red);color:#fff;border-radius:50%;width:16px;height:16px;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center">'+totalBadge+'</span>':'')
+      +'</button></div>';
   }
-  const tsLabel=ts=>{const d=new Date(ts);return d.getDate()+'/'+(d.getMonth()+1)+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');};
-  return`<div style="position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.3);display:flex;align-items:flex-start;justify-content:flex-end;padding:56px 12px 0" onclick="if(event.target===this){showNotifPanel=false;render()}">
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);width:380px;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.15)">
-      <div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
-        <span style="font-size:14px;font-weight:600">Solicitudes de replanificación</span>
-        <button class="btn sm" onclick="showNotifPanel=false;render()" style="margin-left:auto">✕</button>
-      </div>
-      \${myObsNotifs.length>0?\`
-    <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--amber-bg)">
-      <div style="font-size:12px;font-weight:600;color:var(--amber-text);margin-bottom:8px">⚑ Observaciones sobre tus análisis (\${myObsNotifs.length})</div>
-      \${myObsNotifs.map(function(n){
-        const taskRef=tasks.find(function(t){return t.id===n.taskId;});
-        return\`<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--amber)">
-          <div style="font-size:12px;font-weight:600">\${escH(n.producto||'')} — \${escH(n.lote||'')}</div>
-          <div style="font-size:11px;color:var(--text2);margin:3px 0">\${escH(n.comment||'')}</div>
-          <div style="font-size:10px;color:var(--text3)">Por \${escH(n.fromName||'')} · \${new Date(n.ts).toLocaleDateString('es')}</div>
-          \${n.status==='pending'?\`<button class="btn sm" style="margin-top:5px;font-size:10px" onclick="markObsNotifRead(\${n.id})">✓ Marcar como leída</button>\`:'<span style="font-size:10px;color:var(--green)">✓ Leída</span>'}
-        </div>\`;
-      }).join('')}
-    </div>\`:''}
-    ${currentUser.role!=='supervisor'&&scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='approved'&&!r._seenByAnalyst).length>0?`
-    <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--green-bg)">
-      <div style="font-size:12px;font-weight:600;color:var(--green-text);margin-bottom:8px">✓ Cambios de horario aprobados</div>
-      ${scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='approved'&&!r._seenByAnalyst).map(req=>`
-        <div style="background:var(--surface);border-radius:var(--radius);padding:7px 9px;margin-bottom:5px;font-size:12px">
-          <div style="font-weight:500">${req.dateStr?fmtDF(req.dateStr):'Horario predeterminado'}</div>
-          <div style="color:var(--text2)">${req.proposed.startTime}–${req.proposed.endTime} aprobado</div>
-          <button class="btn sm" style="margin-top:4px;font-size:10px;width:100%" onclick="currentView='myschedule';showNotifPanel=false;render()">Ver mi horario →</button>
-        </div>`).join('')}
-    </div>`:''}
-  ${currentUser.role==='supervisor'&&scheduleRequests.filter(r=>r.status==='pending').length>0?`
-    <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--green-bg)">
-      <div style="font-size:12px;font-weight:600;color:var(--green-text);margin-bottom:8px">🕐 Solicitudes de horario (${scheduleRequests.filter(r=>r.status==='pending').length})</div>
-      ${scheduleRequests.filter(r=>r.status==='pending').map(req=>{
-        const u=getU(req.analystId);
-        return`<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px">
-          <div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">
-            <div class="av ${u.av}">${escH(u.avInit)}</div>
-            <div style="font-size:12px;font-weight:600">${escH(u.name)}</div>
-          </div>
-          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">Propone: <b>${req.proposed.startTime} – ${req.proposed.endTime}</b> (${req.proposed.breakMinutes}min descanso)</div>
-          <div style="font-size:11px;color:var(--text3);margin-bottom:6px">Motivo: ${escH(req.reason)}</div>
-          <div style="display:flex;gap:6px">
-            <button class="btn suc sm" style="flex:1" onclick="approveSchedule(${req.id})">✓ Aprobar</button>
-            <button class="btn dan sm" style="flex:1" onclick="rejectSchedule(${req.id})">✕ Rechazar</button>
-          </div>
-        </div>`;
-      }).join('')}
-    </div>`:''}
-  ${currentUser.role==='supervisor'&&confirmCount>0?`
-    <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--blue-bg)">
-      <div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">✓ Completados por confirmar (${confirmCount})</div>
-      ${tasks.filter(t=>t.status==='pending-confirm').map(t=>{
-        const u=getU(t.completedBy||'');
-        return`<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px">
-          <div style="font-size:12px;font-weight:600">${escH(t.producto)}</div>
-          <div style="font-size:11px;color:var(--text3);font-family:var(--mono)">${escH(t.lote)} · ${escH(u.name)}</div>
-          <div style="display:flex;gap:6px;margin-top:7px">
-            <button class="btn suc sm" style="flex:1" onclick="confirmDone(${t.id})">✓ Confirmar</button>
-            <button class="btn dan sm" style="flex:1" onclick="rejectDone(${t.id})">✕ Rechazar</button>
-          </div>
-        </div>`;
-      }).join('')
+
+  var html='<div style="position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.3);display:flex;align-items:flex-start;justify-content:flex-end;padding:8px">'
+    +'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);width:360px;max-height:calc(100vh - 16px);overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
+    +'<div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;position:sticky;top:0;background:var(--surface);z-index:1">'
+    +'<span style="font-size:14px;font-weight:600">Notificaciones</span>'
+    +'<button class="btn sm" onclick="showNotifPanel=false;render()" style="margin-left:auto">✕</button>'
+    +'</div>';
+
+  // ── Observaciones para analista ──
+  if(myObsNotifs.length>0){
+    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--amber-bg)">'
+      +'<div style="font-size:12px;font-weight:600;color:var(--amber-text);margin-bottom:8px">⚑ Observaciones ('+myObsNotifs.length+')</div>';
+    myObsNotifs.forEach(function(n){
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--amber)">'
+        +'<div style="font-size:12px;font-weight:600">'+escH(n.producto||'')+(n.lote?' — '+escH(n.lote):'')+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin:3px 0">'+escH(n.comment||'')+'</div>'
+        +'<div style="font-size:10px;color:var(--text3)">Por '+escH(n.fromName||'')+(n.ts?' · '+new Date(n.ts).toLocaleDateString('es'):'')+'</div>'
+        +(n.status==='pending'?'<button class="btn sm" style="margin-top:5px;font-size:10px" onclick="markObsNotifRead('+n.id+')">✓ Marcar como leída</button>':'<span style="font-size:10px;color:var(--green)">✓ Leída</span>')
+        +'</div>';
+    });
+    html+='</div>';
   }
-    </div>`:''}
-  ${myNotifs.length===0&&(currentUser.role!=='supervisor'||confirmCount===0)?`<div class="empty">Sin solicitudes</div>`:myNotifs.map(n=>{
-        const t=tasks.find(x=>x.id===n.taskId);
-        const analyst=getU(n.analystId);
-        const statusStyle={pending:'background:var(--amber-bg);color:var(--amber-text)',approved:'background:var(--green-bg);color:var(--green-text)',rejected:'background:var(--red-bg);color:var(--red-text)'}[n.status];
-        const statusTxt={pending:'Pendiente',approved:'Aprobada',rejected:'Rechazada'}[n.status];
-        return`<div style="padding:12px 16px;border-bottom:1px solid var(--border)">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-            <div class="av ${analyst.av}">${escH(analyst.avInit)}</div>
-            <div style="flex:1;min-width:0">
-              <div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t?t.producto:'(eliminado)')}</div>
-              <div style="font-size:10px;color:var(--text3);font-family:var(--mono)">${escH(t?t.lote:'')} · ${escH(analyst.name)}</div>
-            </div>
-            <span style="font-size:10px;padding:2px 7px;border-radius:10px;font-weight:600;${statusStyle}">${statusTxt}</span>
-          </div>
-          <div style="font-size:12px;color:var(--text2);display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:6px">
-            <div><span style="color:var(--text3)">Fecha actual:</span> ${fmtDF(n.oldDate)}</div>
-            <div><span style="color:var(--text3)">Nueva fecha:</span> <b>${fmtDF(n.newDate)}</b></div>
-          </div>
-          <div style="font-size:12px;color:var(--text2);margin-bottom:6px"><span style="color:var(--text3)">Motivo:</span> ${escH(n.reason)}</div>
-          <div style="font-size:11px;color:var(--text3)">Solicitado: ${tsLabel(n.ts)}</div>
-          ${isSup&&n.status==='pending'?`<div style="display:flex;gap:6px;margin-top:8px">
-            <button class="btn suc sm" style="flex:1" onclick="approveReplan(${n.id})">✓ Aprobar</button>
-            <button class="btn dan sm" style="flex:1" onclick="rejectReplan(${n.id})">✕ Rechazar</button>
-          </div>`:''}
-        </div>`;
-      }).join('')
+
+  // ── Confirmaciones pendientes (supervisor) ──
+  if(confirmPend.length>0){
+    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--blue-bg)">'
+      +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">⏳ Completados por confirmar ('+confirmPend.length+')</div>';
+    confirmPend.forEach(function(t){
+      const u=getU(t.completedBy||'');
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:7px 9px;margin-bottom:5px;font-size:12px">'
+        +'<div style="font-weight:600">'+escH(t.producto)+' — '+escH(t.lote)+'</div>'
+        +'<div style="font-size:10px;color:var(--text3)">Por '+escH(u.name)+'</div>'
+        +'<div style="display:flex;gap:4px;margin-top:5px">'
+        +'<button class="btn sm suc" onclick="confirmDone('+t.id+');showNotifPanel=false;render()">✓ Confirmar</button>'
+        +'<button class="btn sm" onclick="openEdit('+t.id+');showNotifPanel=false">🔍 Ver</button>'
+        +'</div></div>';
+    });
+    html+='</div>';
   }
-    </div>
-  </div>`;
+
+  // ── Solicitudes de horario aprobadas (analista) ──
+  if(schedApproved.length>0){
+    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--green-bg)">'
+      +'<div style="font-size:12px;font-weight:600;color:var(--green-text);margin-bottom:8px">✓ Cambios de horario aprobados ('+schedApproved.length+')</div>';
+    schedApproved.forEach(function(req){
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:7px 9px;margin-bottom:5px;font-size:12px">'
+        +'<div style="font-weight:500">'+(req.dateStr?fmtDF(req.dateStr):'Horario predeterminado')+'</div>'
+        +'<div style="color:var(--text2)">'+(req.proposed?req.proposed.startTime+' – '+req.proposed.endTime+' aprobado':'')+'</div>'
+        +'<button class="btn sm" style="margin-top:4px;font-size:10px;width:100%" onclick="req._seenByAnalyst=true;currentView='myschedule';showNotifPanel=false;render()">Ver mi cronograma →</button>'
+        +'</div>';
+    });
+    html+='</div>';
+  }
+
+  // ── Solicitudes pendientes de horario (supervisor) ──
+  if(schedPend.length>0){
+    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border)">'
+      +'<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🕐 Solicitudes de horario ('+schedPend.length+')</div>';
+    schedPend.forEach(function(req){
+      const u=getU(req.analystId);
+      html+='<div style="background:var(--bg);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px">'
+        +'<div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">'
+        +'<div class="av '+u.av+'" style="width:24px;height:24px;font-size:10px">'+escH(u.avInit)+'</div>'
+        +'<div style="font-size:12px;font-weight:600">'+escH(u.name)+'</div>'
+        +'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin-bottom:2px">'+(req.proposed?'Propone: '+req.proposed.startTime+' – '+req.proposed.endTime:'')+'</div>'
+        +'<div style="font-size:11px;color:var(--text3);margin-bottom:6px">Motivo: '+escH(req.reason||'')+'</div>'
+        +'<div style="display:flex;gap:6px">'
+        +'<button class="btn suc sm" style="flex:1" onclick="approveSchedule('+req.id+')">✓ Aprobar</button>'
+        +'<button class="btn dan sm" style="flex:1" onclick="rejectSchedule('+req.id+')">✗ Rechazar</button>'
+        +'</div></div>';
+    });
+    html+='</div>';
+  }
+
+  // ── Replanificaciones ──
+  if(pendReplan.length>0){
+    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border)">'
+      +'<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">📅 Replanificaciones pendientes ('+pendReplan.length+')</div>';
+    pendReplan.forEach(function(n){
+      const t=tasks.find(function(x){return x.id===n.taskId;});
+      const u=getU(n.analystId);
+      html+='<div style="background:var(--bg);border-radius:var(--radius);padding:7px 9px;margin-bottom:5px;font-size:12px">'
+        +(t?'<div style="font-weight:600">'+escH(t.producto)+' — '+escH(t.lote)+'</div>':'')
+        +'<div style="color:var(--text3)">'+escH(u.name)+' · '+(n.reason?escH(n.reason.slice(0,50)):'')+'</div>'
+        +(isSup?'<div style="display:flex;gap:4px;margin-top:4px">'
+          +'<button class="btn sm suc" onclick="resolveReplan('+n.id+',true)">✓ Aprobar</button>'
+          +'<button class="btn sm dan" onclick="resolveReplan('+n.id+',false)">✗ Rechazar</button>'
+          +'</div>':'')
+        +'</div>';
+    });
+    html+='</div>';
+  }
+
+  if(totalBadge===0&&myObsNotifs.length===0){
+    html+='<div class="empty" style="padding:24px">Sin notificaciones pendientes ✓</div>';
+  }
+
+  html+='</div></div>';
+  return html;
 }
 
 function saveTask(){
