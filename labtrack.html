@@ -350,7 +350,7 @@ let _syncTimer    = null;
 let _saveDebounce = null;
 let _auditDebounce = null;
 let _pendingSaves = {};
-const SYNC_INTERVAL  = 30000;
+const SYNC_INTERVAL = 45000;
 const SAVE_DEBOUNCE  = 1500;
 const AUDIT_DEBOUNCE = 3000;
 
@@ -480,6 +480,13 @@ async function establecerEstadoOperativo() {
 // ══════════════════════════════════════════════════════════════
 // SAVE — debounced, escribe state.json completo
 // ══════════════════════════════════════════════════════════════
+
+// Guardar inmediatamente sin debounce (para operaciones críticas)
+async function saveNow() {
+  if (_saveDebounce) { clearTimeout(_saveDebounce); _saveDebounce = null; }
+  _pendingSaves = {}; // marcar todo como pendiente
+  await _executeSave();
+}
 
 function saveLS(hint) {
   if (hint) _pendingSaves[hint] = true;
@@ -942,7 +949,12 @@ function getAbsenceOnDate(analystId,dateStr){
 }
 function addAbsence(analystId,type,startDate,endDate,note){
   if(!absences[analystId])absences[analystId]=[];
-  absences[analystId].push({_ts:Date.now(),id:nextAbsId++,type,startDate,endDate,note:note||''});
+  const _nabs={_ts:Date.now(),id:nextAbsId++,type,startDate,endDate,note:note||''};
+  absences[analystId].push(_nabs);
+  auditLog('CREATE','ABSENCE',_nabs.id,{
+    analystId:analystId,analystName:getU(analystId).name,
+    type:type,startDate:startDate,endDate:endDate,note:note||''
+  },'');
   saveLS();render();
   checkAbsenceConflicts();
 }
@@ -1886,8 +1898,8 @@ function quickRemoveAnalystFromMgmtOcc(mgmtId, dateStr, analystId){
 function renderNotifBtn(){
   const isSup=currentUser.role==='supervisor';
   const pendCount=isSup
-    ?replanNotifs.filter(n=>n.status==='pending').length
-    :replanNotifs.filter(n=>n.analystId===currentUser.id&&n.status==='pending').length;
+    ?replanNotifs.filter(function(n){return n.status==='pending';}).length
+    :replanNotifs.filter(function(n){return n.analystId===currentUser.id&&n.status==='pending';}).length;
   const confirmCount=isSup?tasks.filter(t=>t.status==='pending-confirm').length:0;
   const schedPend=isSup?scheduleRequests.filter(r=>r.status==='pending').length:
     scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;
@@ -3141,7 +3153,7 @@ function doLogin(){
     loginStep=1;loginError='';
     currentView='dashboard';
     recordLoginSuccess(uid);
-    auditLog('LOGIN','USER',uid,{description:'Inicio de sesion desde '+location.hostname},'');
+    // LOGIN no se registra en audit trail (Punto 6)
     render();
   } else {
     loginError='Contraseña incorrecta. Intentá de nuevo.';
@@ -3162,6 +3174,10 @@ function renderReview(){
     const analStacks=assigns.map(function(a){const u=getU(a.analyst);return'<div class="av '+u.av+'" title="'+escH(u.name)+'" style="width:22px;height:22px;font-size:9px">'+escH(u.avInit)+'</div>';}).join('');
     const over=realH>estH&&estH>0;
     const hColor=over?'var(--red)':realH>0?'var(--green)':'var(--text3)';
+    // PUNTO 3: solo se puede revisar si el análisis está en 'done' (todos los analistas completaron)
+    const canReview=canAct&&t.status==='done';
+    const canObserve=canAct&&(t.status==='done'||t.status==='observed');
+    const lastObs=t.observations&&t.observations.length?t.observations[t.observations.length-1]:null;
     return'<div class="trow" style="'+cols+'">'
       +'<div class="cell-trunc" style="font-weight:500">'+escH(t.producto)+'</div>'
       +'<div class="cell-sub cell-trunc">'+escH(t.lote)+'</div>'
@@ -3169,12 +3185,13 @@ function renderReview(){
       +'<div style="font-family:var(--mono);font-size:12px;text-align:right">'+(estH?estH+'h':'—')+'</div>'
       +'<div style="font-family:var(--mono);font-size:12px;font-weight:700;text-align:right;color:'+hColor+'">'+(realH?realH.toFixed(1)+'h':'—')+'</div>'
       +'<div><span class="pill '+t.status+'">'+statusLabel(t.status)+'</span>'
-      +(t.status==='observed'&&t.observations&&t.observations.length?'<div style="font-size:9px;color:var(--amber-text);margin-top:2px" title="'+escH(t.observations[t.observations.length-1].comment)+'">⚑ '+escH(t.observations[t.observations.length-1].comment.slice(0,25))+'</div>':'')
+      +(lastObs?'<div style="font-size:9px;color:var(--amber-text);margin-top:2px" title="'+escH(lastObs.comment)+'">'+'⚑ '+escH((lastObs.byName||'')+': '+lastObs.comment.slice(0,25))+'</div>':'')
       +(t.reviewedBy?'<div style="font-size:9px;color:var(--green);margin-top:1px">Rev. '+fmtDF(t.reviewedDate||'')+'</div>':'')
       +'</div>'
       +'<div style="display:flex;gap:4px;flex-wrap:wrap">'
-      +(canAct&&t.status==='done'?'<button class="btn sm" onclick="openEdit('+t.id+')" title="Ver análisis">🔍 Ver</button><button class="btn sm suc" onclick="markReviewed('+t.id+')" title="Marcar como revisado">✓</button>':'')
-      +(canAct&&(t.status==='done'||t.status==='observed')?'<button class="btn sm" style="color:var(--amber-text);border-color:var(--amber)" onclick="markObserved('+t.id+')" title="Observar con comentario">⚑</button>':'')
+      +(canAct?'<button class="btn sm" onclick="openEdit('+t.id+')" title="Ver análisis completo">🔍 Ver</button>':'')
+      +(canReview?'<button class="btn sm suc" onclick="markReviewed('+t.id+')" title="Marcar como revisado">✓ Revisar</button>':'')
+      +(canObserve?'<button class="btn sm" style="color:var(--amber-text);border-color:var(--amber)" onclick="markObserved('+t.id+')" title="Observar con comentario">⚑ Observar</button>':'')
       +'</div>'
       +'</div>';
   }
@@ -3211,6 +3228,9 @@ function renderReview(){
 }
 
 function markObservedAll(){
+  if(currentUser.role!=='supervisor'&&currentUser.role!=='reviewer'){
+    alert('Solo el Supervisor o el Revisor pueden observar análisis.');return;
+  }
   var pending=tasks.filter(function(t){return t.status==='done';});
   if(!pending.length){alert('No hay análisis pendientes.');return;}
   var comment=prompt('Observación general para los '+pending.length+' análisis pendientes:','');
@@ -3218,8 +3238,18 @@ function markObservedAll(){
   if(!comment.trim()){alert('La observación no puede estar vacía.');return;}
   pending.forEach(function(t){
     if(!t.observations)t.observations=[];
-    t.observations.push({by:currentUser.id,ts:Date.now(),comment:comment.trim(),fromStatus:t.status});
+    t.observations.push({by:currentUser.id,byName:currentUser.name,byRole:currentUser.role,
+      ts:Date.now(),comment:comment.trim(),fromStatus:t.status});
     t.status='observed';t.observedBy=currentUser.id;t.observedTs=Date.now();
+    // Notificar analistas
+    const assignees=[...new Set((t.assignments||[]).map(function(a){return a.analyst;}))];
+    assignees.forEach(function(analystId){
+      replanNotifs.push({id:nextNotifId++,type:'observation',taskId:t.id,analystId:analystId,
+        status:'pending',ts:Date.now(),fromUser:currentUser.id,fromName:currentUser.name,
+        fromRole:currentUser.role,comment:comment.trim(),producto:t.producto,lote:t.lote});
+    });
+    auditLog('OBSERVE','TASK',t.id,{field:'status',oldVal:'done',newVal:'observed',
+      description:'Observación masiva: '+t.producto+' '+t.lote},comment);
   });
   saveLS();render();
 }
@@ -3572,52 +3602,113 @@ function renderNotificaciones(){
   var allReqs=[...scheduleRequests].sort(function(a,b){return b.ts-a.ts;});
   var pending=allReqs.filter(function(r){return r.status==='pending';});
   var history=allReqs.filter(function(r){return r.status!=='pending';});
+
   var typeLabel=function(t){
-    return t==='change'?'Cambio de horario':t==='overtime'?'Horas extra':t==='reduced'?'Horario reducido':t==='shift'?'Cambio de turno':t||'Solicitud';
+    return t==='change'?'Cambio de horario':t==='overtime'?'Horas extra':t==='reduced'?'Horario reducido':t==='shift'?'Guardia / Turno':t||'Solicitud';
   };
-  var statusPill=function(s){
-    if(s==='approved')return'<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--green-bg);color:var(--green-text)">&#10003; Aprobado</span>';
-    if(s==='rejected')return'<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--red-bg);color:var(--red-text)">&#10007; Rechazado</span>';
-    return'<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--amber-bg);color:var(--amber-text)">&#9203; Pendiente</span>';
+  var statusLabel2=function(s){
+    return s==='approved'?'Aprobado':s==='rejected'?'Rechazado':'Pendiente';
   };
-  var cols='display:grid;grid-template-columns:90px 1fr 1fr 80px 100px'+(isSup?' 118px':'');
-  var tblHeader='<div style="'+cols+';gap:8px;padding:7px 12px;background:var(--bg2);font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;border-bottom:1px solid var(--border)">'
-    +'<div>Fecha sol.</div><div>Analista</div><div>Detalle / Motivo</div><div>Fecha asig.</div><div>Estado</div>'+(isSup?'<div>Acciones</div>':'')
-    +'</div>';
-  var tblRow=function(r,showActions){
+
+  // ── Función para copiar tabla a Excel ──
+  function buildTsvRow(r){
     var u=getU(r.analystId);
     var p=r.proposed||{};
     var detail=typeLabel(p.type);
-    if(p.startTime&&p.endTime)detail+=': '+p.startTime+'\u2013'+p.endTime;
+    if(p.startTime&&p.endTime)detail+=': '+p.startTime+'–'+p.endTime;
     if(p.extraHours)detail+=' (+'+p.extraHours+'h)';
     if(p.breakMinutes!==undefined)detail+=', desc. '+p.breakMinutes+'min';
     var reviewer=r.reviewedBy?getU(r.reviewedBy):null;
     var ts=new Date(r.ts);
-    return'<div style="'+cols+';gap:8px;padding:9px 12px;border-bottom:1px solid var(--border);align-items:center;font-size:12px">'
-      +'<div style="font-family:var(--mono);font-size:11px">'+ts.toLocaleDateString('es',{day:'2-digit',month:'2-digit'})+'<br><span style="color:var(--text3)">'+ts.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})+'</span></div>'
-      +'<div><div style="display:flex;align-items:center;gap:5px"><div class="av '+u.av+'" style="width:22px;height:22px;font-size:9px;flex-shrink:0">'+escH(u.avInit)+'</div>'
-      +'<span style="font-weight:600">'+escH(u.name)+'</span></div>'
-      +(r.reason?'<div style="font-size:10px;color:var(--text3);margin-top:2px">'+escH(r.reason.slice(0,60))+'</div>':'')
-      +(reviewer?'<div style="font-size:10px;color:var(--text3)">\u21b3 '+escH(reviewer.name.split(' ')[0])+' \u00b7 '+new Date(r.reviewedTs).toLocaleDateString('es')+'</div>':'')
-      +'</div>'
-      +'<div style="color:var(--text2);font-size:11px">'+escH(detail)+'</div>'
-      +'<div style="font-family:var(--mono);font-size:11px;color:var(--text3)">'+(r.dateStr?fmtDF(r.dateStr):'&mdash;')+'</div>'
-      +'<div>'+statusPill(r.status)+'</div>'
-      +(isSup
-        ?'<div style="display:flex;gap:4px">'+(showActions?'<button class="btn sm suc" onclick="approveSchedule('+r.id+')">\u2713 Aprobar</button><button class="btn sm dan" onclick="rejectSchedule('+r.id+')">\u2717 Rechazar</button>':'')+'</div>'
-        :'')
-      +'</div>';
-  };
-  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
-    +'<div class="sec" style="margin-bottom:0">Solicitudes pendientes ('+pending.length+')</div></div>';
-  if(pending.length===0){
-    html+='<div class="empty" style="margin-bottom:20px">Sin solicitudes pendientes &#10003;</div>';
-  }else{
-    html+='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;overflow-x:auto;margin-bottom:16px">'+tblHeader+pending.map(function(r){return tblRow(r,true);}).join('')+'</div>';
+    var cols=[
+      ts.toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}),
+      u.name,
+      ts.toLocaleString('es',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}),
+      r.dateStr?fmtDF(r.dateStr):'—',
+      detail,
+      r.reason||'',
+      statusLabel2(r.status),
+      reviewer?reviewer.name:'—'
+    ];
+    return cols.join('\t');
   }
+  function copyAllToTsv(){
+    var header='Analista\tFecha de solicitud\tFecha asig.\tDetalle / Motivo\tComentario analista\tEstado\tAprobado por';
+    var rows=allReqs.map(buildTsvRow);
+    var text=header+'\n'+rows.join('\n');
+    navigator.clipboard.writeText(text).then(function(){
+      var btn=document.getElementById('btn-copy-solicitudes');
+      if(btn){btn.textContent='✓ Copiado';setTimeout(function(){btn.textContent='📋 Copiar para Excel';},2000);}
+    }).catch(function(){
+      var ta=document.createElement('textarea');
+      ta.value=header+'\n'+rows.join('\n');
+      document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);
+    });
+  }
+
+  // ── Fila de tabla ──
+  var COLS='grid-template-columns:110px 130px 90px 130px 1fr 120px'+(isSup?' 120px':'');
+  function tblHeader(){
+    return'<div style="'+COLS+';gap:6px;padding:7px 12px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">'
+      +'<div>Analista</div>'
+      +'<div>Fecha sol.</div>'
+      +'<div>Fecha asig.</div>'
+      +'<div>Detalle</div>'
+      +'<div>Comentario analista</div>'
+      +'<div>Estado / Aprobado por</div>'
+      +(isSup?'<div>Acciones</div>':'')
+      +'</div>';
+  }
+  function tblRow(r,showActions){
+    var u=getU(r.analystId);
+    var p=r.proposed||{};
+    var detail=typeLabel(p.type);
+    if(p.startTime&&p.endTime)detail+=': '+p.startTime+'–'+p.endTime;
+    if(p.extraHours)detail+=' (+'+p.extraHours+'h extra)';
+    if(p.breakMinutes!==undefined)detail+=', pausa '+p.breakMinutes+'min';
+    var reviewer=r.reviewedBy?getU(r.reviewedBy):null;
+    var ts=new Date(r.ts);
+    var statusColor=r.status==='approved'?'var(--green)':r.status==='rejected'?'var(--red)':'var(--amber)';
+    return'<div style="'+COLS+';gap:6px;padding:9px 12px;border-bottom:1px solid var(--border);font-size:12px;align-items:start">'
+      // Analista
+      +'<div style="display:flex;align-items:center;gap:5px"><div class="av '+u.av+'" style="width:22px;height:22px;font-size:9px;flex-shrink:0">'+escH(u.avInit)+'</div><span style="font-weight:600">'+escH(u.name)+'</span></div>'
+      // Fecha sol.
+      +'<div style="font-family:var(--mono);font-size:11px">'+ts.toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'})+'<br><span style="color:var(--text3)">'+ts.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})+'</span></div>'
+      // Fecha asig.
+      +'<div style="font-family:var(--mono);font-size:11px">'+(r.dateStr?fmtDF(r.dateStr):'<span style="color:var(--text3)">—</span>')+'</div>'
+      // Detalle
+      +'<div style="color:var(--text2)">'+escH(detail)+'</div>'
+      // Comentario analista
+      +'<div style="color:var(--text2)">'+(r.reason?escH(r.reason):'<span style="color:var(--text3)">—</span>')+'</div>'
+      // Estado / Aprobado por
+      +'<div><span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:'+statusColor+'22;color:'+statusColor+'">'+statusLabel2(r.status)+'</span>'
+      +(reviewer?'<div style="font-size:10px;color:var(--text3);margin-top:2px">↳ '+escH(reviewer.name)+'</div>':'')
+      +'</div>'
+      // Acciones
+      +(isSup?'<div style="display:flex;gap:4px">'
+        +(showActions?'<button class="btn sm suc" onclick="approveSchedule('+r.id+')">✓ Apr.</button>'
+          +'<button class="btn sm dan" onclick="rejectSchedule('+r.id+')">✗ Rec.</button>':'')
+        +'</div>':'')
+      +'</div>';
+  }
+
+  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">'
+    +'<div class="sec" style="margin-bottom:0">Solicitudes de cambio de horario</div>'
+    +'<button id="btn-copy-solicitudes" class="btn sm" onclick="('+copyAllToTsv.toString()+')()">📋 Copiar para Excel</button>'
+    +'</div>';
+
+  html+='<div class="sec" style="margin-bottom:8px;color:var(--amber)">Pendientes ('+pending.length+')</div>';
+  if(pending.length===0){
+    html+='<div class="empty" style="margin-bottom:20px">Sin solicitudes pendientes ✓</div>';
+  }else{
+    html+='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;overflow-x:auto;margin-bottom:20px">'
+      +tblHeader()+pending.map(function(r){return tblRow(r,true);}).join('')+'</div>';
+  }
+
   if(history.length>0){
-    html+='<div class="sec" style="margin-top:4px;margin-bottom:10px">Historial ('+history.length+')</div>';
-    html+='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;overflow-x:auto">'+tblHeader+history.map(function(r){return tblRow(r,false);}).join('')+'</div>';
+    html+='<div class="sec" style="margin-bottom:8px">Historial ('+history.length+')</div>';
+    html+='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;overflow-x:auto">'
+      +tblHeader()+history.map(function(r){return tblRow(r,false);}).join('')+'</div>';
   }
   return html;
 }
@@ -3627,37 +3718,7 @@ function renderNotificaciones(){
 // Each entry: { ts, userId, userName, action, entity, entityId, field, oldVal, newVal, reason }
 // ══════════════════════════════════════════════════════════════════════
 
-function auditLog(action, entity, entityId, details, reason) {
-  if(!currentUser) return;
-  const entry = {
-    id: 'AL' + Date.now() + Math.random().toString(36).slice(2,6),
-    ts: Date.now(),
-    userId: currentUser.id,
-    userName: currentUser.name,
-    userRole: currentUser.role,
-    action: action,       // 'CREATE'|'EDIT'|'STATUS_CHANGE'|'DELETE'|'APPROVE'|'REVIEW'|'OBSERVE'|'LOGIN'|'LOGOUT'
-    entity: entity,       // 'TASK'|'USER'|'SCHEDULE'|'ABSENCE'|'MGMT'
-    entityId: entityId,
-    details: details||{}, // { field, oldVal, newVal } or other context
-    reason: reason||''
-  };
-  if(!Array.isArray(auditTrail)) auditTrail=[];
-  auditTrail.push(entry);
-  // Purge entries older than 15 days; alert supervisor before losing data
-  var _now15=Date.now();
-  var _cutoff15=_now15-15*24*60*60*1000;
-  var _expiring15=auditTrail.filter(function(e){return e.ts<_cutoff15;});
-  if(_expiring15.length>0&&isSupRole&&isSupRole()){
-    setTimeout(function(){
-      if(confirm('⚠️ AUDIT TRAIL: '+_expiring15.length+' registro(s) anteriores a 15 días serán eliminados.\n\n¿Desea exportar antes de continuar?')){
-        exportAuditCSV();
-      }
-    },800);
-  }
-  var _kept15=auditTrail.filter(function(e){return e.ts>=_cutoff15;});
-  auditTrail=_kept15.length>=200?_kept15:auditTrail.slice(-Math.max(200,_kept15.length));
-  saveLS();
-}
+// auditLog() definida en la capa de persistencia Gist (línea ~453) — escribe al Gist compartido
 
 // ── Electronic signature: require reason for critical actions ──
 function requireSignature(action, label, callback) {
@@ -3839,14 +3900,9 @@ function recordLoginFailure(uid, name) {
   if(!loginAttempts[uid]) loginAttempts[uid] = {count:0, lastTs:0};
   loginAttempts[uid].count++;
   loginAttempts[uid].lastTs = Date.now();
-  auditLog('LOGIN_FAIL','USER',uid,{
-    description:'Intento fallido de acceso ('+(loginAttempts[uid].count)+'/'+MAX_LOGIN_ATTEMPTS+')',
-    userName: name||uid
-  },'');
+  /* LOGIN_FAIL no se registra en audit trail */
   if(loginAttempts[uid].count >= MAX_LOGIN_ATTEMPTS) {
-    auditLog('ACCOUNT_LOCKED','USER',uid,{
-      description:'Cuenta bloqueada por '+MAX_LOGIN_ATTEMPTS+' intentos fallidos. Bloqueo: 15 min.'
-    },'');
+    /* ACCOUNT_LOCKED no se registra en audit trail */
   }
 }
 function recordLoginSuccess(uid) {
@@ -3867,10 +3923,7 @@ function startSessionWatchdog() {
     if(!currentUser) return;
     const idle = Date.now() - _lastActivityTs;
     if(idle >= SESSION_TIMEOUT_MS) {
-      auditLog('SESSION_TIMEOUT','USER',currentUser.id,{
-        description:'Sesión cerrada automáticamente por inactividad (30 min)',
-        idleMinutes: Math.round(idle/60000)
-      },'');
+      /* SESSION_TIMEOUT no se registra en audit trail */
       currentUser = null;
       selectedLoginUser = null;
       loginStep = 1;
@@ -4295,13 +4348,14 @@ function openReplanSuper(taskId){
     else{alert('No se encontró ese analista.');}
   }
 }
-function tRowAna(t){
+function tRowAna(t,maOverride){
   var todayStr=today();
   var todayDate=new Date(todayStr+'T12:00:00');
-  // Todas las asignaciones de este analista en esta tarea
-  var myAssigns=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id;});
-  // Elegir la asignación más relevante: primero la de hoy, luego la más cercana a hoy
-  var ma=myAssigns.find(function(a){return a.date===todayStr;})
+  // Todas las asignaciones de este analista en esta tarea (excluyendo las removidas)
+  var myAssigns=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
+  // PUNTO 4: si se pasa una asignación específica (maOverride), usarla directamente
+  // Si no, elegir la más relevante: hoy primero, luego la más cercana
+  var ma=maOverride||myAssigns.find(function(a){return a.date===todayStr;})
     || myAssigns.slice().sort(function(a,b){
         return Math.abs(new Date(a.date+'T12:00:00')-todayDate)
              - Math.abs(new Date(b.date+'T12:00:00')-todayDate);
@@ -4389,7 +4443,24 @@ function renderTasks(){
   const thead='<div class="thead" style="'+cols+'"><div>Producto / Lote</div><div>Analistas</div><div>Aprob. límite</div><div>Estado</div><div>Prioridad</div><div>H.Est.</div><div>H.Real</div><div></div><div></div></div>';
   let rows='';
   if(!sup){
-    rows=f.length===0?'<div class="empty">Sin análisis asignados</div>':f.map(function(t){return tRowAna(t);}).join('');
+    // PUNTO 4: mostrar UNA FILA POR FECHA ASIGNADA (no solo la más cercana)
+    if(f.length===0){
+      rows='<div class="empty">Sin análisis asignados</div>';
+    } else {
+      // Expandir: para cada tarea, una fila por asignación de este analista
+      var expandedRows=[];
+      f.forEach(function(t){
+        var myAssigns=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
+        if(myAssigns.length===0){
+          expandedRows.push(tRowAna(t,null)); // sin fecha específica
+        } else {
+          // Ordenar por fecha
+          myAssigns.slice().sort(function(a,b){return(a.date||'').localeCompare(b.date||'');})
+            .forEach(function(ma){expandedRows.push(tRowAna(t,ma));});
+        }
+      });
+      rows=expandedRows.join('');
+    }
   }else if(tasksView==='lote'){
     rows=f.length===0?'<div class="empty">Sin resultados</div>':thead+f.map(function(t){return tRowSupLote(t);}).join('');
   }else{
@@ -5449,9 +5520,13 @@ function exportXLSX(){
 
 // ── GENERAL ACTIONS ──
 function setView(v){currentView=v;render();}
-function logout(){if(currentUser)auditLog('LOGOUT','USER',currentUser.id,{description:'Cierre de sesion'},'');currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';render();}
+function logout(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';render();}
 function openNewTask(){editingTask=null;selectedAnalysts=[];analystDates={};analystEstimHours={};multiAssigns=[];showModal=true;render();}
-function openEdit(id){if(!isSupRole())return;editingTask=id;showModal=true;render();}
+function openEdit(id){
+  // Supervisor: edición completa. Revisor: solo visualización.
+  if(!isSupRole()&&!isReviewerRole())return;
+  editingTask=id;showModal=true;render();
+}
 function closeModal(){showModal=false;editingTask=null;render();}
 function setMTab(t){modalTab=t;if(t!=='template')pastePreview=[];render();}
 function openChangePwd(){showChangePwd=true;render();}
@@ -5503,6 +5578,7 @@ function markReviewed(id){
         reviewedDate:t.reviewedDate
       },reason);
       saveLS();render();
+      saveNow().catch(e=>console.error('saveNow reviewed:',e));
     }
   );
 }
@@ -5536,27 +5612,58 @@ function markApproved(id){
         approvedDate:t.approvedDate,lateApproval:t.due&&t.approvedDate>t.due
       },reason);
       saveLS();render();
+      saveNow().catch(e=>console.error('saveNow approved:',e));
     }
   );
 }
 
 function markObserved(id){
   const t=tasks.find(x=>x.id===id);if(!t)return;
-  const comment=prompt('Observación (requerida):','');
+  // Permitido a Supervisor Y Revisor
+  if(currentUser.role!=='supervisor'&&currentUser.role!=='reviewer'){
+    alert('Solo el Supervisor o el Revisor pueden observar un análisis.');return;
+  }
+  const comment=prompt('Observación (requerida — se notificará al analista):','');
   if(comment===null)return;
   if(!comment.trim()){alert('La observación no puede estar vacía.');return;}
   if(!t.observations)t.observations=[];
-  t.observations.push({by:currentUser.id,ts:Date.now(),comment:comment.trim(),fromStatus:t.status});
+  const obsEntry={by:currentUser.id,byName:currentUser.name,byRole:currentUser.role,
+    ts:Date.now(),comment:comment.trim(),fromStatus:t.status};
+  t.observations.push(obsEntry);
   t.status='observed';
   t.observedBy=currentUser.id;
-  auditLog('OBSERVE','TASK',id,{field:'status',oldVal:'done',newVal:'observed',description:t.producto+' '+t.lote},comment||'');
   t.observedTs=Date.now();
+  // Notificar a TODOS los analistas asignados
+  const assignees=[...new Set((t.assignments||[]).map(a=>a.analyst))];
+  assignees.forEach(function(analystId){
+    if(!Array.isArray(replanNotifs))replanNotifs=[];
+    replanNotifs.push({
+      id:nextNotifId++,
+      type:'observation',
+      taskId:id,
+      analystId:analystId,
+      status:'pending',
+      ts:Date.now(),
+      fromUser:currentUser.id,
+      fromName:currentUser.name,
+      fromRole:currentUser.role,
+      comment:comment.trim(),
+      producto:t.producto,
+      lote:t.lote
+    });
+  });
+  auditLog('OBSERVE','TASK',id,{
+    field:'status',oldVal:obsEntry.fromStatus,newVal:'observed',
+    description:'Observación: '+t.producto+' '+t.lote+' — '+comment.slice(0,80)
+  },comment);
   saveLS();render();
 }
 
 function confirmDone(id){
   const t=tasks.find(x=>x.id===id);if(!t)return;
   t.status='done';t.confirmedBy=currentUser.id;t.confirmedTs=Date.now();
+  auditLog('CONFIRM','TASK',id,{field:'status',oldVal:'pending-confirm',newVal:'done',
+    description:'Confirmación completado: '+t.producto+' '+t.lote},'');
   saveLS();render();
 }
 function requestScheduleChange(analystId,dateStr){
@@ -5572,12 +5679,22 @@ function approveSchedule(reqId){
     setAnalystDefault(req.analystId,req.proposed);
   }
   req.status='approved';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();
+  auditLog('APPROVE','SCHEDULE_REQUEST',req.id,{
+    analystId:req.analystId,analystName:getU(req.analystId).name,
+    dateStr:req.dateStr||'default',type:(req.proposed||{}).type
+  },'Solicitud aprobada');
   saveLS();render();
+  saveNow().catch(e=>console.error('saveNow approve:',e));
 }
 function rejectSchedule(reqId){
   const req=scheduleRequests.find(r=>r.id===reqId);if(!req)return;
   req.status='rejected';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();
+  auditLog('REJECT','SCHEDULE_REQUEST',req.id,{
+    analystId:req.analystId,analystName:getU(req.analystId).name,
+    dateStr:req.dateStr||'default',type:(req.proposed||{}).type
+  },'Solicitud rechazada');
   saveLS();render();
+  saveNow().catch(e=>console.error('saveNow reject:',e));
 }
 function setAnalystScheduleDirect(analystId){
   schedModalAnalyst=analystId;schedModalDate=null;showSchedModal=true;render();
@@ -5607,6 +5724,8 @@ function markProg(id){
   }
   t.status='progress';t.startedTs=Date.now();
   if(!t.startDatetime)t.startDatetime=new Date().toISOString().slice(0,16);
+  auditLog('START','TASK',id,{field:'status',oldVal:'scheduled',newVal:'progress',
+    description:'Inicio de análisis: '+t.producto+' '+t.lote},'');
   saveLS();render();
 }
 function deleteTask(id){
@@ -5724,9 +5843,15 @@ function rejectReplan(notifId){
 }
 function renderNotifPanel(){
   const isSup=currentUser.role==='supervisor';
+  // Incluir notificaciones de observación además de replanificación
   const myNotifs=isSup
-    ?replanNotifs.filter(n=>n.status==='pending').sort((a,b)=>b.ts-a.ts)
-    :replanNotifs.filter(n=>n.analystId===currentUser.id).sort((a,b)=>b.ts-a.ts);
+    ?replanNotifs.filter(function(n){return n.status==='pending';}).sort(function(a,b){return b.ts-a.ts;})
+    :replanNotifs.filter(function(n){
+        return n.analystId===currentUser.id;
+     }).sort(function(a,b){return b.ts-a.ts;});
+  // Separar observaciones de replanificaciones
+  const myObsNotifs=myNotifs.filter(function(n){return n.type==='observation';});
+  const myReplanNotifs=myNotifs.filter(function(n){return n.type!=='observation';});
   const pendCount=replanNotifs.filter(n=>n.status==='pending').length;
   const confirmCount=tasks.filter(t=>t.status==='pending-confirm').length;
   if(!showNotifPanel){
@@ -5743,7 +5868,20 @@ function renderNotifPanel(){
         <span style="font-size:14px;font-weight:600">Solicitudes de replanificación</span>
         <button class="btn sm" onclick="showNotifPanel=false;render()" style="margin-left:auto">✕</button>
       </div>
-      ${currentUser.role!=='supervisor'&&scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='approved'&&!r._seenByAnalyst).length>0?`
+      \${myObsNotifs.length>0?\`
+    <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--amber-bg)">
+      <div style="font-size:12px;font-weight:600;color:var(--amber-text);margin-bottom:8px">⚑ Observaciones sobre tus análisis (\${myObsNotifs.length})</div>
+      \${myObsNotifs.map(function(n){
+        const taskRef=tasks.find(function(t){return t.id===n.taskId;});
+        return\`<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--amber)">
+          <div style="font-size:12px;font-weight:600">\${escH(n.producto||'')} — \${escH(n.lote||'')}</div>
+          <div style="font-size:11px;color:var(--text2);margin:3px 0">\${escH(n.comment||'')}</div>
+          <div style="font-size:10px;color:var(--text3)">Por \${escH(n.fromName||'')} · \${new Date(n.ts).toLocaleDateString('es')}</div>
+          \${n.status==='pending'?\`<button class="btn sm" style="margin-top:5px;font-size:10px" onclick="markObsNotifRead(\${n.id})">✓ Marcar como leída</button>\`:'<span style="font-size:10px;color:var(--green)">✓ Leída</span>'}
+        </div>\`;
+      }).join('')}
+    </div>\`:''}
+    ${currentUser.role!=='supervisor'&&scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='approved'&&!r._seenByAnalyst).length>0?`
     <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--green-bg)">
       <div style="font-size:12px;font-weight:600;color:var(--green-text);margin-bottom:8px">✓ Cambios de horario aprobados</div>
       ${scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='approved'&&!r._seenByAnalyst).map(req=>`
@@ -5863,10 +6001,50 @@ function saveTask(){
       alert('⚠️ AVISO: La fecha límite es el objetivo de APROBACIÓN.\n'
         +'Las siguientes fechas de análisis coinciden o superan esa fecha, sin dejar tiempo para revisión y aprobación:\n'
         +_ln+'\n\nVencimiento (aprobación): '+fmtDF(due)+'\nRevisá la planificación.');
+      // PUNTO 5: registrar aviso en audit trail
+      auditLog('WARNING','TASK',editingTask||'NEW',{
+        description:'Fecha de análisis posterior a fecha límite de aprobación',
+        assignments:_ln, due:due
+      },'Aviso automático de planificación');
     }
   }
   var _estH=assignments.reduce(function(s,a){return s+(a.estimatedHours||0);},0)||0;
-  if(editingTask){const t=tasks.find(x=>x.id===editingTask);if(t){saveTaskVersion(t);Object.assign(t,{producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes,estimatedHours:_estH||t.estimatedHours||0});}}
+  if(editingTask){
+    const t=tasks.find(x=>x.id===editingTask);
+    if(t){
+      saveTaskVersion(t);
+      // PUNTO 2: preservar todos los datos de análisis completados
+      // Solo actualizar campos de planificación — NUNCA sobreescribir historial de ejecución
+      const preserveFields=['status','completedBy','completedTs','startedTs','startDatetime',
+        'reviewedBy','reviewedTs','reviewedDate','approvedBy','approvedTs','approvedDate',
+        'confirmedBy','confirmedTs','observedBy','observedTs','observations','_history',
+        '_integrity','_integrityTs'];
+      // Merge assignments: preservar timeLog y realHours de asignaciones existentes
+      const mergedAssignments=assignments.map(function(newA){
+        const oldA=(t.assignments||[]).find(function(a){
+          return a.analyst===newA.analyst&&a.date===newA.date;
+        });
+        // Si la asignación ya existía, preservar su historial de ejecución
+        if(oldA)return Object.assign({},oldA,{estimatedHours:newA.estimatedHours||oldA.estimatedHours||0});
+        return newA;
+      });
+      // Reasignaciones eliminadas: preservar como historial si tienen datos
+      const removedWithData=(t.assignments||[]).filter(function(oldA){
+        const stillPresent=assignments.some(function(newA){
+          return newA.analyst===oldA.analyst&&newA.date===oldA.date;
+        });
+        return !stillPresent&&(oldA.realHours||oldA.timeLog&&oldA.timeLog.length);
+      }).map(function(a){return Object.assign({},a,{_removed:true,_removedTs:Date.now()});});
+      const finalAssignments=mergedAssignments.concat(removedWithData);
+      // Aplicar solo campos de planificación
+      t.producto=prod;t.lote=lote;t.created=created;t.due=due;
+      t.priority=priority;t.notes=notes;
+      t.estimatedHours=_estH||t.estimatedHours||0;
+      t.assignments=finalAssignments;
+      // Estado: solo retroceder si aún no inició (pending/scheduled)
+      if(t.status==='pending'||t.status==='scheduled')t.status=_autoStatus;
+    }
+  }
   else tasks.push({id:nextId++,producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes,estimatedHours:_estH});
   const _eid2=editingTask;
   showModal=false;editingTask=null;
@@ -5875,6 +6053,13 @@ function saveTask(){
   render();
 }
 
+
+// Marcar notificación de observación como leída
+function markObsNotifRead(notifId){
+  const n=replanNotifs.find(function(x){return x.id===notifId;});
+  if(n){n.status='read';n.readTs=Date.now();}
+  saveLS();render();
+}
 
 // ── BOOT v9 — GitHub Gist (sin SharePoint, sin Azure AD) ──
 function emergencyReset() {
