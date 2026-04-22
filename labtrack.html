@@ -5524,35 +5524,46 @@ function markDone(id){
   const t=tasks.find(x=>x.id===id);if(!t)return;
   if(currentUser.role==='analyst'||currentUser.role==='reviewer'){
     if(t.status==='observed'){
-      // Re-envío tras observación: va directo a 'done' para que vuelva a la cola de revisión
+      // Re-envío tras observación
+      var resubComment=prompt('Comentario de re-envío (requerido):','');
+      if(resubComment===null)return;
+      if(!resubComment.trim()){alert('Debe ingresar un comentario.');return;}
+      // Opción de replanificar simultáneamente
+      var wantsReplan=confirm('¿Desea también solicitar una replanificación de fechas junto con el re-envío?');
       const oldStatus=t.status;
       t.status='done';
       t.resubmittedBy=currentUser.id;
       t.resubmittedTs=Date.now();
+      t.resubmitComment=resubComment.trim();
+      if(!t.resubmitHistory)t.resubmitHistory=[];
+      t.resubmitHistory.push({by:currentUser.id,byName:currentUser.name,ts:Date.now(),comment:resubComment.trim()});
       auditLog('STATUS_CHANGE','TASK',id,{
         field:'status',oldVal:oldStatus,newVal:'done',
-        description:'Re-envío tras observación: '+t.producto+' '+t.lote
-      },'Re-envío tras observación');
-      // Notificar al Supervisor que hay un análisis re-enviado listo para revisar
+        description:'Re-envío tras observación: '+t.producto+' '+t.lote,
+        comment:resubComment.trim()
+      },'Re-envío: '+resubComment.trim());
+      // Marcar notificación de observación como leída
+      replanNotifs.forEach(function(n){
+        if(n.type==='observation'&&n.taskId===id&&n.analystId===currentUser.id)n.status='read';
+      });
+      // Notificar al Supervisor
       var supUsers=USERS.filter(function(u){return u.role==='supervisor';});
       supUsers.forEach(function(sup){
         replanNotifs.push({
-          id:nextNotifId++,
-          type:'resubmit',
-          taskId:id,
-          analystId:currentUser.id,
-          forUserId:sup.id,
-          status:'pending',
-          ts:Date.now(),
-          fromUser:currentUser.id,
-          fromName:currentUser.name,
-          producto:t.producto,
-          lote:t.lote,
-          comment:'Análisis re-enviado tras observación'
+          id:nextNotifId++,type:'resubmit',taskId:id,
+          analystId:currentUser.id,forUserId:sup.id,status:'pending',
+          ts:Date.now(),fromUser:currentUser.id,fromName:currentUser.name,
+          producto:t.producto,lote:t.lote,comment:resubComment.trim()
         });
       });
       saveLS();render();
       saveNow().catch(function(e){console.error('saveNow resubmit:',e);});
+      // Si quiere replanificar, abrir el modal de replanificación
+      if(wantsReplan){
+        var myAssigns=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
+        var ma=myAssigns[0];
+        if(ma){showNotifPanel=false;openReplan(id,currentUser.id);}
+      }
     } else {
       // Primera vez: pide confirmación del supervisor
       t.status='pending-confirm';
@@ -5899,12 +5910,20 @@ function renderNotifPanel(){
     html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--amber-bg)">'
       +'<div style="font-size:12px;font-weight:600;color:var(--amber-text);margin-bottom:8px">⚑ Observaciones ('+myObsNotifs.length+')</div>';
     myObsNotifs.forEach(function(n){
+      var obsTask=tasks.find(function(x){return x.id===n.taskId;});
+      var isObservedNow=obsTask&&obsTask.status==='observed';
       html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--amber)">'
         +'<div style="font-size:12px;font-weight:600">'+escH(n.producto||'')+(n.lote?' — '+escH(n.lote):'')+'</div>'
-        +'<div style="font-size:11px;color:var(--text2);margin:3px 0">'+escH(n.comment||'')+'</div>'
-        +'<div style="font-size:10px;color:var(--text3)">Por '+escH(n.fromName||'')+(n.ts?' · '+new Date(n.ts).toLocaleDateString('es'):'')+'</div>'
-        +(n.status==='pending'?'<button class="btn sm" style="margin-top:5px;font-size:10px" onclick="markObsNotifRead('+n.id+')">✓ Marcar como leída</button>':'<span style="font-size:10px;color:var(--green)">✓ Leída</span>')
-        +'</div>';
+        +'<div style="font-size:11px;color:var(--amber-text);font-weight:500;margin:3px 0">Observación: '+escH(n.comment||'')+'</div>'
+        +'<div style="font-size:10px;color:var(--text3)">Por '+escH(n.fromName||'')+(n.ts?' · '+new Date(n.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit'}):'')+'</div>'
+        +'<div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap">'  
+        +(isObservedNow
+          ?'<button class="btn pri sm" style="flex:1;font-size:10px" onclick="showNotifPanel=false;currentView=\'tasks\';filterSearch=\''+escH(n.lote||'')+'\';;render()">↩ Ir al análisis y re-enviar</button>'
+          :'')
+        +(n.status==='pending'
+          ?'<button class="btn sm" style="font-size:10px" onclick="markObsNotifRead('+n.id+')">✓ Leído</button>'
+          :'<span style="font-size:10px;color:var(--green)">✓ Leída</span>')
+        +'</div></div>';
     });
     html+='</div>';
   }
@@ -5954,7 +5973,7 @@ function renderNotifPanel(){
       html+='<div style="background:var(--surface);border-radius:var(--radius);padding:7px 9px;margin-bottom:5px;font-size:12px">'
         +'<div style="font-weight:500">'+(req.dateStr?fmtDF(req.dateStr):'Horario predeterminado')+'</div>'
         +'<div style="color:var(--text2)">'+(req.proposed?req.proposed.startTime+' – '+req.proposed.endTime+' aprobado':'')+'</div>'
-        +'<button class="btn sm" style="margin-top:4px;font-size:10px;width:100%" onclick="req._seenByAnalyst=true;currentView=&quot;myschedule&quot;;showNotifPanel=false;render()">Ver mi cronograma &#x2192;</button>'
+        +'<button class="btn sm" style="margin-top:4px;font-size:10px;width:100%" onclick="markSchedApprovedRead('+req.id+');showNotifPanel=false;currentView=\'cronograma\';render()">📅 Ver mi cronograma →</button>'
         +'</div>';
     });
     html+='</div>';
@@ -6118,6 +6137,15 @@ function markObsNotifRead(notifId){
     saveNow().catch(function(e){console.error('saveNow notifRead:',e);});
     render();
   }
+}
+
+// Marcar cambio de horario aprobado como visto
+function markSchedApprovedRead(reqId){
+  var nid=Number(reqId);
+  var req=scheduleRequests.find(function(r){return r.id===nid||r.id===reqId;});
+  if(req){req._seenByAnalyst=true;}
+  saveLS();
+  render();
 }
 
 // ── BOOT v9 — GitHub Gist (sin SharePoint, sin Azure AD) ──
