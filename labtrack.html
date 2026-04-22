@@ -151,6 +151,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
   .pill.reviewed{background:#e4f2ea;color:#1e5c35}
  
 
+@keyframes spin{to{transform:rotate(360deg)}}
 @media (max-width:600px){
   .login-card{padding:28px 20px;}
   .shell{flex-direction:column;}
@@ -282,8 +283,7 @@ function rebuildDerived(){
   });
 }
 
-// ── STORAGE ──
-const SK={tasks:'lt4-tasks',nid:'lt4-nid',pwds:'lt4-pwds',users:'lt4-users',uid:'lt4-uid'};
+// SK object removed — persistence via GitHub Gist
 function getSnapshot(){
   return JSON.stringify({
     savedAt:Date.now(),
@@ -326,67 +326,474 @@ function applySnapshot(json){
   }catch(e){return false;}
 }
 let _saveLSTimer=null;
-function saveLS(){
-  if(_saveLSTimer)clearTimeout(_saveLSTimer);
-  _saveLSTimer=setTimeout(_doSave,400);
-}
-// ══════════════════════════════════════════════════════
-// SMART MERGE — prevents data loss on concurrent edits
-// ══════════════════════════════════════════════════════
 
-function _doSave(){
-  _saveLSTimer=null;
-  try{
-    const snap=getSnapshot();
-    localStorage.setItem('lt4-snap',snap);
-    localStorage.setItem(SK.tasks,JSON.stringify(tasks));
-    localStorage.setItem(SK.nid,String(nextId));
-    localStorage.setItem(SK.pwds,JSON.stringify(passwords));
-    localStorage.setItem(SK.users,JSON.stringify(USERS.map(u=>({id:u.id,name:u.name,role:u.role}))));
-    localStorage.setItem(SK.uid,String(nextUid));
-  }catch(e){}
-  if(CLOUD.enabled&&cloudInitDone){cloudSave();}
+// ═══════════════════════════════════════════════════════════════════════════
+// LABTRACK v9 — GITHUB GIST PERSISTENCE LAYER
+// Hosting: GitHub Pages | Datos: GitHub Gist API (CORS nativo, privado)
+// Sin Azure AD. Sin PowerShell. Sin IT. Sin servicios pagos.
+// Auth: Personal Access Token (scope: gist) — creado por el usuario en 30s
+// ═══════════════════════════════════════════════════════════════════════════
+
+const GIST_API = 'https://api.github.com/gists';
+const GIST_FILE_STATE = 'labtrack_state.json';
+const GIST_FILE_AUDIT = 'labtrack_audit.json';
+
+// Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
+let GIST_CONFIG = { token:'', gistId:'', configured:false };
+
+// Estado interno
+let gistStatus    = 'offline';
+let gistLastSync  = null;
+let _lastRemoteTs = 0;       // savedAt del último pull — evita writes innecesarios
+let _auditBuffer  = [];      // eventos de audit pendientes de flush
+let _syncTimer    = null;
+let _saveDebounce = null;
+let _auditDebounce = null;
+let _pendingSaves = {};
+const SYNC_INTERVAL  = 30000;
+const SAVE_DEBOUNCE  = 1500;
+const AUDIT_DEBOUNCE = 3000;
+
+// ══════════════════════════════════════════════════════════════
+// HTTP helpers
+// ══════════════════════════════════════════════════════════════
+
+async function _gistFetch(method, path, body) {
+  const r = await fetch(GIST_API + (path||''), {
+    method: method||'GET',
+    headers: {
+      'Authorization': 'Bearer ' + GIST_CONFIG.token,
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(body ? { 'Content-Type': 'application/json' } : {})
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(()=>'');
+    throw new Error('GitHub API ' + r.status + ': ' + t.slice(0,200));
+  }
+  return r.status === 204 ? {} : r.json();
 }
-function exportDataFile(){
-  try{
-    const snap=getSnapshot();
-    const b64=btoa(unescape(encodeURIComponent(snap)));
-    const dataUrl='data:application/json;base64,'+b64;
-    const a=document.createElement('a');
-    a.href=dataUrl;a.download='labtrack_datos_'+today()+'.json';a.style.display='none';
-    document.body.appendChild(a);a.click();
-    setTimeout(()=>a.remove(),500);
-  }catch(e){
-    try{
-      const snap=getSnapshot();
-      const blob=new Blob([snap],{type:'application/json'});
-      const url=URL.createObjectURL(blob);
-      const a=document.createElement('a');a.href=url;a.download='labtrack_datos_'+today()+'.json';
-      document.body.appendChild(a);a.click();
-      setTimeout(()=>{try{URL.revokeObjectURL(url);}catch(e2){}a.remove();},1000);
-    }catch(e2){alert('Error al exportar datos.');}
+
+// ══════════════════════════════════════════════════════════════
+// GIST — crear o encontrar el gist de LabTrack
+// ══════════════════════════════════════════════════════════════
+
+async function _gistFindOrCreate() {
+  // Buscar gist existente por descripción
+  let page = 1;
+  while (page <= 5) {
+    const list = await _gistFetch('GET', '?per_page=100&page=' + page);
+    if (!list.length) break;
+    const found = list.find(g => g.description === 'LabTrack-Data');
+    if (found) { GIST_CONFIG.gistId = found.id; _saveGistConfig(); return found.id; }
+    if (list.length < 100) break;
+    page++;
+  }
+  // No encontrado — crear nuevo
+  const created = await _gistFetch('POST', '', {
+    description: 'LabTrack-Data',
+    public: false,
+    files: {
+      [GIST_FILE_STATE]: { content: getSnapshot() },
+      [GIST_FILE_AUDIT]: { content: '[]' }
+    }
+  });
+  GIST_CONFIG.gistId = created.id;
+  _saveGistConfig();
+  return created.id;
+}
+
+// ══════════════════════════════════════════════════════════════
+// AUDIT TRAIL — append-only, global
+// ══════════════════════════════════════════════════════════════
+
+async function writeAuditEntry(action, entity, entityId, details, reason) {
+  if (!currentUser) return;
+  const ts = Date.now();
+  const entry = {
+    id: 'AL' + ts + Math.random().toString(36).slice(2,5),
+    ts, userId: currentUser.id, userName: currentUser.name, userRole: currentUser.role,
+    action, entity, entityId: String(entityId), details: details||{}, reason: reason||''
+  };
+  // Agregar a caché local inmediatamente
+  if (!Array.isArray(auditTrail)) auditTrail = [];
+  auditTrail.unshift(entry);
+  // Acumular en buffer para flush debounced
+  _auditBuffer.push(entry);
+  if (_auditDebounce) clearTimeout(_auditDebounce);
+  _auditDebounce = setTimeout(_flushAuditBuffer, AUDIT_DEBOUNCE);
+}
+
+async function _flushAuditBuffer() {
+  _auditDebounce = null;
+  if (!_auditBuffer.length || !GIST_CONFIG.configured) return;
+  const toFlush = [..._auditBuffer]; _auditBuffer = [];
+  try {
+    // Leer audit actual del gist
+    const gist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+    const raw = gist.files[GIST_FILE_AUDIT]?.content || '[]';
+    let existing = [];
+    try { existing = JSON.parse(raw); } catch(e) {}
+    // Prepend nuevos (más reciente primero), cap 500 entradas
+    const merged = [...toFlush, ...existing].slice(0, 500);
+    await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
+      files: { [GIST_FILE_AUDIT]: { content: JSON.stringify(merged, null, 2) } }
+    });
+  } catch(e) {
+    console.warn('Audit flush failed, re-buffering:', e.message);
+    _auditBuffer = [...toFlush, ..._auditBuffer]; // re-encolar
   }
 }
-function importDataFile(){
-  const inp=document.createElement('input');
-  inp.type='file';inp.accept='.json';
-  inp.onchange=e=>{
-    const file=e.target.files[0];if(!file)return;
-    const reader=new FileReader();
-    reader.onload=ev=>{
-      if(applySnapshot(ev.target.result)){
-        saveLS();
-        currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';
-        alert('Datos importados correctamente. Iniciá sesión nuevamente.');
-        render();
-      } else {
-        alert('Error: el archivo no tiene el formato correcto de LabTrack.');
+
+// Compatibilidad con código existente
+function auditLog(action, entity, entityId, details, reason) {
+  writeAuditEntry(action, entity, entityId, details, reason).catch(e => console.error('auditLog:', e));
+}
+
+// ══════════════════════════════════════════════════════════════
+// ESTADO OPERATIVO — snapshot firmado por Supervisor
+// ══════════════════════════════════════════════════════════════
+
+async function establecerEstadoOperativo() {
+  if (!isSupRole()) { alert('Solo el Supervisor puede establecer el estado operativo.'); return; }
+  const motivo = prompt('Motivo (requerido — queda registrado en el audit trail):');
+  if (!motivo?.trim()) { alert('Motivo requerido.'); return; }
+  if (!confirm('¿Establecer el estado actual como punto de referencia único en GitHub?\n\nTodos los usuarios cargarán desde este snapshot al iniciar.')) return;
+  _showSpinner('Estableciendo estado operativo…');
+  try {
+    const snap = JSON.parse(getSnapshot());
+    snap._operationalBase = { setAt: Date.now(), setBy: currentUser.id, setByName: currentUser.name, motivo };
+    await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
+      files: { [GIST_FILE_STATE]: { content: JSON.stringify(snap) } }
+    });
+    await writeAuditEntry('SNAPSHOT_SET','SYSTEM','OPERATIONAL_STATE', { motivo }, motivo);
+    await _flushAuditBuffer();
+    _hideSpinner();
+    alert('✓ Estado operativo establecido.\nTodos los usuarios cargarán desde este punto.');
+  } catch(e) { _hideSpinner(); alert('Error: ' + e.message); }
+}
+
+// ══════════════════════════════════════════════════════════════
+// SAVE — debounced, escribe state.json completo
+// ══════════════════════════════════════════════════════════════
+
+function saveLS(hint) {
+  if (hint) _pendingSaves[hint] = true;
+  else ['workdayConfig','analystSchedules','mgmtCategories','users','passwords','absenceTypesDef','counters'].forEach(k=>{ _pendingSaves[k]=true; });
+  if (_saveDebounce) clearTimeout(_saveDebounce);
+  _saveDebounce = setTimeout(_executeSave, SAVE_DEBOUNCE);
+}
+
+async function _executeSave() {
+  _saveDebounce = null;
+  if (!GIST_CONFIG.configured) return;
+  _pendingSaves = {};
+  gistStatus = 'syncing'; renderSpBadge();
+  try {
+    await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
+      files: { [GIST_FILE_STATE]: { content: getSnapshot() } }
+    });
+    gistStatus = 'ok'; gistLastSync = new Date();
+  } catch(e) { console.error('save:', e); gistStatus = 'error'; }
+  renderSpBadge();
+}
+
+// ══════════════════════════════════════════════════════════════
+// SYNC — pull de cambios desde Gist
+// ══════════════════════════════════════════════════════════════
+
+async function gistSyncFromRemote() {
+  if (!GIST_CONFIG.configured) return;
+  gistStatus = 'syncing'; renderSpBadge();
+  try {
+    const gist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+    const stateContent = gist.files[GIST_FILE_STATE]?.content;
+    if (!stateContent) throw new Error('Archivo state no encontrado en el gist');
+    let remoteState;
+    try { remoteState = JSON.parse(stateContent); } catch(e) { throw new Error('State JSON inválido'); }
+    const remoteTs = remoteState.savedAt || 0;
+    // Solo aplicar si el remoto es más nuevo que lo que ya tenemos
+    if (remoteTs > _lastRemoteTs) {
+      _lastRemoteTs = remoteTs;
+      const prevUser = currentUser;
+      applySnapshot(stateContent);
+      currentUser = prevUser; // preservar sesión activa
+      // Cargar también audit trail remoto
+      const auditContent = gist.files[GIST_FILE_AUDIT]?.content;
+      if (auditContent) {
+        try {
+          const remoteAudit = JSON.parse(auditContent);
+          // Merge: mantener entradas locales no pusheadas aún
+          const localIds = new Set(_auditBuffer.map(e=>e.id));
+          auditTrail = [..._auditBuffer, ...remoteAudit.filter(e=>!localIds.has(e.id))];
+        } catch(e) {}
       }
+      render();
+    }
+    gistStatus = 'ok'; gistLastSync = new Date();
+  } catch(e) { console.error('gistSync:', e); gistStatus = 'error'; }
+  renderSpBadge();
+}
+
+// ══════════════════════════════════════════════════════════════
+// BADGE
+// ══════════════════════════════════════════════════════════════
+
+function renderSpBadge() {
+  const el = document.getElementById('sp-status-badge');
+  if (!el) return;
+  const map = {
+    offline:    { c:'var(--text3)',  t: GIST_CONFIG.configured ? '⚠ sin conexión' : '⚙ Configurar sync' },
+    connecting: { c:'var(--blue)',   t:'⟳ Conectando…' },
+    ok:         { c:'var(--green)',  t:'⬡ ' + (gistLastSync ? gistLastSync.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'}) : 'OK') },
+    syncing:    { c:'var(--blue)',   t:'↑ Guardando…' },
+    error:      { c:'var(--red)',    t:'⚠ Error sync' }
+  };
+  const s = map[gistStatus] || map.offline;
+  el.innerHTML = '<span style="color:'+s.c+';font-size:11px;font-weight:600;cursor:pointer" onclick="openSpConfig()" title="Sincronización GitHub — clic para configurar">'+s.t+'</span>';
+}
+
+// ══════════════════════════════════════════════════════════════
+// SPINNER
+// ══════════════════════════════════════════════════════════════
+
+function _showSpinner(msg) {
+  let el = document.getElementById('lt-global-spinner');
+  if (!el) { el=document.createElement('div'); el.id='lt-global-spinner'; el.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center'; document.body.appendChild(el); }
+  el.innerHTML = '<div style="background:var(--surface);border-radius:10px;padding:28px 36px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.3);min-width:260px"><div style="font-size:32px;margin-bottom:12px;animation:spin 1s linear infinite">⟳</div><div style="font-size:14px;font-weight:500">'+escH(msg||'Procesando…')+'</div></div>';
+}
+function _hideSpinner() { const el=document.getElementById('lt-global-spinner'); if(el) el.remove(); }
+
+// ══════════════════════════════════════════════════════════════
+// MODAL DE CONFIGURACIÓN
+// ══════════════════════════════════════════════════════════════
+
+let showSpConfig = false;
+function openSpConfig()  { showSpConfig=true;  render(); }
+function closeSpConfig() { showSpConfig=false; render(); }
+
+function renderSpConfigModal() {
+  const cfg = GIST_CONFIG;
+  return '<div class="modal-overlay" onclick="if(event.target===this)closeSpConfig()">'
+    +'<div class="modal" style="width:540px">'
+    +'<h3>⬡ Configuración de sincronización</h3>'
+
+    // Estado
+    +(cfg.configured
+      ?'<div style="background:var(--bg2);border-radius:var(--radius);padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:10px">'
+        +'<div style="width:8px;height:8px;border-radius:50%;background:'+(gistStatus==='ok'?'var(--green)':'var(--red)')+';flex-shrink:0"></div>'
+        +'<div style="flex:1"><div style="font-size:12px;font-weight:600">'+(gistStatus==='ok'?'Conectado':'Sin conexión')+'</div>'
+        +'<div style="font-size:11px;color:var(--text3)">Gist ID: '+escH(cfg.gistId.slice(0,12))+'… · '+escH(cfg.token.slice(0,8))+'…</div></div>'
+        +'<button class="btn sm" onclick="gistSyncFromRemote()">↻</button>'
+        +'</div>'
+      :'<div style="background:var(--amber-bg);border-radius:var(--radius);padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--amber-text)">⚠ No configurado. Los datos no se sincronizan entre dispositivos.</div>'
+    )
+
+    // Instrucciones
+    +'<div style="background:var(--blue-bg);border-radius:var(--radius);padding:12px 14px;font-size:12px;color:var(--blue-text);margin-bottom:14px;line-height:1.8">'
+    +'<b>Configuración inicial (solo una vez — solo el Supervisor):</b><br>'
+    +'1. Ir a <b>github.com → Settings → Developer settings → Personal access tokens → Tokens (classic)</b><br>'
+    +'2. Clic en <b>"Generate new token (classic)"</b><br>'
+    +'3. Nombre: <code>LabTrack</code> · Expiración: <code>No expiration</code><br>'
+    +'4. Marcar solo el scope <b><code>gist</code></b> · Clic en <b>Generate token</b><br>'
+    +'5. Copiar el token generado (empieza con <code>ghp_</code>) y pegarlo abajo<br>'
+    +'6. El Gist se crea automáticamente la primera vez'
+    +'</div>'
+
+    +'<div class="frow"><label>Personal Access Token de GitHub</label>'
+    +'<input type="password" id="gcfg-token" value="'+escH(cfg.token)+'" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" style="font-family:var(--mono);font-size:12px" autocomplete="off">'
+    +'</div>'
+
+    +'<div class="frow"><label>Gist ID <span style="font-weight:400;color:var(--text3)">(dejar vacío para crear automáticamente)</span></label>'
+    +'<input type="text" id="gcfg-gistid" value="'+escH(cfg.gistId)+'" placeholder="Se completa automáticamente" style="font-family:var(--mono);font-size:12px" autocomplete="off">'
+    +'</div>'
+
+    +'<div style="background:var(--bg2);border-radius:var(--radius);padding:9px 12px;font-size:11px;color:var(--text2);margin-bottom:12px">'
+    +'El token se guarda solo en este navegador (localStorage). El Supervisor debe compartir el token y el Gist ID con los demás usuarios para que sincronicen al mismo Gist.'
+    +'</div>'
+
+    +'<div class="modal-btns">'
+    +'<button class="btn" onclick="closeSpConfig()">Cancelar</button>'
+    +(cfg.configured?'<button class="btn dan" onclick="disconnectGist()">Desconectar</button>':'')
+    +'<button class="btn pri" onclick="saveGistConfig()">Guardar y conectar</button>'
+    +'</div>'
+    +'</div></div>';
+}
+
+async function saveGistConfig() {
+  const token  = (document.getElementById('gcfg-token')?.value||'').trim();
+  const gistId = (document.getElementById('gcfg-gistid')?.value||'').trim();
+  if (!token) { alert('El token es requerido.'); return; }
+  if (!token.startsWith('ghp_') && !token.startsWith('github_pat_') && token.length < 20) {
+    alert('El token no parece válido. Debe empezar con ghp_ o github_pat_'); return;
+  }
+  GIST_CONFIG = { token, gistId, configured:true };
+  _saveGistConfig();
+  closeSpConfig();
+  await gistBoot();
+}
+
+function disconnectGist() {
+  if (!confirm('¿Desconectar la sincronización? Los datos locales en memoria se mantienen.')) return;
+  GIST_CONFIG = { token:'', gistId:'', configured:false };
+  localStorage.removeItem('lt9-gist-config');
+  if (_syncTimer) clearInterval(_syncTimer);
+  gistStatus = 'offline'; renderSpBadge(); render();
+}
+
+function _saveGistConfig() {
+  localStorage.setItem('lt9-gist-config', JSON.stringify({ token: GIST_CONFIG.token, gistId: GIST_CONFIG.gistId }));
+}
+
+function loadSpConfig() {
+  try {
+    const c = JSON.parse(localStorage.getItem('lt9-gist-config')||'null');
+    if (c?.token) GIST_CONFIG = { token:c.token, gistId:c.gistId||'', configured:true };
+  } catch(e) {}
+}
+
+// ══════════════════════════════════════════════════════════════
+// BOOT
+// ══════════════════════════════════════════════════════════════
+
+async function gistBoot() {
+  if (!GIST_CONFIG.configured) {
+    _initDefaultState();
+    gistStatus = 'offline'; renderSpBadge();
+    render();
+    return;
+  }
+  _showSpinner('Conectando con GitHub…');
+  gistStatus = 'connecting'; renderSpBadge();
+  try {
+    // Encontrar o crear el gist
+    if (!GIST_CONFIG.gistId) {
+      _showSpinner('Creando repositorio de datos…');
+      await _gistFindOrCreate();
+    }
+    _showSpinner('Cargando estado operativo…');
+    // Leer estado remoto
+    const gist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+    const stateContent = gist.files[GIST_FILE_STATE]?.content;
+    if (stateContent) {
+      const remoteState = JSON.parse(stateContent);
+      _lastRemoteTs = remoteState.savedAt || 0;
+      // Si tiene _operationalBase, cargar ese estado como base
+      if (applySnapshot(stateContent)) {
+        // OK
+      }
+    } else {
+      _initDefaultState();
+    }
+    // Cargar audit trail
+    const auditContent = gist.files[GIST_FILE_AUDIT]?.content;
+    if (auditContent) {
+      try { auditTrail = JSON.parse(auditContent); } catch(e) {}
+    }
+    _hideSpinner();
+    gistStatus = 'ok'; gistLastSync = new Date(); renderSpBadge();
+    if (_syncTimer) clearInterval(_syncTimer);
+    _syncTimer = setInterval(gistSyncFromRemote, SYNC_INTERVAL);
+    render();
+  } catch(e) {
+    _hideSpinner();
+    console.error('gistBoot:', e);
+    gistStatus = 'error'; renderSpBadge();
+    const msg = e.message||'';
+    if (msg.includes('401')) {
+      alert('Token inválido o expirado.\nGenere un nuevo token en GitHub Settings → Developer settings.');
+    } else if (msg.includes('404')) {
+      alert('Gist no encontrado. Si tiene el Gist ID incorrecto, bórrelo del campo y reconecte para crear uno nuevo.');
+    } else {
+      alert('Error al conectar:\n' + msg + '\n\nLa app funciona en modo local sin sincronización.');
+    }
+    _initDefaultState(); render();
+  }
+}
+
+// Alias para compatibilidad con llamadas a spBoot
+const spBoot = gistBoot;
+const spSyncFromRemote = gistSyncFromRemote;
+
+function _initDefaultState() {
+  if (!USERS.length) {
+    USERS = DEFAULT_USERS.map(u=>({...u}));
+    USERS.forEach(u=>{ if(!passwords[u.id]) passwords[u.id]=u.defaultPwd||'labtrack123'; });
+    rebuildDerived();
+  }
+  if (!tasks.length) tasks = JSON.parse(JSON.stringify(INIT_TASKS));
+}
+
+// ══════════════════════════════════════════════════════════════
+// EXPORT / IMPORT
+// ══════════════════════════════════════════════════════════════
+
+function exportDataFile() {
+  try {
+    const blob = new Blob([getSnapshot()],{type:'application/json'});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href=url; a.download='labtrack_datos_'+today()+'.json';
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); },1000);
+  } catch(e) { alert('Error al exportar.'); }
+}
+
+function importDataFile() {
+  if (!isSupRole()) { alert('Solo el Supervisor puede importar datos.'); return; }
+  const inp = document.createElement('input'); inp.type='file'; inp.accept='.json';
+  inp.onchange = e => {
+    const file=e.target.files[0]; if(!file) return;
+    const reader=new FileReader();
+    reader.onload = async ev => {
+      if (applySnapshot(ev.target.result)) {
+        if (GIST_CONFIG.configured && confirm('Datos cargados en memoria.\n¿Desea establecerlos como estado operativo en GitHub?')) {
+          await establecerEstadoOperativo();
+        } else {
+          currentUser=null; selectedLoginUser=null; loginStep=1; loginError='';
+          alert('Datos importados. Inicie sesión nuevamente.'); render();
+        }
+      } else { alert('Formato de archivo inválido.'); }
     };
     reader.readAsText(file);
   };
-  document.body.appendChild(inp);inp.click();inp.remove();
+  document.body.appendChild(inp); inp.click(); inp.remove();
 }
+
+// Diagnóstico
+async function cloudDiag() {
+  const out = [
+    '=== Diagnóstico LabTrack v9 ===',
+    'Status: ' + gistStatus,
+    'Configurado: ' + GIST_CONFIG.configured,
+    'Gist ID: ' + (GIST_CONFIG.gistId||'—'),
+    'Token: ' + (GIST_CONFIG.token ? GIST_CONFIG.token.slice(0,8)+'…' : '—'),
+    'Última sync: ' + (gistLastSync ? gistLastSync.toLocaleString('es') : 'nunca'),
+    'Audit buffer pendiente: ' + _auditBuffer.length,
+    ''
+  ];
+  if (GIST_CONFIG.configured) {
+    try {
+      const gist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+      out.push('✓ Gist accesible: ' + gist.description);
+      out.push('  Archivos: ' + Object.keys(gist.files).join(', '));
+      const state = gist.files[GIST_FILE_STATE];
+      if (state) {
+        const s = JSON.parse(state.content);
+        out.push('  State savedAt: ' + new Date(s.savedAt||0).toLocaleString('es'));
+        out.push('  Base operativa: ' + (s._operationalBase ? 'Sí — ' + s._operationalBase.setByName + ' · ' + new Date(s._operationalBase.setAt).toLocaleString('es') : 'No establecida'));
+      }
+    } catch(e) { out.push('✗ Error: ' + e.message); }
+  }
+  alert(out.join('\n'));
+}
+
+function copyShareUrl() {} // no aplica
+function getShareUrl()  { return ''; }
+
+
 // ── DEFAULT USERS ──
 const DEFAULT_USERS=[
   {id:'SUP',name:'Dr. García',role:'supervisor',defaultPwd:'super123'},
@@ -398,33 +805,6 @@ const DEFAULT_USERS=[
   {id:'RV',name:'Rev. García',role:'reviewer',defaultPwd:'rev123'},
 ];
 
-
-function loadLS(){
-  try{
-    // Try unified snapshot first
-    const snap=localStorage.getItem('lt4-snap');
-    if(snap&&applySnapshot(snap))return;
-    // Fallback to individual keys
-    const su=localStorage.getItem(SK.users);
-    if(su){USERS=JSON.parse(su).map(u=>({...u}));}
-    else{USERS=DEFAULT_USERS.map(u=>({...u}));}
-    const sp=localStorage.getItem(SK.pwds);
-    if(sp){passwords=JSON.parse(sp);}
-    else{USERS.forEach(u=>{passwords[u.id]=u.defaultPwd||'labtrack123';});}
-    USERS.forEach(u=>{if(!passwords[u.id])passwords[u.id]='labtrack123';});
-    const st=localStorage.getItem(SK.tasks);
-    const sn=localStorage.getItem(SK.nid);
-    const suid=localStorage.getItem(SK.uid);
-    if(st)tasks=JSON.parse(st); else tasks=JSON.parse(JSON.stringify(INIT_TASKS));
-    if(sn)nextId=parseInt(sn)||11;
-    if(suid)nextUid=parseInt(suid)||100;
-  }catch(e){
-    USERS=DEFAULT_USERS.map(u=>({...u}));
-    USERS.forEach(u=>{passwords[u.id]=u.defaultPwd||'super123';});
-    tasks=JSON.parse(JSON.stringify(INIT_TASKS));
-  }
-  rebuildDerived();
-}
 
 const INIT_TASKS=[
   {id:1,producto:'Amoxicilina 500mg',lote:'L-2024-001',created:'2026-04-10',assignments:[{analyst:'AL',date:'2026-04-18'},{analyst:'CV',date:'2026-04-18'}],due:'2026-04-20',priority:'Alta',status:'progress',notes:'Verificar humedad residual'},
@@ -438,6 +818,7 @@ const INIT_TASKS=[
   {id:9,producto:'Clonazepam 2mg',lote:'L-2024-009',created:'2026-04-15',assignments:[{analyst:'SD',date:'2026-04-23'}],due:'2026-04-25',priority:'Normal',status:'pending',notes:'Control estupefacientes'},
   {id:10,producto:'Amoxicilina 500mg',lote:'L-2024-010',created:'2026-04-16',assignments:[{analyst:'AL',date:'2026-04-18'},{analyst:'MT',date:'2026-04-18'},{analyst:'CV',date:'2026-04-19'}],due:'2026-04-20',priority:'Urgente',status:'progress',notes:'Lote retenido por inspección'},
 ];
+
 
 // ── HELPERS ──
 function getU(id){return uMap[id]||{name:id,av:'av1',avInit:'?',chip:'c1'};}
@@ -1121,7 +1502,7 @@ function renderWorkdaysTab(){
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px;margin-bottom:14px">
         <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Definí qué días de la semana son laborables. Esto aplica a todos los analistas.</p>
         ${DAY_ORDER.map(d=>`<label style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px">
-          <input type="checkbox" ${workdayConfig.weekdays[d]?'checked':''} onchange="workdayConfig.weekdays[${d}]=this.checked;saveLS();render()" style="width:16px;height:16px;cursor:pointer">
+          <input type="checkbox" ${workdayConfig.weekdays[d]?'checked':''} onchange="workdayConfig.weekdays[${d}]=this.checked;saveLS('workdayConfig');render()" style="width:16px;height:16px;cursor:pointer">
           <span style="flex:1">${DAY_NAMES_FULL[d]}</span>
           <span style="font-size:11px;color:var(--text3)">${workdayConfig.weekdays[d]?'Laborable':'No laborable'}</span>
         </label>`).join('')}
@@ -2459,7 +2840,8 @@ function saveMgmt(){
   };
   if(editingMgmt!==null){const idx=mgmtTasks.findIndex(m=>m.id===editingMgmt);if(idx>=0)mgmtTasks[idx]=obj;else mgmtTasks.push(obj);}
   else mgmtTasks.push(obj);
-  showMgmtModal=false;editingMgmt=null;saveLS();render();
+  showMgmtModal=false;editingMgmt=null;saveLS('counters');
+  render();
 }
 
 function openMgmtOccModal(id,occDate){mgmtOccTaskId=id;mgmtOccDate=occDate;showMgmtOccModal=true;render();}
@@ -2687,8 +3069,7 @@ function render(){
   requestAnimationFrame(()=>{
     _renderPending=false;
     const el=document.getElementById('app');
-  if(showCloudConfig){el.innerHTML=renderCloudConfig();return;}
-    if(!el)return;
+      if(!el)return;
     if(!currentUser){
       const h=renderLogin();
       if(h!==_lastHtml){_lastHtml=h;el.innerHTML=h;attachLogin();}
@@ -2697,11 +3078,13 @@ function render(){
     const shell=renderShell();
     const modal=showImportModal?renderImportModal():showModal?renderTaskModal():showChangePwd?renderChangePwdModal():showReplanModal?renderReplanModal():showExtraModal?renderExtraWorkdayModal():showMgmtModal?renderMgmtModal():showSchedModal?renderSchedModal():showMgmtOccModal?renderMgmtOccModal():showTimeLogModal?renderTimeLogModal():'';
     const notif=renderNotifPanel();
-    const h=shell+modal+notif;
+    const spModal=showSpConfig?renderSpConfigModal():'';
+  const h=shell+modal+notif+spModal;
     if(h===_lastHtml)return;
     _lastHtml=h;
     el.innerHTML=h;
     if(showModal)setTimeout(renderDateAssigns,30);
+    renderSpBadge();
   });
 }
 
@@ -2804,7 +3187,7 @@ function renderReview(){
   // Already reviewed section
   if(done.length>0){
     html+='<div class="sec" style="margin-bottom:8px;color:var(--green)">Ya revisados ('+done.length+')</div>'
-      +'<div id="cloud-badge" style="margin-right:8px;cursor:pointer" onclick="openCloudConfig()" title="Configuración de nube"></div>'
+    +'<div class="tbl">'
     +'<div class="tbl">'
       +thead+done.map(function(t){return reviewRow(t,false);}).join('')
       +'</div>';
@@ -2996,74 +3379,18 @@ async function cloudDiag() {
   out.push('CLOUD.enabled: ' + CLOUD.enabled);
   out.push('CLOUD.apiKey: ' + (CLOUD.apiKey ? CLOUD.apiKey.slice(0,8)+'...' : 'vacío'));
   out.push('CLOUD.binId: ' + (CLOUD.binId || 'vacío'));
-  out.push('CLOUD_PRESET.apiKey: ' + (CLOUD_PRESET.apiKey ? CLOUD_PRESET.apiKey.slice(0,8)+'...' : 'vacío'));
-  out.push('cloudInitDone: ' + cloudInitDone);
-  out.push('cloudStatus: ' + cloudStatus);
-  out.push('');
-
-  if(!CLOUD.apiKey) {
-    out.push('❌ No hay API Key configurada.');
-    out.push('   → Ir a Administración → ☁ Activar nube → pegar Master Key de jsonbin.io');
-    alert(out.join('\n')); return;
+  
+  if (GIST_CONFIG.configured) {
+    try {
+      const gist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+      out.push('✓ Gist accesible: ' + gist.description);
+    } catch(e) { out.push('✗ Error: ' + e.message); }
   }
-  if(location.protocol === 'file:') {
-    out.push('❌ Protocolo file:// — no se puede conectar a internet.');
-    out.push('   → Publicar en GitHub Pages y abrir desde https://');
-    alert(out.join('\n')); return;
-  }
-
-  out.push('Probando conexión a jsonbin.io...');
-  try {
-    var r = await fetch('https://api.jsonbin.io/v3/b?type=json', {
-      headers: { 'X-Master-Key': CLOUD.apiKey }
-    });
-    out.push('HTTP status: ' + r.status);
-    if(r.status === 401) {
-      out.push('❌ API Key incorrecta o expirada.');
-      out.push('   → Verificar la Master Key en jsonbin.io → Account Settings → API Keys');
-    } else if(r.status === 200) {
-      var data = await r.json();
-      out.push('✓ Conexión OK. Bins encontrados: ' + (data.length||0));
-      var lt = (data||[]).find(function(b){ return b.name==='LabTrack'; });
-      if(lt) {
-        out.push('✓ Bin LabTrack encontrado: ' + lt.id);
-        if(!CLOUD.binId) {
-          out.push('⚠ CLOUD.binId estaba vacío — asignando...');
-          CLOUD.binId = lt.id;
-          _persistCloudConfig();
-          out.push('✓ Bin ID guardado: ' + CLOUD.binId);
-        }
-      } else {
-        out.push('⚠ No hay bin "LabTrack" todavía — se creará al guardar.');
-      }
-    } else {
-      out.push('⚠ Respuesta inesperada: ' + r.status);
-    }
-  } catch(e) {
-    out.push('❌ Error de red: ' + e.message);
-    out.push('   → Verificar conexión a internet');
-  }
-
-  out.push('');
-  out.push('localStorage lt4-cloud-cfg: ' + (localStorage.getItem('lt4-cloud-cfg')||'(vacío)'));
   alert(out.join('\n'));
 }
 
-function copyShareUrl() {
-  var url = getShareUrl();
-  if(!url) return;
-  navigator.clipboard.writeText(url).then(function(){
-    var btn = document.querySelector('[onclick="copyShareUrl()"]');
-    if(btn){btn.textContent='✓ Copiado';setTimeout(function(){btn.textContent='📋 Copiar';},2000);}
-  }).catch(function(){
-    var inp = document.getElementById('share-url-input');
-    if(inp){inp.select();document.execCommand('copy');}
-  });
-}
-
-function getShareUrl() {
-  if(!CLOUD.apiKey || !CLOUD.binId) return '';
-  var cfg = {apiKey: CLOUD.apiKey, binId: CLOUD.binId, enabled: true};
+function copyShareUrl() {}
+function getShareUrl()  { return ''; };
   var encoded = encodeURIComponent(btoa(JSON.stringify(cfg)));
   return location.origin + location.pathname + '#cloud=' + encoded;
 }
@@ -3732,6 +4059,7 @@ function renderShell(){
       <div class="topbar">
         <div class="topbar-title">${titles[currentView]||''}</div>
         ${currentUser?renderNotifBtn():''}
+        <div id="sp-status-badge" style="margin-right:4px"></div>
         ${sup&&currentView!=='admin'?`<button class="btn amb" onclick="showImportModal=true;modalTab='paste';pastePreview=[];render()">↑ Importar</button><button class="btn pri" onclick="openNewTask()">+ Nueva tarea</button>`:''}
       </div>
       <div class="content">${content}</div>
@@ -4389,21 +4717,24 @@ function renderAdmin(){
     +'<div id="new-user-msg" style="font-size:12px;min-height:16px;margin-top:6px;color:var(--green)"></div>'
     +'</div>'
 
-    // Cloud sync section
+    // Sincronización Gist
     +'<div style="margin-top:16px;background:var(--blue-bg);border:1px solid var(--blue);border-radius:var(--radius-lg);padding:14px">'
     +'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">'
-    +'<div>'
-    +'<div style="font-weight:700;margin-bottom:2px">☁ Sincronización en nube</div>'
+    +'<div><div style="font-weight:700;margin-bottom:2px">⬡ Sincronización GitHub</div>'
     +'<div style="font-size:12px;color:var(--text2)">'
-    +(location.protocol==='file:'?'⚠ Abrí desde OneDrive web para sincronizar (no desde el Explorador de archivos)':CLOUD.enabled&&CLOUD.binId?'✓ Conectado — Bin: <code>'+escH(CLOUD.binId.slice(0,8))+'…</code>':'No configurado — datos solo locales en cada PC')
+    +(GIST_CONFIG.configured?'Conectado — Gist: '+escH(GIST_CONFIG.gistId.slice(0,12))+'…':'No configurado — datos solo en memoria')
     +'</div></div>'
-    +'<div style="display:flex;gap:6px">'
-    +'<button class="btn '+(CLOUD.enabled?'':'pri')+' sm" onclick="openCloudConfig()">'
-    +(CLOUD.enabled?'⚙ Configuración':'+ Activar nube')
-    +'</button>'
-    +(CLOUD.enabled&&CLOUD.apiKey?'<button class="btn sm" onclick="_embedAndDownload(CLOUD.apiKey,CLOUD.binId).catch(function(e){console.error(e);})" title="Descargá el HTML actualizado para subir a OneDrive">⬇ Descargar HTML</button>':'')
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
+    +'<button class="btn sm" onclick="openSpConfig()">⚙ Configurar</button>'
+    +(isSupRole()?'<button class="btn pri sm" onclick="establecerEstadoOperativo()">📌 Establecer estado operativo</button>':'')
+    +'</div></div>'
+    +'<div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">'
+    +'<button class="btn sm" onclick="exportDataFile()">⬇ Exportar JSON</button>'
+    +(isSupRole()?'<button class="btn sm" onclick="importDataFile()">↑ Importar JSON</button>':'')
+    +'<button class="btn sm" onclick="gistSyncFromRemote()">↻ Sincronizar</button>'
+    +'<button class="btn sm" onclick="cloudDiag()">🔍 Diagnóstico</button>'
     +'</div>'
-    +'</div></div>'
+    +'</div>'
 
     +'<div style="margin-top:16px;background:var(--red-bg);border:1px solid var(--red);border-radius:var(--radius-lg);padding:14px">'
     +'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">'
@@ -5516,347 +5847,28 @@ function saveTask(){
   const _eid2=editingTask;
   showModal=false;editingTask=null;
   auditLog(_eid2?'EDIT':'CREATE','TASK',_eid2||nextId-1,{description:(_eid2?'Edicion':'Nuevo analisis')+': '+prod+' '+lote},'');
-  saveLS();render();
+  saveLS('counters');
+  render();
 }
 
-// ── BOOT ──
-const BOOT_KEY='lt4-boot-ts';
-function emergencyReset(){
-  const keys=['lt4-snap','lt4-tasks','lt4-nid','lt4-pwds','lt4-users','lt4-uid'];
-  keys.forEach(k=>{try{localStorage.removeItem(k);}catch(e){}});
-  localStorage.removeItem(BOOT_KEY);
+
+// ── BOOT v9 — GitHub Gist (sin SharePoint, sin Azure AD) ──
+function emergencyReset() {
+  if (!confirm('Reiniciar estado local en memoria. ¿Confirmar?')) return;
   USERS=DEFAULT_USERS.map(u=>({...u}));
-  USERS.forEach(u=>{passwords[u.id]=u.defaultPwd;});
+  USERS.forEach(u=>{passwords[u.id]=u.defaultPwd||'labtrack123';});
   tasks=JSON.parse(JSON.stringify(INIT_TASKS));
-  nextId=11;nextUid=100;
+  nextId=11; nextUid=100;
   rebuildDerived();
-  currentUser=null;selectedLoginUser=null;loginStep=1;
-  saveLS();
-  render();
-}
-function renderRecovery(errMsg){
-  return`<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);font-family:var(--font)">
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:36px 32px;width:420px;box-shadow:0 2px 16px rgba(0,0,0,.07)">
-      <div style="width:48px;height:48px;background:var(--red-bg);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;margin-bottom:16px">⚠</div>
-      <h2 style="font-size:17px;font-weight:600;margin-bottom:8px;color:var(--text)">La app no pudo iniciarse</h2>
-      <p style="font-size:13px;color:var(--text2);margin-bottom:6px;line-height:1.6">Probablemente ocurrió un error durante la última importación de datos. Los datos guardados en este navegador pueden estar corruptos.</p>
-      <div style="background:var(--bg2);border-radius:var(--radius);padding:8px 10px;font-family:var(--mono);font-size:11px;color:var(--text3);margin-bottom:20px;word-break:break-all">${errMsg||'Error desconocido'}</div>
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <button class="btn pri" style="padding:10px" onclick="location.reload()">↺ Reintentar sin cambios</button>
-        <button class="btn amb" style="padding:10px" onclick="importDataFile()">↑ Restaurar desde archivo de backup (.json)</button>
-        <button class="btn dan" style="padding:10px" onclick="if(confirm('Esto borrará todos los datos de este navegador y volverá al estado inicial de demostración. ¿Confirmar?'))emergencyReset()">⚠ Borrar datos y reiniciar</button>
-      </div>
-      <p style="font-size:11px;color:var(--text3);margin-top:14px;text-align:center">Si tenés un archivo de backup (.json exportado previamente), usá "Restaurar desde archivo" para recuperar tus datos.</p>
-    </div>
-  </div>`;
-}
-// ══════════════════════════════════════════════════════
-// CLOUD CONFIG — Jsonbin.io (gratis, sin Azure)
-// ══════════════════════════════════════════════════════
-const CLOUD = {
-  enabled: false,
-  apiKey: '',       // Master Key de jsonbin.io
-  binId: '',        // Bin ID (se crea automáticamente la primera vez)
-  syncInterval: 30000,
-};
-// ── PRESET (embedded at save-time — do not edit manually) ──
-const CLOUD_PRESET = { apiKey: '$2a$10$ztgXWp/R1CtPrfCKPe/ORONoqQGlVUcPv1m6cAHBvU7ZVjT7VcLgq', binId: '69e6eb64856a68218956a128', enabled: true };
-
-// ── Cloud state ──
-let cloudStatus = 'offline'; // offline|connecting|ok|error|syncing
-let cloudLastSync = null;
-let cloudInitDone = false;
-let cloudSaveQueue = false;
-let _cloudSyncTimer = null;
-let _cloudSaveTimer = null;
-
-const JSONBIN_BASE = 'https://api.jsonbin.io/v3';
-
-// ── Init ──
-async function cloudInit() {
-  if(!CLOUD.enabled || !CLOUD.apiKey) return;
-  if(location.protocol === 'file:') {
-    cloudStatus = 'error'; renderCloudBadge();
-    return;
-  }
-  cloudStatus = 'connecting'; renderCloudBadge();
-  try {
-    if(!CLOUD.binId) {
-      // Try to find existing LabTrack bin for this API key
-      await cloudFindOrCreateBin();
-    }
-    await cloudLoad();
-    cloudInitDone = true;
-    cloudSyncStart();
-    cloudStatus = 'ok'; cloudLastSync = new Date(); renderCloudBadge();
-    render();
-  } catch(e) {
-    console.error('cloudInit:', e);
-    cloudStatus = 'error'; renderCloudBadge();
-  }
-}async function cloudFindOrCreateBin() {
-  // Search for existing LabTrack bin
-  try {
-    const r = await fetch(JSONBIN_BASE + '/b?type=json', {
-      headers: { 'X-Master-Key': CLOUD.apiKey }
-    });
-    if(r.ok) {
-      const list = await r.json();
-      const existing = (list||[]).find(function(b){ return b.name === 'LabTrack'; });
-      if(existing) {
-        CLOUD.binId = existing.id;
-        _persistCloudConfig();
-        console.log('Found existing bin:', CLOUD.binId);
-        return;
-      }
-    }
-  } catch(e) { /* fallthrough to create */ }
-  // No existing bin — create one
-  await cloudCreateBin();
-}
-
-async function cloudCreateBin() {
-  const snap = getSnapshot();
-  const r = await fetch(JSONBIN_BASE + '/b', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Master-Key': CLOUD.apiKey,
-      'X-Bin-Name': 'LabTrack',
-      'X-Bin-Private': 'true',
-    },
-    body: snap
-  });
-  if(!r.ok) throw new Error('Create bin failed: ' + r.status);
-  const data = await r.json();
-  CLOUD.binId = data.metadata.id;
-  _persistCloudConfig();
-  console.log('Bin created:', CLOUD.binId);
-}
-async function cloudLoad() {
-  if(!CLOUD.binId) return false;
-  cloudStatus = 'syncing'; renderCloudBadge();
-  try {
-    const r = await fetch(JSONBIN_BASE + '/b/' + CLOUD.binId + '/latest', {
-      headers: { 'X-Master-Key': CLOUD.apiKey }
-    });
-    if(!r.ok) throw new Error('Load failed: ' + r.status);
-    const data = await r.json();
-    const json = JSON.stringify(data.record);
-    // Merge remote data with local — prevents overwriting concurrent changes
-    var localSnap = localStorage.getItem('lt4-snap');
-    var merged = localSnap ? mergeSnapshot(localSnap, data.record) : data.record;
-    var mergedJson = JSON.stringify(merged);
-    if(applySnapshot(mergedJson)) {
-      localStorage.setItem('lt4-snap', mergedJson);
-      rebuildDerived();
-      // Push merged result back to cloud so all devices converge
-      if(cloudInitDone && CLOUD.binId) {
-        setTimeout(cloudSaveNow, 500);
-      }
-    }
-    cloudStatus = 'ok'; cloudLastSync = new Date(); renderCloudBadge();
-    return true;
-  } catch(e) {
-    console.error('cloudLoad:', e);
-    cloudStatus = 'error'; renderCloudBadge();
-    return false;
-  }
-}
-
-// ── Save to cloud (debounced 1s) ──
-function cloudSave() {
-  if(!cloudInitDone) return;
-  if(_cloudSaveTimer) clearTimeout(_cloudSaveTimer);
-  _cloudSaveTimer = setTimeout(cloudSaveNow, 1000);
-}
-
-async function cloudSaveNow() {
-  if(!CLOUD.binId) return;
-  cloudStatus = 'syncing'; renderCloudBadge();
-  try {
-    const snap = getSnapshot();
-    const r = await fetch(JSONBIN_BASE + '/b/' + CLOUD.binId, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Master-Key': CLOUD.apiKey,
-      },
-      body: snap
-    });
-    if(!r.ok) throw new Error('Save failed: ' + r.status);
-    cloudStatus = 'ok'; cloudLastSync = new Date(); renderCloudBadge();
-    cloudSaveQueue = false;
-  } catch(e) {
-    console.error('cloudSave:', e);
-    cloudStatus = 'error'; renderCloudBadge();
-  }
-}
-
-// ── Sync loop: pull changes from others every 30s ──
-function cloudSyncStart() {
-  if(_cloudSyncTimer) clearInterval(_cloudSyncTimer);
-  _cloudSyncTimer = setInterval(async () => {
-    // Skip sync if: currently saving, or there's a pending local save
-    if(cloudStatus === 'syncing') return;
-    if(_cloudSaveTimer) return; // cloud save in progress, skip pull
-    const loaded = await cloudLoad();
-    if(loaded) render();
-  }, CLOUD.syncInterval);
-}
-function cloudSyncNow() {
-  cloudLoad().then(() => render());
-}
-
-// ── Persist config in localStorage ──
-function _persistCloudConfig() {
-  localStorage.setItem('lt4-cloud-cfg', JSON.stringify({
-    enabled: CLOUD.enabled,
-    apiKey: CLOUD.apiKey,
-    binId: CLOUD.binId,
-  }));
-}
-
-function loadCloudConfig() {
-  // Apply preset embedded in the file (shared across all devices via OneDrive)
-  if(CLOUD_PRESET.apiKey) {
-    Object.assign(CLOUD, CLOUD_PRESET);
-  }
-  // Then apply any local overrides (e.g. if user configured on this device)
-  try {
-    const c = JSON.parse(localStorage.getItem('lt4-cloud-cfg') || 'null');
-    if(c && c.apiKey) Object.assign(CLOUD, c);
-  } catch(e) {}
-}
-
-// ── Status badge ──
-function renderCloudBadge() {
-  const el = document.getElementById('cloud-badge');
-  if(!el) return;
-  const cfg = {
-    offline:    { icon:'',  color:'var(--text3)',  label: location.protocol==='file:' ? '⚠ Abrir desde OneDrive web' : 'Sin nube' },
-    connecting: { icon:'⟳', color:'var(--blue)',   label:'Conectando…' },
-    ok:         { icon:'☁', color:'var(--green)',  label:'☁ ' + (cloudLastSync ? cloudLastSync.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'}) : 'conectado') },
-    syncing:    { icon:'↑', color:'var(--blue)',   label:'Guardando…' },
-    error:      { icon:'⚠', color:'var(--red)',    label:'Error sync' },
-  };
-  const s = cfg[cloudStatus] || cfg.offline;
-  el.innerHTML = '<span style="color:'+s.color+';font-size:11px;font-weight:600;cursor:pointer" title="Estado de sincronización">'+s.label+'</span>';
-}
-
-// ── Config modal ──
-let showCloudConfig = false;
-function openCloudConfig()  { showCloudConfig = true;  render(); }
-function closeCloudConfig() { showCloudConfig = false; render(); }
-
-function renderCloudConfig() {
-  return '<div class="modal-overlay" onclick="if(event.target===this)closeCloudConfig()">'
-    +'<div class="modal" style="width:500px">'
-    +'<h3>☁ Sincronización en nube</h3>'
-    +'<div class="sub" style="margin-bottom:16px">Compartí datos entre todos los dispositivos sin instalar nada. Gratis para hasta 10.000 guardados/mes.</div>'
-
-    // Status
-    +(CLOUD.enabled && CLOUD.binId
-      ?'<div style="background:var(--green-bg);border-radius:var(--radius);padding:10px 14px;margin-bottom:14px">'
-       +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
-       +'<span style="color:var(--green);font-weight:600">☁ Conectado — Bin: <code>'+escH(CLOUD.binId.slice(0,8))+'…</code></span>'
-       +'<button class="btn sm dan" onclick="cloudDisconnect()">Desconectar</button>'
-       +'</div>'
-       +'<div style="font-size:12px;color:var(--text2);margin-bottom:6px"><b>Link para compartir con otros dispositivos:</b></div>'
-       +'<div style="display:flex;gap:6px;align-items:center">'
-       +'<input type="text" id="share-url-input" value="'+escH(getShareUrl())+'" readonly style="flex:1;font-size:11px;padding:5px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg2);color:var(--text);font-family:var(--mono)">'
-       +'<button class="btn sm" onclick="copyShareUrl()">📋 Copiar</button>'
-       +'</div>'
-       +'<div style="font-size:11px;color:var(--text3);margin-top:5px">Enviá este link a cada dispositivo. Al abrirlo, la sincronización se activa automáticamente.</div>'
-       +'</div>'
-      :'')
-
-    +'<div class="frow"><label>API Key de jsonbin.io</label>'
-    +'<input type="password" id="cfg-apikey" value="'+escH(CLOUD.apiKey)+'" placeholder="$2a$10$…" style="font-family:var(--mono);font-size:12px">'
-    +'</div>'
-
-    // Instructions
-    +'<div style="background:var(--blue-bg);border-radius:var(--radius);padding:12px 14px;font-size:12px;margin-bottom:14px">'
-    +'<b>Cómo configurar (una sola vez):</b><br><br>'
-    +'<b>1.</b> Ir a <a href="https://jsonbin.io" target="_blank" style="color:var(--blue)">jsonbin.io</a> → Sign Up (con email, gratis)<br>'
-    +'<b>2.</b> Ir a <b>Account Settings → API Keys → Master Key</b> → copiar<br>'
-    +'<b>3.</b> Pegar la key acá arriba y hacer clic en Guardar y conectar<br>'+'<b>4.</b> Se descargará un nuevo <b>labtrack.html</b> — subilo a OneDrive reemplazando el anterior<br>'+'<b>5.</b> Todos los dispositivos que abran ese archivo sincronizarán automáticamente ✓<br><br>'
-    +'<span style="color:var(--text3)">Los datos quedan en un "bin" privado solo accesible con tu key. '
-    +'Plan gratuito: 10.000 lecturas y escrituras por mes — suficiente para 20 usuarios.</span>'
-    +'</div>'
-
-    +'<div class="modal-btns">'
-    +'<button class="btn" onclick="closeCloudConfig()">Cancelar</button>'
-    +'<button class="btn" onclick="cloudDiag()">🔍 Diagnosticar</button>'
-    +'<button class="btn pri" onclick="saveCloudConfig()">Guardar y conectar</button>'
-    +'</div>'
-    +'</div></div>';
-}
-
-async function saveCloudConfig() {
-  const key = document.getElementById('cfg-apikey')?.value.trim() || '';
-  if(!key) { alert('Ingresá la API Key.'); return; }
-  CLOUD.apiKey = key;
-  CLOUD.enabled = true;
-  CLOUD.binId = '';
-  _persistCloudConfig();
-  closeCloudConfig();
-  render();
-  // Init cloud (finds/creates bin, loads data)
-  await cloudInit();
-  // Now embed config in HTML and offer download
-  await _embedAndDownload(CLOUD.apiKey, CLOUD.binId);
-}
-function cloudDisconnect() {
-  if(!confirm('¿Desconectar la sincronización en nube? Los datos locales se mantienen.')) return;
-  CLOUD.enabled = false; CLOUD.apiKey = ''; CLOUD.binId = '';
-  cloudInitDone = false; cloudStatus = 'offline';
-  if(_cloudSyncTimer) clearInterval(_cloudSyncTimer);
-  _persistCloudConfig();
-  renderCloudBadge();
+  currentUser=null; selectedLoginUser=null; loginStep=1; loginError='';
   render();
 }
 
-function safeBoot(){
-  try{
-    // Mark boot attempt
-    localStorage.setItem(BOOT_KEY, Date.now());
-    loadLS();
-    localStorage.removeItem(BOOT_KEY); // boot succeeded
-    render();
-  }catch(e){
-    console.error('Boot error:',e);
-    const el=document.getElementById('app');
-    if(el)el.innerHTML=renderRecovery(e.message||String(e));
-  }
-}
-
-// If there's a stale boot timestamp (crash during previous load), show recovery immediately
-
-const staleBootTs=localStorage.getItem(BOOT_KEY);
-const now_ts=Date.now();
-if(staleBootTs&&(now_ts-parseInt(staleBootTs))<30000){
-  // Previous boot didn't complete within 30s — likely crashed
-  localStorage.removeItem(BOOT_KEY);
-  document.getElementById('app').innerHTML=renderRecovery('La sesión anterior se cerró inesperadamente. Esto puede deberse a un error en la importación de datos.');
+loadSpConfig();
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', gistBoot, {once:true});
 } else {
-  loadCloudConfig();
-  // Check URL hash for cloud config (shared by device 1)
-  try {
-    var hash = location.hash;
-    if(hash && hash.startsWith('#cloud=')) {
-      var encoded = hash.slice(7);
-      var cfg = JSON.parse(atob(decodeURIComponent(encoded)));
-      if(cfg && cfg.apiKey) {
-        Object.assign(CLOUD, cfg);
-        _persistCloudConfig();
-        // Clean the URL without reloading
-        history.replaceState(null,'',location.pathname + location.search);
-      }
-    }
-  } catch(e) {}
-  safeBoot();
-  if(CLOUD.enabled){ cloudInit(); }
+  gistBoot();
 }
 
 function openOvertimeForSup(analystId, dateStr){
@@ -5876,54 +5888,10 @@ function openOvertimeForSup(analystId, dateStr){
     ts:Date.now(),requestedBy:currentUser.id,
     reviewedBy:currentUser.id,reviewedTs:Date.now()
   });
-  showSchedModal=false;saveLS();render();
+  showSchedModal=false;saveLS('counters');
+  render();
 }
-async function _embedAndDownload(apiKey, binId) {
-  if(!apiKey) return;
-  try {
-    // Read the main script content directly from the DOM script tag
-    var scripts = Array.from(document.querySelectorAll('script:not([src])'));
-    var mainScript = null;
-    for(var i=0; i<scripts.length; i++){
-      if(scripts[i].textContent.includes('CLOUD_PRESET')){ mainScript=scripts[i]; break; }
-    }
-    if(!mainScript){ alert('No se encontró la configuración del script.'); return; }
 
-    var originalScript = mainScript.textContent;
-    var newPreset = "const CLOUD_PRESET = { apiKey: '" + apiKey.replace(/\\/g,'\\\\').replace(/'/g,"\\'") + "', binId: '" + (binId||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'") + "', enabled: true };";
-    var updatedScript = originalScript.replace(/const CLOUD_PRESET = \{[^}]+\};/, newPreset);
-
-    // Build minimal valid HTML
-    var styleTag = document.querySelector('style');
-    var cssContent = styleTag ? styleTag.innerHTML : '';
-    var xlsxSrc = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
-
-    var html = '<!DOCTYPE html>\n<html lang="es">\n<head>\n'
-      + '<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
-      + '<title>LabTrack</title>\n'
-      + '<script src="' + xlsxSrc + '"><' + '/script>\n'
-      + '<style>\n' + cssContent + '\n</style>\n'
-      + '</head>\n<body>\n'
-      + '<div id="app" style="min-height:100vh">Cargando...</div>\n'
-      + '<script>\n' + updatedScript + '\n<' + '/script>\n'
-      + '</body>\n</html>';
-
-    var blob = new Blob([html], {type: 'text/html;charset=utf-8'});
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'labtrack.html';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 2000);
-    alert('✓ labtrack.html descargado.\n\nSubilo a GitHub reemplazando el anterior.\nTodos los dispositivos sincronizarán automáticamente al abrir esa URL.');
-  } catch(e) {
-    console.error('embed error:', e);
-    alert('Error al descargar: ' + e.message);
-  }
-  document.addEventListener('click', function(){resetActivityTimer();}, true);
-  document.addEventListener('keydown', function(){resetActivityTimer();}, true);
-}
 
 </script>
 </body>
