@@ -5523,14 +5523,46 @@ function setFS(v){filterStatus=v;render();}
 function markDone(id){
   const t=tasks.find(x=>x.id===id);if(!t)return;
   if(currentUser.role==='analyst'||currentUser.role==='reviewer'){
-    // Analyst requests completion — needs supervisor confirmation
-    t.status='pending-confirm';
-    t.completedBy=currentUser.id;
-    auditLog('STATUS_CHANGE','TASK',id,{field:'status',oldVal:'progress',newVal:'pending-confirm',description:t.producto+' '+t.lote},'');
-    t.completedTs=Date.now();
-    saveLS();render();
+    if(t.status==='observed'){
+      // Re-envío tras observación: va directo a 'done' para que vuelva a la cola de revisión
+      const oldStatus=t.status;
+      t.status='done';
+      t.resubmittedBy=currentUser.id;
+      t.resubmittedTs=Date.now();
+      auditLog('STATUS_CHANGE','TASK',id,{
+        field:'status',oldVal:oldStatus,newVal:'done',
+        description:'Re-envío tras observación: '+t.producto+' '+t.lote
+      },'Re-envío tras observación');
+      // Notificar al Supervisor que hay un análisis re-enviado listo para revisar
+      var supUsers=USERS.filter(function(u){return u.role==='supervisor';});
+      supUsers.forEach(function(sup){
+        replanNotifs.push({
+          id:nextNotifId++,
+          type:'resubmit',
+          taskId:id,
+          analystId:currentUser.id,
+          forUserId:sup.id,
+          status:'pending',
+          ts:Date.now(),
+          fromUser:currentUser.id,
+          fromName:currentUser.name,
+          producto:t.producto,
+          lote:t.lote,
+          comment:'Análisis re-enviado tras observación'
+        });
+      });
+      saveLS();render();
+      saveNow().catch(function(e){console.error('saveNow resubmit:',e);});
+    } else {
+      // Primera vez: pide confirmación del supervisor
+      t.status='pending-confirm';
+      t.completedBy=currentUser.id;
+      auditLog('STATUS_CHANGE','TASK',id,{field:'status',oldVal:t.status,newVal:'pending-confirm',description:t.producto+' '+t.lote},'');
+      t.completedTs=Date.now();
+      saveLS();render();
+    }
   } else {
-    // Supervisor confirms directly
+    // Supervisor confirma directamente
     t.status='done';
     t.confirmedBy=currentUser.id;
     auditLog('STATUS_CHANGE','TASK',id,{field:'status',oldVal:'progress',newVal:'done',description:t.producto+' '+t.lote},'');
@@ -5841,8 +5873,11 @@ function renderNotifPanel(){
     ?scheduleRequests.filter(function(r){return r.analystId===currentUser.id&&r.status==='approved'&&!r._seenByAnalyst;})
     :[];
   const confirmPend=isSup?tasks.filter(function(t){return t.status==='pending-confirm';}):[];
+  const resubmitBadge=isSup
+    ?replanNotifs.filter(function(n){return n.type==='resubmit'&&n.status==='pending';}).length
+    :0;
   const totalBadge=myObsNotifs.filter(function(n){return n.status==='pending';}).length
-    +pendReplan.length+schedPend.length+schedApproved.length+confirmPend.length;
+    +pendReplan.length+schedPend.length+schedApproved.length+confirmPend.length+resubmitBadge;
 
   if(!showNotifPanel){
     return'<div style="position:relative;display:inline-block">'
@@ -5870,6 +5905,26 @@ function renderNotifPanel(){
         +'<div style="font-size:10px;color:var(--text3)">Por '+escH(n.fromName||'')+(n.ts?' · '+new Date(n.ts).toLocaleDateString('es'):'')+'</div>'
         +(n.status==='pending'?'<button class="btn sm" style="margin-top:5px;font-size:10px" onclick="markObsNotifRead('+n.id+')">✓ Marcar como leída</button>':'<span style="font-size:10px;color:var(--green)">✓ Leída</span>')
         +'</div>';
+    });
+    html+='</div>';
+  }
+
+  // ── Re-envíos tras observación (supervisor) ──
+  var resubmitNotifs=isSup
+    ?replanNotifs.filter(function(n){return n.type==='resubmit'&&n.status==='pending';})
+    :[];
+  if(resubmitNotifs.length>0){
+    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--blue-bg)">'
+      +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">↩ Re-enviados tras observación ('+resubmitNotifs.length+')</div>';
+    resubmitNotifs.forEach(function(n){
+      var t=tasks.find(function(x){return x.id===n.taskId;});
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--blue)">'
+        +'<div style="font-size:12px;font-weight:600">'+escH(n.producto||'')+(n.lote?' — '+escH(n.lote):'')+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin:2px 0">Re-enviado por '+escH(n.fromName||'')+'</div>'
+        +'<div style="display:flex;gap:4px;margin-top:5px">'
+        +(t?'<button class="btn sm suc" onclick="markReviewed('+n.taskId+');markObsNotifRead('+n.id+')" style="flex:1">✓ Revisar ahora</button>':'')  
+        +'<button class="btn sm" onclick="markObsNotifRead('+n.id+')">Marcar leída</button>'
+        +'</div></div>';
     });
     html+='</div>';
   }
@@ -6052,9 +6107,17 @@ function saveTask(){
 
 // Marcar notificación de observación como leída
 function markObsNotifRead(notifId){
-  const n=replanNotifs.find(function(x){return x.id===notifId;});
-  if(n){n.status='read';n.readTs=Date.now();}
-  saveLS();render();
+  // Coerce a número porque el onclick pasa el id como string desde el HTML
+  var nid=Number(notifId);
+  const n=replanNotifs.find(function(x){return x.id===nid||x.id===notifId;});
+  if(n){
+    n.status='read';
+    n.readTs=Date.now();
+    auditLog('READ','NOTIFICATION',nid,{type:'observation',producto:n.producto,lote:n.lote},'');
+    saveLS();
+    saveNow().catch(function(e){console.error('saveNow notifRead:',e);});
+    render();
+  }
 }
 
 // ── BOOT v9 — GitHub Gist (sin SharePoint, sin Azure AD) ──
