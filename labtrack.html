@@ -441,6 +441,8 @@ async function _flushAuditBuffer() {
     await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
       files: { [GIST_FILE_AUDIT]: { content: JSON.stringify(merged, null, 2) } }
     });
+    // Actualizar badge tras flush exitoso
+    gistLastSync = new Date(); gistStatus = 'ok'; renderSpBadge();
   } catch(e) {
     console.warn('Audit flush failed, re-buffering:', e.message);
     _auditBuffer = [...toFlush, ..._auditBuffer]; // re-encolar
@@ -509,30 +511,38 @@ async function gistSyncFromRemote() {
   gistStatus = 'syncing'; renderSpBadge();
   try {
     const gist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+    let stateChanged = false;
+
+    // ── Estado operativo ──
     const stateContent = gist.files[GIST_FILE_STATE]?.content;
     if (!stateContent) throw new Error('Archivo state no encontrado en el gist');
     let remoteState;
     try { remoteState = JSON.parse(stateContent); } catch(e) { throw new Error('State JSON inválido'); }
     const remoteTs = remoteState.savedAt || 0;
-    // Solo aplicar si el remoto es más nuevo que lo que ya tenemos
     if (remoteTs > _lastRemoteTs) {
       _lastRemoteTs = remoteTs;
       const prevUser = currentUser;
       applySnapshot(stateContent);
-      currentUser = prevUser; // preservar sesión activa
-      // Cargar también audit trail remoto
-      const auditContent = gist.files[GIST_FILE_AUDIT]?.content;
-      if (auditContent) {
-        try {
-          const remoteAudit = JSON.parse(auditContent);
-          // Merge: mantener entradas locales no pusheadas aún
-          const localIds = new Set(_auditBuffer.map(e=>e.id));
-          auditTrail = [..._auditBuffer, ...remoteAudit.filter(e=>!localIds.has(e.id))];
-        } catch(e) {}
-      }
-      render();
+      currentUser = prevUser;
+      stateChanged = true;
     }
+
+    // ── Audit trail: SIEMPRE cargar desde remoto en cada sync ──
+    const auditContent = gist.files[GIST_FILE_AUDIT]?.content;
+    if (auditContent) {
+      try {
+        const remoteAudit = JSON.parse(auditContent);
+        // Merge: poner primero las entradas del buffer local pendientes de flush
+        // que aún no están en el remoto, luego el remoto completo
+        const remoteIds = new Set(remoteAudit.map(e => e.id));
+        const localOnly = _auditBuffer.filter(e => !remoteIds.has(e.id));
+        const merged = [...localOnly, ...remoteAudit];
+        auditTrail = merged.sort((a,b) => (b.ts||0) - (a.ts||0));
+      } catch(e) {}
+    }
+
     gistStatus = 'ok'; gistLastSync = new Date();
+    render(); // siempre refrescar — puede haber audit trail nuevo
   } catch(e) { console.error('gistSync:', e); gistStatus = 'error'; }
   renderSpBadge();
 }
@@ -687,10 +697,13 @@ async function gistBoot() {
     } else {
       _initDefaultState();
     }
-    // Cargar audit trail
+    // Cargar audit trail — ordenar más reciente primero
     const auditContent = gist.files[GIST_FILE_AUDIT]?.content;
     if (auditContent) {
-      try { auditTrail = JSON.parse(auditContent); } catch(e) {}
+      try {
+        const loaded = JSON.parse(auditContent);
+        auditTrail = loaded.sort((a,b) => (b.ts||0) - (a.ts||0));
+      } catch(e) {}
     }
     _hideSpinner();
     gistStatus = 'ok'; gistLastSync = new Date(); renderSpBadge();
@@ -2233,14 +2246,15 @@ function renderCronogramaWeek(a, def){
   const mgmtCache={};
   wd.forEach(function(d){mgmtCache[d]=mgmtTasks.flatMap(function(mt){return expandMgmt(mt,d,d);});});
 
-  let nav='<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">'
-    +'<button class="btn" onclick="weekOffset--;render()">\u2190 Anterior</button>'
-    +'<span style="font-size:14px;font-weight:600;font-family:var(--mono)">'+fmtD(wd[0])+' \u2013 '+fmtD(wd[6])+'</span>'
-    +'<button class="btn" onclick="weekOffset++;render()">Siguiente \u2192</button>'
+  let nav='<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-wrap:wrap">'
+    +'<button class="btn sm" onclick="weekOffset--;render()">\u2190</button>'
+    +'<span style="font-size:13px;font-weight:600;font-family:var(--mono);flex:1;text-align:center">'+fmtD(wd[0])+' \u2013 '+fmtD(wd[6])+'</span>'
+    +'<button class="btn sm" onclick="weekOffset++;render()">\u2192</button>'
     +'<button class="btn sm" onclick="weekOffset=0;render()">Hoy</button>'
     +'</div>';
 
-  let grid='<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px">';
+  let grid='<div style="overflow-x:auto;-webkit-overflow-scrolling:touch">'
+    +'<div style="display:grid;grid-template-columns:repeat(7,130px);gap:6px;width:max-content;padding-bottom:4px">';
   wd.forEach(function(d){
     const ov=analystSchedules[currentUser.id]?.overrides?.[d];
     const hasOv=ov&&(ov.status==='approved'||ov.status==='assigned');
@@ -2264,16 +2278,16 @@ function renderCronogramaWeek(a, def){
 
     grid+='<div style="border-radius:var(--radius-lg);border:'+(isToday?'2px solid var(--blue)':'1px solid var(--border)')+';background:'+bg+';overflow:hidden">';
     // Day header
-    grid+='<div style="padding:7px 9px 5px;border-bottom:1px solid rgba(0,0,0,.06);background:rgba(0,0,0,.03)">';
+    grid+='<div style="padding:5px 7px 4px;border-bottom:1px solid rgba(0,0,0,.06);background:rgba(0,0,0,.03)">';
     grid+='<div style="display:flex;justify-content:space-between;align-items:flex-start">';
     grid+='<div><div style="font-size:9px;font-weight:700;text-transform:uppercase;color:'+(isToday?'var(--blue)':isWE?'var(--amber)':'var(--text3)')+'">'+dayN+'</div>'
-      +'<div style="font-size:22px;font-weight:800;font-family:var(--mono);line-height:1.1;color:'+(isToday?'var(--blue)':'var(--text)')+'">'+dt2.getDate()+'</div></div>';
+      +'<div style="font-size:clamp(14px,3vw,20px);font-weight:800;font-family:var(--mono);line-height:1.1;color:'+(isToday?'var(--blue)':'var(--text)')+'">'+dt2.getDate()+'</div></div>';
     if(absent) grid+='<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px;background:'+absTyp.color+';color:'+absTyp.text+'">'+absTyp.label+'</span>';
     else if(!isWork) grid+='<span style="font-size:9px;color:var(--text3)">No lab.</span>';
     else if(hasOv) grid+='<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px;background:'+(schedTyp?.color||'#e8eff8')+';color:'+(schedTyp?.text||'#1a4f8a')+'">'+(schedTyp?.label||'Excep.')+'</span>';
     grid+='</div></div>';
     // Body
-    grid+='<div style="padding:8px 9px">';
+    grid+='<div style="padding:6px 7px">'; 
     if(!absent&&isWork){
       // Schedule
       grid+='<div style="background:rgba(255,255,255,.65);border-radius:6px;padding:5px 8px;margin-bottom:7px">'
@@ -2340,7 +2354,7 @@ function renderCronogramaWeek(a, def){
     }
     grid+='</div></div>';
   });
-  grid+='</div>';
+  grid+='</div></div>';
   return nav+grid;
 }
 
@@ -2534,7 +2548,7 @@ function renderMySchedWeek(a, def){
     grid+='<div style="padding:7px 9px 5px;border-bottom:1px solid rgba(0,0,0,.06);background:rgba(0,0,0,.03)">';
     grid+='<div style="display:flex;justify-content:space-between;align-items:flex-start">';
     grid+='<div><div style="font-size:9px;font-weight:700;text-transform:uppercase;color:'+(isToday?'var(--blue)':isWE?'var(--amber)':'var(--text3)')+'">'+dayN+'</div>'
-      +'<div style="font-size:22px;font-weight:800;font-family:var(--mono);line-height:1.1;color:'+(isToday?'var(--blue)':'var(--text)')+'">'+dt2.getDate()+'</div></div>';
+      +'<div style="font-size:clamp(14px,3vw,20px);font-weight:800;font-family:var(--mono);line-height:1.1;color:'+(isToday?'var(--blue)':'var(--text)')+'">'+dt2.getDate()+'</div></div>';
     if(absent) grid+='<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px;background:'+absTyp.color+';color:'+absTyp.text+'">'+absTyp.label+'</span>';
     else if(!isWork) grid+='<span style="font-size:9px;color:var(--text3)">No lab.</span>';
     else if(hasOv) grid+='<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px;background:'+(schedTyp?.color||'#e8eff8')+';color:'+(schedTyp?.text||'#1a4f8a')+'">'+(schedTyp?.label||'Excep.')+'</span>';
@@ -2588,7 +2602,7 @@ function renderMySchedWeek(a, def){
     }
     grid+='</div></div>';
   });
-  grid+='</div>';
+  grid+='</div></div>';
   return nav+grid;
 }
 
@@ -3709,7 +3723,7 @@ function exportAuditCSV(){
 // ── Render audit trail view ──
 function renderAuditTrail() {
   if(!isSupRole()) return '<div class="empty">Acceso restringido</div>';
-  const entries = [...(auditTrail||[])].reverse(); // newest first
+  const entries = [...(auditTrail||[])]; // más reciente primero (ya ordenado así)
   const filterUser = auditFilterUser||'';
   const filterAction = auditFilterAction||'';
   const filterEntity = auditFilterEntity||'';
@@ -3780,7 +3794,7 @@ function renderAuditTrail() {
 }
 
 function copyAuditTrail() {
-  const entries = [...(auditTrail||[])].reverse();
+  const entries = [...(auditTrail||[])]; // ya ordenado más reciente primero
   const hdrs = ['Fecha','Hora','Usuario','Rol','Acción','Entidad','ID','Campo','Valor anterior','Valor nuevo','Motivo'];
   const rows = entries.map(function(e){
     const d = new Date(e.ts);
