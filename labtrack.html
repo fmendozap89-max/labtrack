@@ -3369,16 +3369,16 @@ function _stampTask(t){ t._ts = _ts(); return t; }
 // Merge two snapshots: prefer newer _ts per entity
 function _ts(){ return Date.now(); }
 
-// Stamp a task with current timestamp
 async function cloudDiag() {
   var out = [];
-  out.push('=== Diagnóstico de sincronización ===');
+  out.push('=== Diagnóstico LabTrack v9 ===');
   out.push('URL: ' + location.href);
-  out.push('Protocolo: ' + location.protocol);
+  out.push('Status: ' + gistStatus);
+  out.push('Configurado: ' + GIST_CONFIG.configured);
+  out.push('Gist ID: ' + (GIST_CONFIG.gistId||'—'));
+  out.push('Token: ' + (GIST_CONFIG.token ? GIST_CONFIG.token.slice(0,8)+'…' : '—'));
+  out.push('Última sync: ' + (gistLastSync ? gistLastSync.toLocaleString('es') : 'nunca'));
   out.push('');
-  out.push('CLOUD.enabled: ' + CLOUD.enabled);
-  out.push('CLOUD.apiKey: ' + (CLOUD.apiKey ? CLOUD.apiKey.slice(0,8)+'...' : 'vacío'));
-  out.push('CLOUD.binId: ' + (CLOUD.binId || 'vacío'));
   
   if (GIST_CONFIG.configured) {
     try {
@@ -3390,10 +3390,7 @@ async function cloudDiag() {
 }
 
 function copyShareUrl() {}
-function getShareUrl()  { return ''; };
-  var encoded = encodeURIComponent(btoa(JSON.stringify(cfg)));
-  return location.origin + location.pathname + '#cloud=' + encoded;
-}
+function getShareUrl()  { return ''; }
 
 function mergeSnapshot(local, remote) {
   try {
