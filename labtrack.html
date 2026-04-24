@@ -5821,10 +5821,6 @@ function approveSchedule(reqId){
     setAnalystDefault(req.analystId,req.proposed);
   }
   req.status='approved';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();
-  auditLog('APPROVE','SCHEDULE_REQUEST',req.id,{
-    analystId:req.analystId,analystName:getU(req.analystId).name,
-    dateStr:req.dateStr||'default',type:(req.proposed||{}).type
-  },'Solicitud aprobada');
   saveLS();render();
   saveNow().catch(e=>console.error('saveNow approve:',e));
 }
@@ -5832,10 +5828,6 @@ function rejectSchedule(reqId){
   if(!isSupRole()){alert('Solo el Supervisor puede rechazar solicitudes de horario.');return;}
   const req=scheduleRequests.find(r=>r.id===reqId);if(!req)return;
   req.status='rejected';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();
-  auditLog('REJECT','SCHEDULE_REQUEST',req.id,{
-    analystId:req.analystId,analystName:getU(req.analystId).name,
-    dateStr:req.dateStr||'default',type:(req.proposed||{}).type
-  },'Solicitud rechazada');
   saveLS();render();
   saveNow().catch(e=>console.error('saveNow reject:',e));
 }
