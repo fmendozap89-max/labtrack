@@ -4436,32 +4436,28 @@ function renderTasks(){
   const thead='<div class="thead" style="'+cols+'"><div>Producto / Lote</div><div>Analistas</div><div>Aprob. límite</div><div>Estado</div><div>Prioridad</div><div>H.Est.</div><div>H.Real</div><div></div><div></div></div>';
   let rows='';
   if(!sup){
-    // PUNTO 4: mostrar UNA FILA POR FECHA ASIGNADA (no solo la más cercana)
+    // Tareas libres del analista (siempre visible)
+    var myFT=freeTasks.filter(function(ft){return ft.analystId===currentUser.id;}).sort(function(a,b){return b._ts-a._ts;});
+    var ftSection='<div style="margin-bottom:16px">'
+      +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
+      +'<div style="font-weight:600;font-size:13px">Mis tareas libres</div>'
+      +'<button class="btn sm pri" onclick="openFreeTaskModal(null)">+ Agregar tarea</button>'
+      +'</div>'
+      +(myFT.length===0?'<div class="empty" style="margin-bottom:0">Sin tareas libres registradas</div>'
+      :myFT.map(function(ft){
+          var stColor=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'?'var(--red)':'var(--amber)';
+          var stLabel=ft.status==='confirmed'?'Confirmada':ft.status==='rejected'?'Rechazada':'Pendiente confirmación';
+          return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:6px;display:flex;align-items:center;gap:10px">'
+            +'<div style="flex:1"><div style="font-weight:600">'+escH(ft.description)+'</div>'
+            +'<div style="font-size:11px;color:var(--text2)">'+fmtDF(ft.date)+' · '+ft.hours+'h'+(ft.notes?' · '+escH(ft.notes):'')+'</div></div>'
+            +'<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:'+stColor+'22;color:'+stColor+'">'+stLabel+'</span>'
+            +(ft.status==='pending-confirm'?'<button class="btn sm" style="margin-left:4px" onclick="openFreeTaskModal('+ft.id+')">✎</button>':'')
+            +'</div>';
+        }).join(''))
+      +'</div>';
+
+    // PUNTO 4: mostrar UNA FILA POR FECHA ASIGNADA
     if(f.length===0){
-      // Mis tareas libres
-      var myFT=freeTasks.filter(function(ft){return ft.analystId===currentUser.id;}).sort(function(a,b){return b._ts-a._ts;});
-      var ftSection='';
-      if(myFT.length>0||true){// always show the button
-        ftSection='<div style="margin-bottom:16px">'
-          +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
-          +'<div style="font-weight:600;font-size:13px">Mis tareas libres</div>'
-          +'<button class="btn sm pri" onclick="openFreeTaskModal(null)">+ Agregar tarea</button>'
-          +'</div>'
-          +(myFT.length===0?'<div class="empty">Sin tareas libres registradas</div>'
-          :myFT.map(function(ft){
-            const stColor=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'?'var(--red)':'var(--amber)';
-            const stLabel=ft.status==='confirmed'?'Confirmada':ft.status==='rejected'?'Rechazada':'Pendiente de confirmación';
-            return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:6px;display:flex;align-items:center;gap:10px">'
-              +'<div style="flex:1">'
-              +'<div style="font-weight:600;font-size:13px">'+escH(ft.description)+'</div>'
-              +'<div style="font-size:11px;color:var(--text2);margin-top:2px">'+fmtDF(ft.date)+' · '+ft.hours+'h'+(ft.notes?' · '+escH(ft.notes):'')+'</div>'
-              +'</div>'
-              +'<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:'+stColor+'22;color:'+stColor+'">'+stLabel+'</span>'
-              +(ft.status==='pending-confirm'?'<button class="btn sm" onclick="openFreeTaskModal('+ft.id+')">✎ Editar</button>':'')
-              +'</div>';
-          }).join(''))
-          +'</div>';
-      }
       rows=ftSection+'<div class="empty">Sin análisis asignados</div>';
     } else {
       // Expandir: para cada tarea, una fila por asignación de este analista
@@ -4469,9 +4465,8 @@ function renderTasks(){
       f.forEach(function(t){
         var myAssigns=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
         if(myAssigns.length===0){
-          expandedRows.push(tRowAna(t,null)); // sin fecha específica
+          expandedRows.push(tRowAna(t,null));
         } else {
-          // Ordenar por fecha
           myAssigns.slice().sort(function(a,b){return(a.date||'').localeCompare(b.date||'');})
             .forEach(function(ma){expandedRows.push(tRowAna(t,ma));});
         }
