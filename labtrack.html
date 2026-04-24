@@ -4596,7 +4596,7 @@ function renderPending(){
           return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:6px;display:flex;align-items:center;gap:10px">'
             +'<div class="av '+u.av+'" style="width:26px;height:26px;font-size:10px;flex-shrink:0">'+escH(u.avInit)+'</div>'
             +'<div style="flex:1"><div style="font-weight:600">'+escH(ft.description)+'</div>'
-            +'<div style="font-size:11px;color:var(--text2)">'+escH(u.name)+' · '+cL+' · '+fmtDF(ft.date)+' · '+ft.hours+'h'+(ft.notes?' · '+escH(ft.notes):'')+'</div></div>'
+            +'<div style="font-size:11px;color:var(--text2)">'+escH(u.name)+' · '+fmtDF(ft.date)+' · '+ft.hours+'h'+(ft.notes?' · '+escH(ft.notes):'')+'</div></div>'
             +'<button class="btn sm suc" onclick="confirmFreeTask('+ft.id+')">✓ Confirmar</button>'
             +'<button class="btn sm dan" onclick="rejectFreeTask('+ft.id+')">✗ Rechazar</button>'
             +'</div>';
