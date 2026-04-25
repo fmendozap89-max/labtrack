@@ -4596,12 +4596,17 @@ function renderPendientesResults(sa, ma, pc){
 function _pendientesListStub(){}
 
 function renderPending(){
-  const lateT=tasks.filter(t=>t.status==='late');
-  const toConfirmT=isSupRole()?tasks.filter(t=>t.status==='pending-confirm'):[];
-  const observedT=isSupRole()?tasks.filter(t=>t.status==='observed'):[];
-  const needsReviewT=(isSupRole()||isReviewerRole())?tasks.filter(t=>t.status==='done'):[];
-  const needsApprovalT=isSupRole()?tasks.filter(t=>t.status==='reviewed'):[];
-  const pendT=tasks.filter(t=>t.status==='pending');
+  // Search state for supervisor pending view
+  if(typeof window.pendingSearch==='undefined') window.pendingSearch='';
+  const pq=(window.pendingSearch||'').toLowerCase().trim();
+  function mPQ(t){return !pq||t.producto.toLowerCase().includes(pq)||t.lote.toLowerCase().includes(pq);}
+
+  const lateT=tasks.filter(t=>t.status==='late'&&mPQ(t));
+  const toConfirmT=isSupRole()?tasks.filter(t=>t.status==='pending-confirm'&&mPQ(t)):[];
+  const observedT=isSupRole()?tasks.filter(t=>t.status==='observed'&&mPQ(t)):[];
+  const needsReviewT=(isSupRole()||isReviewerRole())?tasks.filter(t=>t.status==='done'&&mPQ(t)):[];
+  const needsApprovalT=isSupRole()?tasks.filter(t=>t.status==='reviewed'&&mPQ(t)):[];
+  const pendT=tasks.filter(t=>t.status==='pending'&&mPQ(t));
   // PUNTO 3: productos sin asignar / sin fecha visible para analistas y revisores
   const unassignedT=!isSupRole()?tasks.filter(function(t){
     return (t.status==='pending'||t.status==='scheduled')&&
@@ -4640,17 +4645,42 @@ function renderPending(){
             +'</div>';
         }).join(''))
     +'</div>':'';
-  return ftPendHtml+unassignedSection+`<div style="display:flex;align-items:center;margin-bottom:8px;gap:8px">
-    <div class="sec" style="margin-bottom:0;color:var(--red)">Vencidos (${lateT.length})</div>
-    <div style="margin-left:auto"><button id="copybtn-tbl-late" class="btn sm" onclick="copyTableToClipboard('tbl-late')">📋 Copiar vencidos</button></div>
+  return ftPendHtml+unassignedSection+`
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+    <input type="text" placeholder="Buscar por producto o lote…" value="${escH(window.pendingSearch||'')}"
+      style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)"
+      oninput="window.pendingSearch=this.value;var c=document.getElementById('pending-content');if(c)c.innerHTML=renderPendingContent();">
+    ${pq?`<button class="btn sm" onclick="window.pendingSearch='';var c=document.getElementById('pending-content');if(c)c.innerHTML=renderPendingContent();">✕ Limpiar</button>`:''}
   </div>
-  <div class="tbl" id="tbl-late" style="margin-bottom:16px">${lateT.length===0?'<div class="empty">Sin vencidos ✓</div>':hdr+lateT.map(t=>pRow(t,true)).join('')}</div>
+  <div id="pending-content">${renderPendingContent(lateT,toConfirmT,pendT)}</div>
+  `;}
+
+function renderPendingContent(lT,cT,pT){
+  if(!lT){
+    const pq2=(window.pendingSearch||'').toLowerCase().trim();
+    function mQ2(t){return !pq2||t.producto.toLowerCase().includes(pq2)||t.lote.toLowerCase().includes(pq2);}
+    lT=tasks.filter(t=>t.status==='late'&&mQ2(t));
+    cT=isSupRole()?tasks.filter(t=>t.status==='pending-confirm'&&mQ2(t)):[];
+    pT=tasks.filter(t=>t.status==='pending'&&mQ2(t));
+  }
+  const cols='grid-template-columns:1.4fr .9fr 1.3fr .6fr .7fr 1fr';
+  const hdr2=`<div class="thead" style="${cols}"><div>Producto</div><div>Lote</div><div>Analistas</div><div>Fecha</div><div>Prioridad</div><div>Estado</div></div>`;
+  function pRow2(t,isLate){return`<div class="trow" style="${cols}" onclick="openEdit(${t.id})"><div class="cell-trunc" style="font-weight:500">${escH(t.producto)}</div><div class="cell-sub cell-trunc">${escH(t.lote)}</div><div style="display:flex;gap:2px;flex-wrap:wrap">${(t.assignments||[]).filter(a=>!a._removed).map(a=>{const u=getU(a.analyst);return`<div class="av ${u.av}" style="width:22px;height:22px;font-size:9px" title="${escH(u.name)}">${escH(u.avInit)}</div>`;}).join('')}</div><div style="font-size:12px;font-family:var(--mono)">${fmtDF(t.due)}</div><div><span class="pill ${t.priority||'normal'}">${t.priority||'normal'}</span></div><div><span class="pill ${t.status}">${statusLabel(t.status)}</span>${isSupRole()&&t.status==='pending-confirm'?`<button class="btn sm suc" onclick="event.stopPropagation();confirmDone(${t.id})" style="margin-top:3px">✓ Confirmar</button>`:''}${isLate?'<span style="font-size:9px;color:var(--red);margin-left:4px">⚠ Vencido</span>':''}</div></div>`;}
+  return `
   <div style="display:flex;align-items:center;margin-bottom:8px;gap:8px">
-    <div class="sec" style="margin-bottom:0;color:var(--amber)">Pendientes (${pendT.length})</div>
-    <div style="margin-left:auto"><button id="copybtn-tbl-pend" class="btn sm" onclick="copyTableToClipboard('tbl-pend')">📋 Copiar pendientes</button></div>
+    <div class="sec" style="margin-bottom:0;color:var(--red)">Vencidos (${lT.length})</div>
+    <div style="margin-left:auto"><button class="btn sm" onclick="copyTableToClipboard('tbl-late2')">📋 Copiar vencidos</button></div>
   </div>
-  <div class="tbl" id="tbl-pend">${pendT.length===0?'<div class="empty">Sin pendientes</div>':hdr+pendT.map(t=>pRow(t,false)).join('')}</div>`;
+  <div class="tbl" id="tbl-late2" style="margin-bottom:16px">${lT.length===0?'<div class="empty">Sin vencidos ✓</div>':hdr2+lT.map(t=>pRow2(t,true)).join('')}</div>
+  <div style="display:flex;align-items:center;margin-bottom:8px;gap:8px">
+    <div class="sec" style="margin-bottom:0;color:var(--amber)">Pendientes (${pT.length})</div>
+    <div style="margin-left:auto"><button class="btn sm" onclick="copyTableToClipboard('tbl-pend2')">📋 Copiar pendientes</button></div>
+  </div>
+  <div class="tbl" id="tbl-pend2">${pT.length===0?'<div class="empty">Sin pendientes</div>':hdr2+pT.map(t=>pRow2(t,false)).join('')}</div>
+  ${cT.length>0?`<div class="sec" style="margin-top:16px;margin-bottom:8px;color:var(--amber)">Por confirmar (${cT.length})</div><div class="tbl">${hdr2+cT.map(t=>pRow2(t,false)).join('')}</div>`:''}
+  `;
 }
+
 
 // ── WEEK ──
 function getMonthDates(off){
