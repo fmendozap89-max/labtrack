@@ -4509,24 +4509,29 @@ function renderTasks(){
 
 function renderPendientesList(){
   const isSup=isSupRole();
-  // Si por error entra el supervisor, redirigir a su vista
   if(isSup){ return renderPending(); }
 
-  // Tareas sin analista asignado (no tienen ninguna asignación activa)
+  // Search state
+  if(typeof pendientesSearch==='undefined') window.pendientesSearch='';
+  const q=(window.pendientesSearch||'').toLowerCase().trim();
+
+  function matchQ(t){ return !q||t.producto.toLowerCase().includes(q)||t.lote.toLowerCase().includes(q); }
+
+  // Tareas sin analista asignado
   const sinAsignar=tasks.filter(function(t){
     return (t.status==='pending'||t.status==='scheduled')&&
-      !(t.assignments||[]).some(function(a){return !a._removed;});
+      !(t.assignments||[]).some(function(a){return !a._removed;})&&matchQ(t);
   });
 
-  // Tareas asignadas a mí que están pendientes o programadas
+  // Tareas asignadas a mí pendientes
   const misAsignadas=tasks.filter(function(t){
     return (t.status==='pending'||t.status==='scheduled')&&
-      (t.assignments||[]).some(function(a){return a.analyst===currentUser.id&&!a._removed;});
+      (t.assignments||[]).some(function(a){return a.analyst===currentUser.id&&!a._removed;})&&matchQ(t);
   });
 
-  // Pending-confirm propios (completé pero supervisor no confirmó aún)
+  // Pending-confirm propios
   const misPendConfirm=tasks.filter(function(t){
-    return t.status==='pending-confirm'&&t.completedBy===currentUser.id;
+    return t.status==='pending-confirm'&&t.completedBy===currentUser.id&&matchQ(t);
   });
 
   function taskCard(t, showReplanBtn){
@@ -4543,7 +4548,15 @@ function renderPendientesList(){
 
   var html='';
 
-  // Sección 1: Sin asignar
+  // Barra de búsqueda
+  html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">'
+    +'<input id="pend-search" type="text" placeholder="Buscar por producto o lote…" value="'+escH(window.pendientesSearch||'')+'" '
+    +'style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)" '
+    +'oninput="window.pendientesSearch=this.value;render()">'
+    +(q?'<button class="btn sm" onclick="window.pendientesSearch=\'\';render()">✕ Limpiar</button>':'')
+    +'</div>';
+
+
   html+='<div style="margin-bottom:20px">'    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'    +'<div class="sec" style="margin-bottom:0">Sin asignar ('+sinAsignar.length+')</div>'    +'<div style="font-size:11px;color:var(--text3)">Puede solicitar al Supervisor que le asigne estos ensayos</div>'    +'</div>'    +(sinAsignar.length===0      ?'<div class="empty">No hay ensayos sin asignar ✓</div>'      :sinAsignar.map(function(t){return taskCard(t,true);}).join('')    )    +'</div>';
 
   // Sección 2: Mis asignados pendientes
