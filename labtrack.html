@@ -4552,23 +4552,48 @@ function renderPendientesList(){
   html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">'
     +'<input id="pend-search" type="text" placeholder="Buscar por producto o lote…" value="'+escH(window.pendientesSearch||'')+'" '
     +'style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)" '
-    +'oninput="window.pendientesSearch=this.value;render()">'
-    +(q?'<button class="btn sm" onclick="window.pendientesSearch=\'\';render()">✕ Limpiar</button>':'')
-    +'</div>';
-
-
-  html+='<div style="margin-bottom:20px">'    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'    +'<div class="sec" style="margin-bottom:0">Sin asignar ('+sinAsignar.length+')</div>'    +'<div style="font-size:11px;color:var(--text3)">Puede solicitar al Supervisor que le asigne estos ensayos</div>'    +'</div>'    +(sinAsignar.length===0      ?'<div class="empty">No hay ensayos sin asignar ✓</div>'      :sinAsignar.map(function(t){return taskCard(t,true);}).join('')    )    +'</div>';
-
-  // Sección 2: Mis asignados pendientes
-  html+='<div style="margin-bottom:20px">'    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'    +'<div class="sec" style="margin-bottom:0">Mis asignados pendientes ('+misAsignadas.length+')</div>'    +'</div>'    +(misAsignadas.length===0      ?'<div class="empty">Sin análisis pendientes asignados ✓</div>'      :misAsignadas.map(function(t){return taskCard(t,false);}).join('')    )    +'</div>';
-
-  // Sección 3: Completados esperando confirmación
-  if(misPendConfirm.length>0){
-    html+='<div style="margin-bottom:20px">'      +'<div class="sec" style="margin-bottom:10px;color:var(--amber)">Completados — esperando confirmación del Supervisor ('+misPendConfirm.length+')</div>'      +misPendConfirm.map(function(t){return taskCard(t,false);}).join('')      +'</div>';
-  }
+    +'oninput="window.pendientesSearch=this.value;var el=document.getElementById(\'pend-results\');if(el){el.innerHTML=renderPendientesResults();}">'
+    +(q?'<button class="btn sm" onclick="window.pendientesSearch=\'\';var el=document.getElementById(\'pend-results\');if(el){el.innerHTML=renderPendientesResults();}else{render();}">✕ Limpiar</button>':'')
+    +'</div>'
+    +'<div id="pend-results">'+renderPendientesResults(sinAsignar,misAsignadas,misPendConfirm)+'</div>';
 
   return html;
 }
+
+function renderPendientesResults(sa, ma, pc){
+  // Puede llamarse sin args — recalcula filtros
+  if(!sa){
+    const q2=(window.pendientesSearch||'').toLowerCase().trim();
+    function mQ(t){return !q2||t.producto.toLowerCase().includes(q2)||t.lote.toLowerCase().includes(q2);}
+    sa=tasks.filter(function(t){return (t.status==='pending'||t.status==='scheduled')&&!(t.assignments||[]).some(function(a){return !a._removed;})&&mQ(t);});
+    ma=tasks.filter(function(t){return (t.status==='pending'||t.status==='scheduled')&&(t.assignments||[]).some(function(a){return a.analyst===currentUser.id&&!a._removed;})&&mQ(t);});
+    pc=tasks.filter(function(t){return t.status==='pending-confirm'&&t.completedBy===currentUser.id&&mQ(t);});
+  }
+  var out='';
+  out+='<div style="margin-bottom:20px">'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'
+    +'<div class="sec" style="margin-bottom:0">Sin asignar ('+sa.length+')</div>'
+    +'<div style="font-size:11px;color:var(--text3)">Puede solicitar al Supervisor que le asigne estos ensayos</div>'
+    +'</div>'
+    +(sa.length===0?'<div class="empty">No hay ensayos sin asignar ✓</div>':sa.map(function(t){return taskCard(t,true);}).join(''))
+    +'</div>';
+  out+='<div style="margin-bottom:20px">'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'
+    +'<div class="sec" style="margin-bottom:0">Mis asignados pendientes ('+ma.length+')</div>'
+    +'</div>'
+    +(ma.length===0?'<div class="empty">Sin análisis pendientes asignados ✓</div>':ma.map(function(t){return taskCard(t,false);}).join(''))
+    +'</div>';
+  if(pc.length>0){
+    out+='<div style="margin-bottom:20px">'
+      +'<div class="sec" style="margin-bottom:10px;color:var(--amber)">Completados — esperando confirmación del Supervisor ('+pc.length+')</div>'
+      +pc.map(function(t){return taskCard(t,false);}).join('')
+      +'</div>';
+  }
+  return out;
+}
+
+// (old sections moved to renderPendientesResults)
+function _pendientesListStub(){}
 
 function renderPending(){
   const lateT=tasks.filter(t=>t.status==='late');
