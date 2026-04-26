@@ -4520,6 +4520,18 @@ function renderTasks(){
 }
 
 
+function taskCard(t, showReplanBtn){
+    const assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
+    const myA=assigns.find(function(a){return a.analyst===currentUser.id;});
+    const hasSolicitado=replanNotifs.some(function(n){
+      return n.type==='planification_request'&&n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';
+    });
+    const hasReplan=replanNotifs.some(function(n){
+      return n.type==='replan'&&n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';
+    });
+    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:8px">'      +'<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">'      +'<div style="flex:1">'      +'<div style="font-weight:600;font-size:13px">'+escH(t.producto)+'</div>'      +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3);margin-top:1px">'      +escH(t.lote)+(t.due?' · Vence: '+fmtDF(t.due):'')      +(myA?' · Asignado: '+fmtDF(myA.date):'')      +'</div>'      +(t.notes?'<div style="font-size:11px;color:var(--text2);margin-top:3px">'+escH(t.notes)+'</div>':'')      +'</div>'      +'<span class="pill '+t.status+'" style="flex-shrink:0">'+statusLabel(t.status)+'</span>'      +'</div>'      +'<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'      +(showReplanBtn&&!hasSolicitado&&!hasReplan        ?'<button class="btn sm pri" onclick="requestPlanification('+t.id+')">📋 Solicitar planificación</button>'        :hasSolicitado?'<span style="font-size:11px;color:var(--blue-text);padding:4px 8px">✓ Solicitud enviada</span>':''      )      +(myA&&!hasReplan        ?'<button class="btn sm" onclick="openReplan('+t.id+',&quot;'+currentUser.id+'&quot;)">↻ Solicitar replanificación</button>'        :hasReplan?'<span style="font-size:11px;color:var(--amber-text);padding:4px 8px">↻ Replanif. solicitada</span>':''      )      +'</div>'      +'</div>';
+  }
+
 function renderPendientesList(){
   const isSup=isSupRole();
   if(isSup){ return renderPending(); }
@@ -4547,17 +4559,6 @@ function renderPendientesList(){
     return t.status==='pending-confirm'&&t.completedBy===currentUser.id&&matchQ(t);
   });
 
-  function taskCard(t, showReplanBtn){
-    const assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
-    const myA=assigns.find(function(a){return a.analyst===currentUser.id;});
-    const hasSolicitado=replanNotifs.some(function(n){
-      return n.type==='planification_request'&&n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';
-    });
-    const hasReplan=replanNotifs.some(function(n){
-      return n.type==='replan'&&n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';
-    });
-    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:8px">'      +'<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">'      +'<div style="flex:1">'      +'<div style="font-weight:600;font-size:13px">'+escH(t.producto)+'</div>'      +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3);margin-top:1px">'      +escH(t.lote)+(t.due?' · Vence: '+fmtDF(t.due):'')      +(myA?' · Asignado: '+fmtDF(myA.date):'')      +'</div>'      +(t.notes?'<div style="font-size:11px;color:var(--text2);margin-top:3px">'+escH(t.notes)+'</div>':'')      +'</div>'      +'<span class="pill '+t.status+'" style="flex-shrink:0">'+statusLabel(t.status)+'</span>'      +'</div>'      +'<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'      +(showReplanBtn&&!hasSolicitado&&!hasReplan        ?'<button class="btn sm pri" onclick="requestPlanification('+t.id+')">📋 Solicitar planificación</button>'        :hasSolicitado?'<span style="font-size:11px;color:var(--blue-text);padding:4px 8px">✓ Solicitud enviada</span>':''      )      +(myA&&!hasReplan        ?'<button class="btn sm" onclick="openReplan('+t.id+',&quot;'+currentUser.id+'&quot;)">↻ Solicitar replanificación</button>'        :hasReplan?'<span style="font-size:11px;color:var(--amber-text);padding:4px 8px">↻ Replanif. solicitada</span>':''      )      +'</div>'      +'</div>';
-  }
 
   var html='';
 
