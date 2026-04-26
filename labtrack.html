@@ -3019,7 +3019,7 @@ function getTableData(tableId){
   }
   let taskList=[];
   if(tableId==='tbl-tasks'){
-    let f=currentUser.role==='supervisor'?[...tasks]:tasks.filter(t=>isMyTask(t));
+    let f=currentUser.role==='supervisor'?sortTasks([...tasks],taskSort,taskSortDir):sortTasks(tasks.filter(t=>isMyTask(t)),taskSort,taskSortDir);
     if(filterAnalyst)f=f.filter(t=>getAssignees(t).includes(filterAnalyst));
     if(filterStatus)f=f.filter(t=>t.status===filterStatus);
     taskList=f;
@@ -3095,6 +3095,37 @@ function weekDayLabel(dateStr){
 // ── RENDER ──
 let _lastHtml='';
 let _renderPending=false;
+
+// ── SORT STATE ──
+let taskSort='due';
+let taskSortDir=1;
+
+function setTaskSort(col){
+  if(taskSort===col){taskSortDir*=-1;}else{taskSort=col;taskSortDir=1;}
+  render();
+}
+
+function sortHdr(col,label){
+  var active=taskSort===col;
+  return'<div onclick="setTaskSort(\''+col+'\')" style="cursor:pointer;user-select:none;display:flex;align-items:center;gap:3px">'+label+'<span style="font-size:9px;opacity:'+(active?'1':'0.3')+';color:'+(active?'var(--blue)':'inherit')+'">'+(active&&taskSortDir===-1?'▼':'▲')+'</span></div>';
+}
+function sortTasks(arr,sortCol,dir){
+  return [...arr].sort(function(a,b){
+    var va,vb;
+    var dir2=dir||1;
+    if(sortCol==='due'){va=a.due||'9999-12-31';vb=b.due||'9999-12-31';}
+    else if(sortCol==='producto'){va=(a.producto||'').toLowerCase();vb=(b.producto||'').toLowerCase();}
+    else if(sortCol==='status'){va=a.status||'';vb=b.status||'';}
+    else if(sortCol==='priority'){
+      var po={Urgente:0,Alta:1,Normal:2};
+      va=po[a.priority]!==undefined?po[a.priority]:3;
+      vb=po[b.priority]!==undefined?po[b.priority]:3;
+    }
+    else{va=a.due||'9999-12-31';vb=b.due||'9999-12-31';}
+    if(va<vb)return -dir2;if(va>vb)return dir2;return 0;
+  });
+}
+
 function recalcLateStatus(){
   var todayStr=today();
   tasks.forEach(function(t){
@@ -4147,7 +4178,7 @@ function renderDashboard(){
     const done=tasks.filter(t=>t.status==='done').length;
     const pend=tasks.filter(t=>t.status==='pending').length;
     const toConfirm=tasks.filter(t=>t.status==='pending-confirm').length;
-    let filtered=((dashFilter&&dashFilter!=='all')?tasks.filter(t=>t.status===dashFilter):[...tasks].reverse()).filter(t=>!filterSearch||t.producto.toLowerCase().includes(filterSearch.toLowerCase())||t.lote.toLowerCase().includes(filterSearch.toLowerCase()));
+    let filtered=((dashFilter&&dashFilter!=='all')?tasks.filter(t=>t.status===dashFilter):sortTasks([...tasks],taskSort,taskSortDir)).filter(t=>!filterSearch||t.producto.toLowerCase().includes(filterSearch.toLowerCase())||t.lote.toLowerCase().includes(filterSearch.toLowerCase()));
     const filterLabel={'':`Todos (${tasks.length})`,'pending':`Pendientes (${pend})`,'progress':`En análisis (${prog})`,'late':`Vencidos (${late})`,'done':`Completados (${done})`};
     return`
       <div class="stats-row">
@@ -4174,7 +4205,7 @@ function renderDashboard(){
         </div>
       </div>
       <div class="filter-row" style="margin-bottom:8px">${searchBarHtml()}</div><div class="tbl" id="tbl-dash">
-        <div class="thead" style="grid-template-columns:1.5fr 1fr 1fr .8fr .55fr .65fr .4fr"><div>Producto</div><div>Lote</div><div>Analistas</div><div title="Estimado · Real · Barra">Horas</div><div>Vence</div><div>Estado</div><div></div></div>
+        <div class="thead" style="grid-template-columns:1.9fr 1fr 0.85fr 0.85fr 0.7fr 0.55fr 0.65fr 0.9fr 0.3fr">'+sortHdr('producto','Producto / Lote')+'<div>Analistas</div>'+sortHdr('due','Aprob. límite')+sortHdr('status','Estado')+sortHdr('priority','Prioridad')+'<div>H.Est.</div><div>H.Real</div><div></div><div></div></div><div>Analistas</div><div onclick="setTaskSort('due')" style="cursor:pointer">Aprob. límite ↕</div><div onclick="setTaskSort('status')" style="cursor:pointer">Estado ↕</div><div onclick="setTaskSort('priority')" style="cursor:pointer">Prioridad ↕</div><div>H.Est.</div><div>H.Real</div><div></div><div></div></div><div>Lote</div><div>Analistas</div><div title="Estimado · Real · Barra">Horas</div><div>Vence</div><div>Estado</div><div></div></div>
         ${filtered.length===0?'<div class="empty">Sin resultados para este filtro</div>':filtered.map(t=>tRowSupLote(t)).join('')}
       </div>`;
   }
@@ -4437,7 +4468,7 @@ function _doSearchRender(){
 }
 function renderTasks(){
   const sup=currentUser.role==='supervisor';
-  let f=sup?[...tasks]:tasks.filter(function(t){return isMyTask(t);});
+  let f=sup?sortTasks([...tasks],taskSort,taskSortDir):sortTasks(tasks.filter(function(t){return isMyTask(t);}),taskSort,taskSortDir);
   if(filterAnalyst)f=f.filter(function(t){return getAssignees(t).includes(filterAnalyst);});
   if(filterStatus)f=f.filter(function(t){return t.status===filterStatus;});
   if(filterSearch){const q=filterSearch.toLowerCase();f=f.filter(function(t){return t.producto.toLowerCase().includes(q)||t.lote.toLowerCase().includes(q);});}
@@ -4447,7 +4478,7 @@ function renderTasks(){
     +'<button class="btn sm" onclick="tasksView=\'analista\';render()" style="'+(tasksView==='analista'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">Por analista</button>'
     +'</div>':'';
   const cols='grid-template-columns:1.9fr 1fr 0.85fr 0.85fr 0.7fr 0.55fr 0.65fr 0.9fr 0.3fr';
-  const thead='<div class="thead" style="'+cols+'"><div>Producto / Lote</div><div>Analistas</div><div>Aprob. límite</div><div>Estado</div><div>Prioridad</div><div>H.Est.</div><div>H.Real</div><div></div><div></div></div>';
+  const thead='<div class="thead" style="'+cols+'">'+sortHdr('producto','Producto / Lote')+'<div>Analistas</div>'+sortHdr('due','Aprob. límite')+sortHdr('status','Estado')+sortHdr('priority','Prioridad')+'<div>H.Est.</div><div>H.Real</div><div></div><div></div></div>';
   let rows='';
   if(!sup){
     // Tareas libres del analista (siempre visible)
@@ -4490,13 +4521,12 @@ function renderTasks(){
   }else if(tasksView==='lote'){
     rows=f.length===0?'<div class="empty">Sin resultados</div>':thead+f.map(function(t){return tRowSupLote(t);}).join('');
   }else{
-    ANALYSTS.forEach(function(a){
-      const at=f.filter(function(t){return getAssignees(t).includes(a.id);});
-      if(!at.length) return;
-      rows+='<div style="padding:8px 12px;background:var(--bg2);font-weight:600;font-size:12px;border-radius:var(--radius) var(--radius) 0 0;margin-top:8px;display:flex;align-items:center;gap:8px"><div class="av '+a.av+'" style="width:22px;height:22px;font-size:9px">'+escH(a.avInit)+'</div>'+escH(a.name)+'<span style="color:var(--text3);font-weight:400">('+at.length+')</span></div>';
-      rows+=thead+at.map(function(t){return tRowSupAnalista(t,a.id);}).join('');
-    });
-    if(!rows) rows='<div class="empty">Sin resultados</div>';
+    // Vista por analista: bloques por PRODUCTO, filas por analista
+    if(f.length===0){
+      rows='<div class="empty">Sin resultados</div>';
+    } else {
+      rows=thead+f.map(function(t){return tRowSupAnalista(t);}).join('');
+    }
   }
   return'<div class="filter-row" style="gap:8px;flex-wrap:wrap">'
     +searchBarHtml()
@@ -4673,13 +4703,13 @@ function renderPendingContent(lT,cT,pT){
   if(!lT){
     const pq2=(window.pendingSearch||'').toLowerCase().trim();
     function mQ2(t){return !pq2||t.producto.toLowerCase().includes(pq2)||t.lote.toLowerCase().includes(pq2);}
-    lT=tasks.filter(t=>t.status==='late'&&mQ2(t));
+    lT=sortTasks(tasks.filter(t=>t.status==='late'&&mQ2(t)),'due',1);
     cT=isSupRole()?tasks.filter(t=>t.status==='pending-confirm'&&mQ2(t)):[];
-    pT=tasks.filter(t=>t.status==='pending'&&mQ2(t));
+    pT=sortTasks(tasks.filter(t=>t.status==='pending'&&mQ2(t)),'due',1);
   }
-  const cols='grid-template-columns:1.4fr .9fr 1.3fr .6fr .7fr 1fr';
-  const hdr2=`<div class="thead" style="${cols}"><div>Producto</div><div>Lote</div><div>Analistas</div><div>Fecha</div><div>Prioridad</div><div>Estado</div></div>`;
-  function pRow2(t,isLate){return`<div class="trow" style="${cols}" onclick="openEdit(${t.id})"><div class="cell-trunc" style="font-weight:500">${escH(t.producto)}</div><div class="cell-sub cell-trunc">${escH(t.lote)}</div><div style="display:flex;gap:2px;flex-wrap:wrap">${(t.assignments||[]).filter(a=>!a._removed).map(a=>{const u=getU(a.analyst);return`<div class="av ${u.av}" style="width:22px;height:22px;font-size:9px" title="${escH(u.name)}">${escH(u.avInit)}</div>`;}).join('')}</div><div style="font-size:12px;font-family:var(--mono)">${fmtDF(t.due)}</div><div><span class="pill ${t.priority||'normal'}">${t.priority||'normal'}</span></div><div><span class="pill ${t.status}">${statusLabel(t.status)}</span>${isSupRole()&&t.status==='pending-confirm'?`<button class="btn sm suc" onclick="event.stopPropagation();confirmDone(${t.id})" style="margin-top:3px">✓ Confirmar</button>`:''}${isLate?'<span style="font-size:9px;color:var(--red);margin-left:4px">⚠ Vencido</span>':''}</div></div>`;}
+  const cols='grid-template-columns:1.6fr 1fr 0.9fr 0.8fr 1fr';
+  const hdr2=`<div class="thead" style="${cols}"><div>Producto</div><div>Lote</div><div>Aprob. límite</div><div>Prioridad</div><div>Prioridad</div><div>Estado</div></div>`;
+  function pRow2(t,isLate){return`<div class="trow" style="${cols}" onclick="openEdit(${t.id})"><div><div class="cell-trunc" style="font-weight:500">${escH(t.producto)}</div><div class="cell-sub cell-trunc">${escH(t.lote)}</div></div><div style="font-family:var(--mono);font-size:11px;color:${t.due&&t.due<today()?'var(--red)':' var(--text2)'}">${t.due?fmtDDMMYY(t.due):'—'}</div><div><span class="pill ${(t.priority||'Normal').toLowerCase()}">${t.priority||'Normal'}</span></div><div><span class="pill ${t.status}">${statusLabel(t.status)}</span>${isLate?'<span style="font-size:9px;color:var(--red);margin-left:4px">⚠ Vencido</span>':''}${isSupRole()&&t.status==='pending-confirm'?`<button class="btn sm suc" onclick="event.stopPropagation();confirmDone(${t.id})" style="margin-top:3px">✓ Confirmar</button>`:''}</div></div>`;}
   return `
   <div style="display:flex;align-items:center;margin-bottom:8px;gap:8px">
     <div class="sec" style="margin-bottom:0;color:var(--red)">Vencidos (${lT.length})</div>
