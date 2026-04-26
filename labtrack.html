@@ -3762,8 +3762,8 @@ function canEditField(t, field) {
 function exportAuditCSV(){
   var rows=[['Fecha','Hora','Usuario','Rol','Accion','Entidad','ID','Descripcion','Motivo']];
   [...auditTrail].sort(function(a,b){return a.ts-b.ts;}).forEach(function(e){
-    var dt=new Date(e.ts);var u=getU(e.user);
-    rows.push([dt.toLocaleDateString('es'),dt.toLocaleTimeString('es'),u?u.name:e.user,u?u.role:'',e.action,e.entity,String(e.entityId||''),(e.details&&e.details.description)||'',e.reason||'']);
+    var dt=new Date(e.ts);var u=getU(e.userId||e.user);
+    rows.push([dt.toLocaleDateString('es'),dt.toLocaleTimeString('es'),u?u.name:(e.userName||e.userId||''),u?u.role:(e.userRole||''),,e.action,e.entity,String(e.entityId||''),(e.details&&e.details.description)||'',e.reason||'']);
   });
   var csv=rows.map(function(r){return r.map(function(c){return'"'+String(c||'').replace(/"/g,'""')+'"';}).join(',');}).join('\n');
   var blob=new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'});
@@ -4613,8 +4613,7 @@ function renderPending(){
       !(t.assignments||[]).some(function(a){return !a._removed;});
   }):[];
   const cols='grid-template-columns:1.4fr .9fr 1.3fr .6fr .7fr 1fr';
-  const hdr=`<div class="thead" style="${cols}"><div>Producto</div><div>Lote</div><div>Analistas</div><div>Fecha</div><div>Prioridad</div><div></div></div>`;
-  function pRow(t,isLate){return`<div class="trow" style="${cols}" onclick="openEdit(${t.id})"><div class="cell-trunc">${escH(t.producto)}</div><div class="cell-sub cell-trunc">${escH(t.lote)}</div><div><div class="av-stack">${avStack(t)}</div></div><div style="font-family:var(--mono);font-size:12px;color:${isLate?'var(--red)':'inherit'}">${fmtD(t.due)}</div><div><span class="pill ${prioClass(t.priority)}">${t.priority}</span></div><div style="display:flex;gap:4px">${isLate?`<button class="btn suc sm" onclick="event.stopPropagation();markDone(${t.id})">Completar</button>`:`<button class="btn pri sm" onclick="event.stopPropagation();markProg(${t.id})">Iniciar</button><button class="btn suc sm" onclick="event.stopPropagation();markDone(${t.id})">Completar</button>`}</div></div>`;}
+    function pRow(t,isLate){return`<div class="trow" style="${cols}" onclick="openEdit(${t.id})"><div class="cell-trunc">${escH(t.producto)}</div><div class="cell-sub cell-trunc">${escH(t.lote)}</div><div><div class="av-stack">${avStack(t)}</div></div><div style="font-family:var(--mono);font-size:12px;color:${isLate?'var(--red)':'inherit'}">${fmtD(t.due)}</div><div><span class="pill ${prioClass(t.priority)}">${t.priority}</span></div><div style="display:flex;gap:4px">${isLate?`<button class="btn suc sm" onclick="event.stopPropagation();markDone(${t.id})">Completar</button>`:`<button class="btn pri sm" onclick="event.stopPropagation();markProg(${t.id})">Iniciar</button><button class="btn suc sm" onclick="event.stopPropagation();markDone(${t.id})">Completar</button>`}</div></div>`;}
   const unassignedSection=unassignedT.length>0
     ?'<div style="background:var(--blue-bg);border:1px solid var(--blue);border-radius:var(--radius-lg);padding:14px;margin-bottom:16px">'
       +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
@@ -5466,7 +5465,7 @@ function renderImportModal(){
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
       <table style="width:100%;font-size:11px;border-collapse:collapse">
         <tr style="background:var(--bg2)">
-          ${['Producto','Lote','Analista','Fecha análisis','Fecha entrega','Prioridad'].map(h=>`<th style="padding:5px 8px;text-align:left;border-right:1px solid var(--border);font-weight:600;color:var(--text2)">${h}</th>`).join('')}
+          ${['Producto','Lote','Analista','Fecha análisis','Fecha entrega','Prioridad','Horas est.','Notas'].map(h=>`<th style="padding:5px 8px;text-align:left;border-right:1px solid var(--border);font-weight:600;color:var(--text2)">${h}</th>`).join('')}
         </tr>
         <tr><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">Amoxicilina 500mg</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">L-2024-011</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">${ANALYSTS[0]?escH(ANALYSTS[0].name):'Analista 1'}</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">2026-04-25</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">2026-04-28</td><td style="padding:5px 8px;color:var(--text3)">Normal</td></tr>
         <tr style="background:var(--bg)"><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">Ibuprofeno 400mg</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">L-2024-012</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">${ANALYSTS[1]?escH(ANALYSTS[1].name):'Analista 2'}</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">2026-04-26</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">2026-04-30</td><td style="padding:5px 8px;color:var(--text3)">Alta</td></tr>
@@ -5500,10 +5499,7 @@ function renderImportModal(){
 function renderPreview(){
   if(!pastePreview.length)return'';
   return`<div style="margin-top:10px"><div style="font-size:12px;font-weight:500;color:var(--green);margin-bottom:6px">✓ ${pastePreview.length} registro${pastePreview.length>1?'s':''} detectado${pastePreview.length>1?'s':''}</div>
-  <div style="overflow-x:auto"><table class="preview-tbl"><tr><th>Producto</th><th>Lote</th><th>Analista</th><th>Fecha análisis</th><th>Entrega</th><th>Prioridad</th></tr>
-  ${pastePreview.slice(0,5).map(r=>`<tr><td>${escH(r.producto)}</td><td>${escH(r.lote)}</td><td>${escH(r.analista)}</td><td>${escH(r.fechaAnalisis)}</td><td>${escH(r.due)}</td><td>${escH(r.priority)}</td></tr>`).join('')}
-  ${pastePreview.length>5?`<tr><td colspan="6" style="text-align:center;color:var(--text3)">... y ${pastePreview.length-5} más</td></tr>`:''}
-  </table></div></div>`;
+  <div style="overflow-x:auto"><table class="preview-tbl"><tr><th>Producto</th><th>Lote</th><th>Analista</th><th>F. análisis</th><th>F. entrega</th><th>Prioridad</th><th>H. est.</th><th>Notas</th></tr>${pastePreview.slice(0,5).map(r=>`<tr><td>${escH(r.producto)}</td><td>${escH(r.lote)}</td><td>${escH(r.analista)}</td><td>${escH(r.fechaAnalisis)}</td><td>${escH(r.due)}</td><td>${escH(r.priority||"Normal")}</td><td>${r.horasEst||""}</td><td>${escH(r.notes||"")}</td></tr>`).join("")}${pastePreview.length>5?`<tr><td colspan="8" style="text-align:center;color:var(--text3)">... y ${pastePreview.length-5} más</td></tr>`:""}</table></div></div>`;
 }
 
 // ── CHANGE PWD MODAL ──
@@ -5523,7 +5519,7 @@ function nameToId(n){const nl=n.trim().toLowerCase();return ANALYSTS.find(a=>a.n
 function parsePaste(text){
   const lines=text.trim().split('\n').filter(l=>l.trim());
   if(lines.length<2){pastePreview=[];render();return;}
-  pastePreview=lines.slice(1).map(r=>{const c=r.split('\t');return{producto:c[0]||'',lote:c[1]||'',analista:c[2]||'',fechaAnalisis:c[3]||'',due:c[4]||'',priority:c[5]||'Normal'};}).filter(r=>r.producto&&r.lote);
+  pastePreview=lines.slice(1).map(r=>{const c=r.split('\t');return{producto:c[0]||'',lote:c[1]||'',analista:c[2]||'',fechaAnalisis:c[3]||'',due:c[4]||'',priority:c[5]||'Normal',horasEst:parseFloat(c[6])||0,notes:c[7]||''};}).filter(r=>r.producto&&r.lote);
   render();
 }
 function handleFile(input){
@@ -5544,7 +5540,9 @@ function handleFile(input){
         analista:String(r['Analista']||r['analista']||'').trim(),
         fechaAnalisis:String(r['Fecha análisis']||r['FechaAnalisis']||r['Fecha_análisis']||'').trim(),
         due:String(r['Fecha entrega']||r['Vence']||r['fecha_entrega']||'').trim(),
-        priority:String(r['Prioridad']||r['prioridad']||'Normal').trim()
+        priority:String(r['Prioridad']||r['prioridad']||'Normal').trim(),
+        horasEst:parseFloat(r['Horas estimadas']||r['horas_estimadas']||0)||0,
+        notes:String(r['Notas']||r['notas']||'').trim()
       })).filter(r=>r.producto&&r.lote);
       render();
     }catch(err){
@@ -5602,13 +5600,17 @@ function confirmImport(){
       const due=normDate(r.due);
       const asgn=ana?[{analyst:ana.id,date:fechaAna||due}]:[];
       const priority=['Normal','Alta','Urgente'].includes(r.priority)?r.priority:'Normal';
-      return{id:nextId++,producto:prod,lote,created:today(),assignments:asgn,due,priority,status:'pending',notes:''};
+      const horasEst=r.horasEst||0;
+      const taskNotes=r.notes||'';
+      return{id:nextId++,producto:prod,lote,created:today(),assignments:asgn.map(function(a){return Object.assign({},a,{estimatedHours:horasEst});}),due,priority,status:'pending',notes:taskNotes,estimatedHours:horasEst};
     }).filter(Boolean);
     tasks=tasks.concat(newTasks);
     if(duplicates&&duplicates.length>0&&newTasks.length>0)alert('Importacion completada. '+newTasks.length+' registro(s) importados. '+duplicates.length+' duplicado(s) omitido(s).');
     pastePreview=[];
     showImportModal=false;
+    auditLog('IMPORT','TASK','BATCH',{count:newTasks.length},'Importación masiva');
     saveLS();
+    saveNow().catch(function(e){console.error('saveNow import:',e);});
     render();
   }catch(e){
     alert('Error al importar: '+e.message+'. Los datos anteriores no fueron modificados.');
@@ -5637,7 +5639,7 @@ function xlsxDownload(wb, filename){
   }
 }
 function copyHeaders(){
-  const text='Producto\tLote\tAnalista\tFecha análisis\tFecha entrega\tPrioridad';
+  const text='Producto\tLote\tAnalista\tFecha análisis\tFecha entrega\tPrioridad\tHoras estimadas\tNotas';
   if(navigator.clipboard&&navigator.clipboard.writeText){
     navigator.clipboard.writeText(text).then(()=>{
       const btn=document.getElementById('copy-btn');
@@ -5656,11 +5658,11 @@ function fallbackCopy(text){
 function downloadTemplate(){
   function go(){
     const ws=XLSX.utils.aoa_to_sheet([
-      ['Producto','Lote','Analista','Fecha análisis','Fecha entrega','Prioridad'],
-      ['Amoxicilina 500mg','L-2024-011',ANALYSTS[0]?ANALYSTS[0].name:'Analista 1','2026-04-25','2026-04-28','Normal'],
-      ['Ibuprofeno 400mg','L-2024-012',ANALYSTS[1]?ANALYSTS[1].name:'Analista 2','2026-04-26','2026-04-30','Alta'],
+      ['Producto','Lote','Analista','Fecha análisis','Fecha entrega','Prioridad','Horas estimadas','Notas'],
+      ['Amoxicilina 500mg','L-2024-011',ANALYSTS[0]?ANALYSTS[0].name:'Analista 1','2026-04-25','2026-04-28','Normal',4,'Control fisicoquímico'],
+      ['Ibuprofeno 400mg','L-2024-012',ANALYSTS[1]?ANALYSTS[1].name:'Analista 2','2026-04-26','2026-04-30','Alta',6,'Microbiológico + fisicoquímico'],
     ]);
-    ws['!cols']=[{wch:24},{wch:14},{wch:18},{wch:16},{wch:16},{wch:12}];
+    ws['!cols']=[{wch:24},{wch:14},{wch:18},{wch:16},{wch:16},{wch:12},{wch:14},{wch:30}];
     const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,'Análisis',ws);
     xlsxDownload(wb,'plantilla_labtrack.xlsx');
   }
@@ -5668,12 +5670,26 @@ function downloadTemplate(){
 }
 function doExportXLSX(){
   const rows=tasks.map(t=>{
-    const asigs=getAssignees(t).map(id=>getU(id).name).join(', ');
-    const fechas=(t.assignments||[]).map(a=>getU(a.analyst).name.split(' ')[0]+': '+fmtDF(a.date)).join(' | ');
-    return{'Producto':t.producto,'Lote':t.lote,'Fecha creación':fmtDF(t.created),'Analistas':asigs,'Fechas de análisis':fechas,'Fecha entrega':fmtDF(t.due),'Prioridad':t.priority,'Estado':statusLabel(t.status),'Notas':t.notes||''};
+    const asigs=(t.assignments||[]).filter(a=>!a._removed).map(a=>getU(a.analyst).name).join(', ');
+    const fechas=(t.assignments||[]).filter(a=>!a._removed).map(a=>getU(a.analyst).name.split(' ')[0]+': '+fmtDF(a.date)).join(' | ');
+    const estH=(t.assignments||[]).reduce(function(s,a){return s+(a.estimatedHours||0);},0)||t.estimatedHours||0;
+    const realH=(t.assignments||[]).reduce(function(s,a){return s+(a.realHours||0);},0);
+    return{
+      'Producto':t.producto,
+      'Lote':t.lote,
+      'Estado':statusLabel(t.status),
+      'Prioridad':t.priority||'Normal',
+      'Analistas':asigs,
+      'Fechas de análisis':fechas,
+      'Fecha límite':fmtDF(t.due),
+      'Horas estimadas':estH||'',
+      'Horas reales':realH||'',
+      'Fecha creación':fmtDF(t.created),
+      'Notas':t.notes||''
+    };
   });
   const ws=XLSX.utils.json_to_sheet(rows);
-  ws['!cols']=[{wch:22},{wch:14},{wch:14},{wch:30},{wch:34},{wch:14},{wch:10},{wch:12},{wch:32}];
+  ws['!cols']=[{wch:24},{wch:14},{wch:16},{wch:10},{wch:28},{wch:30},{wch:14},{wch:10},{wch:10},{wch:14},{wch:35}];
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,'Análisis',ws);
   const res=ANALYSTS.map(a=>{const mt=tasks.filter(t=>getAssignees(t).includes(a.id));return{'Analista':a.name,'Total':mt.length,'Completados':mt.filter(t=>t.status==='done').length,'En curso':mt.filter(t=>t.status==='progress').length,'Pendientes':mt.filter(t=>t.status==='pending').length,'Vencidos':mt.filter(t=>t.status==='late').length};});
   XLSX.utils.book_append_sheet(wb,'Resumen analistas',XLSX.utils.json_to_sheet(res));
@@ -6316,6 +6332,7 @@ function saveTask(){
   saveLS('counters');
   render();
 }
+  saveNow().catch(e=>console.error('saveNow task:',e));
 
 
 // Marcar notificación de observación como leída
