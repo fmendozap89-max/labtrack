@@ -5305,7 +5305,7 @@ function renderTaskModal(){
     +'<div class="frow"><label>Producto</label><input type="text" id="f-prod" value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg"></div>'
     +'<div class="frow"><label>N° de Lote</label><input type="text" id="f-lote" value="'+escH(t.lote||'')+'" placeholder="Ej: L-2024-001"></div>'
     +'<div class="frow"><label>Fecha de creación</label><input type="date" id="f-created" value="'+(t.created||today())+'"></div>'
-    +'<div class="frow"><label>Fecha límite de aprobación</label><input type="date" id="f-due" value="'+(t.due||'')+'"></div>'
+    +'<div class="frow"><label>Fecha límite de aprobación'+(isEdit&&!t.due?' <span style="color:var(--red);font-size:11px">⚠ no definida</span>':'')+'</label><input type="date" id="f-due" value="'+(t.due||'')+'" style="'+(isEdit&&!t.due?'border-color:var(--red);':'')+'">/div>'
     +'<div class="frow"><label>Prioridad</label><select id="f-prio">'
     +'<option'+(t.priority==='Normal'?' selected':'')+'>Normal</option>'
     +'<option'+(t.priority==='Alta'?' selected':'')+'>Alta</option>'
@@ -5453,25 +5453,55 @@ function renderImportModal(){
     <textarea class="paste-area" id="paste-in" placeholder="Pegá aquí el contenido copiado de Excel..." oninput="parsePaste(this.value)"></textarea>${renderPreview()}</div>`
     :modalTab==='file'?`<div><div class="import-area" onclick="document.getElementById('file-in').click()"><div style="font-size:28px;margin-bottom:8px">📄</div><div style="font-weight:500;color:var(--text);margin-bottom:3px">Seleccioná un archivo .xlsx o .csv</div><div>Hacé clic para buscar en tu computadora</div></div><input type="file" id="file-in" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleFile(this)">${renderPreview()}</div>`
     :`<div>
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
-      <button class="btn pri" style="flex:1;padding:10px" onclick="downloadTemplate()">↓ Descargar plantilla.xlsx</button>
+    <div style="margin-bottom:14px">
+      <button class="btn pri" style="width:100%;padding:10px;font-size:14px" onclick="downloadTemplate()">↓ Descargar plantilla Excel (.xlsx)</button>
     </div>
-    <div style="background:var(--bg2);border-radius:var(--radius);padding:12px;margin-bottom:10px">
-      <div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">Si la descarga no funciona — copiá los encabezados manualmente</div>
-      <p style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.6">Abrí Excel, creá una hoja nueva, pegá en la celda A1 la siguiente fila de encabezados (separados por Tab), luego completá los datos debajo:</p>
-      <div style="background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius);padding:8px;font-family:var(--mono);font-size:11px;color:var(--text);word-break:break-all;margin-bottom:6px" id="header-row">Producto	Lote	Analista	Fecha análisis	Fecha entrega	Prioridad</div>
-      <button class="btn sm" onclick="copyHeaders()" id="copy-btn" style="font-size:11px">📋 Copiar encabezados</button>
+    <div style="background:var(--blue-bg);border-left:3px solid var(--blue);border-radius:var(--radius);padding:12px 14px;margin-bottom:12px;font-size:12px;color:var(--blue-text);line-height:1.8">
+      <b>Instrucciones de carga:</b><br>
+      1. Descargar la plantilla con el botón de arriba<br>
+      2. Completar los datos en Excel respetando los encabezados (no modificarlos)<br>
+      3. Una fila por analista asignado — si un lote tiene 2 analistas, usar 2 filas con el mismo Producto y Lote<br>
+      4. Guardar el archivo y volver a esta pantalla → pestaña <b>Archivo Excel</b><br>
+      5. Tras importar, editar cada análisis para agregar analistas o fechas adicionales
     </div>
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:10px">
+      <div style="background:var(--bg2);padding:8px 12px;font-size:11px;font-weight:600;color:var(--text2);display:flex;align-items:center;justify-content:space-between">
+        <span>Columnas requeridas</span>
+        <button class="btn sm" onclick="copyHeadersNow(this)" style="font-size:11px">📋 Copiar encabezados</button>
+      </div>
       <table style="width:100%;font-size:11px;border-collapse:collapse">
         <tr style="background:var(--bg2)">
-          ${['Producto','Lote','Analista','Fecha análisis','Fecha entrega','Prioridad','Horas est.','Notas'].map(h=>`<th style="padding:5px 8px;text-align:left;border-right:1px solid var(--border);font-weight:600;color:var(--text2)">${h}</th>`).join('')}
+          ${['Producto','Lote','Analista','Fecha análisis','Fecha entrega','Prioridad','Horas estimadas','Notas'].map(h=>`<th style="padding:5px 8px;border:1px solid var(--border);text-align:left;font-weight:600">${h}</th>`).join('')}
         </tr>
-        <tr><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">Amoxicilina 500mg</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">L-2024-011</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">${ANALYSTS[0]?escH(ANALYSTS[0].name):'Analista 1'}</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">2026-04-25</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">2026-04-28</td><td style="padding:5px 8px;color:var(--text3)">Normal</td></tr>
-        <tr style="background:var(--bg)"><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">Ibuprofeno 400mg</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">L-2024-012</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">${ANALYSTS[1]?escH(ANALYSTS[1].name):'Analista 2'}</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">2026-04-26</td><td style="padding:5px 8px;border-right:1px solid var(--border);color:var(--text3)">2026-04-30</td><td style="padding:5px 8px;color:var(--text3)">Alta</td></tr>
+        <tr>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Amoxicilina 500mg</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">L-2024-011</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${ANALYSTS[0]?ANALYSTS[0].name:'Ana López'}</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">2026-04-25</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">2026-04-28</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Normal</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">4</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Fisicoquímico</td>
+        </tr>
+        <tr style="background:var(--bg)">
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Amoxicilina 500mg</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">L-2024-011</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${ANALYSTS[1]?ANALYSTS[1].name:'Luis Ramírez'}</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">2026-04-26</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">2026-04-28</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Normal</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">3</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Microbiológico</td>
+        </tr>
       </table>
     </div>
-    <p style="font-size:11px;color:var(--text3);margin-top:8px">Fechas en formato AAAA-MM-DD (ej: 2026-04-25). Prioridad: Normal, Alta o Urgente.</p>
+    <p style="font-size:11px;color:var(--text3);line-height:1.6">
+      ⚠ <b>Analista:</b> usar exactamente el nombre como aparece en el sistema.<br>
+      ⚠ <b>Fechas:</b> formato AAAA-MM-DD (ej: 2026-04-25) o DD/MM/AAAA.<br>
+      ⚠ <b>Prioridad:</b> Normal / Alta / Urgente.<br>
+      ⚠ <b>Múltiples analistas para el mismo lote:</b> usar una fila por analista con el mismo Producto y Lote.
+    </p>
+  </div>
   </div>`}
     <div class="modal-btns">
       <button class="btn" onclick="showImportModal=false;pastePreview=[];render()">Cancelar</button>
@@ -5556,18 +5586,27 @@ function confirmImport(){
   try{
     var duplicates=[];
     var toImport=[];
+    // Group rows by Producto+Lote so multiple analyst rows merge into one task
+    var grouped={};
+    var groupOrder=[];
     pastePreview.forEach(function(r){
       var prod=(r.producto||'').trim();
       var lote=(r.lote||'').trim();
       if(!prod||!lote)return;
+      var key=prod.toLowerCase()+'||'+lote.toLowerCase();
       var exists=tasks.some(function(t){
         return!t._deleted
           &&t.producto.trim().toLowerCase()===prod.toLowerCase()
           &&t.lote.trim().toLowerCase()===lote.toLowerCase();
       });
-      if(exists)duplicates.push(prod+' / Lote: '+lote);
-      else toImport.push(r);
+      if(exists){
+        if(!duplicates.includes(prod+' / Lote: '+lote))duplicates.push(prod+' / Lote: '+lote);
+        return;
+      }
+      if(!grouped[key]){grouped[key]={producto:prod,lote:lote,rows:[]};groupOrder.push(key);}
+      grouped[key].rows.push(r);
     });
+    groupOrder.forEach(function(k){toImport.push(grouped[k]);});
     if(duplicates.length>0){
       var msg='Los siguientes registros YA EXISTEN y no seran importados (mismo Producto y Lote):\n\n'
         +duplicates.slice(0,10).join('\n')
@@ -5578,36 +5617,55 @@ function confirmImport(){
       }
       if(!confirm(msg+'\n\nImportar los '+toImport.length+' registro(s) restante(s)?'))return;
     }
-    const newTasks=toImport.map(r=>{
-      const prod=(r.producto||'').trim();
-      const lote=(r.lote||'').trim();
-      if(!prod||!lote)return null;
-      const ana=nameToId(r.analista);
-      // Normalize date: accept DD/MM/AAAA, AAAA-MM-DD, DD-MM-AAAA
+    const newTasks=toImport.map(function(group){
+      const prod=group.producto;
+      const lote=group.lote;
+      // All rows in this group share the same task — collect assignments
       function normDate(s){
         if(!s)return'';
         s=String(s).trim();
-        // Excel numeric date
         if(/^\d{5}$/.test(s)){const d=new Date(Math.round((parseInt(s)-25569)*86400*1000));return d.toISOString().slice(0,10);}
-        // AAAA-MM-DD
         if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;
-        // DD/MM/AAAA or DD-MM-AAAA
         const m=s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
         if(m)return m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');
         return s;
       }
-      const fechaAna=normDate(r.fechaAnalisis);
-      const due=normDate(r.due);
-      const asgn=ana?[{analyst:ana.id,date:fechaAna||due}]:[];
-      const priority=['Normal','Alta','Urgente'].includes(r.priority)?r.priority:'Normal';
-      const horasEst=r.horasEst||0;
-      const taskNotes=r.notes||'';
-      return{id:nextId++,producto:prod,lote,created:today(),assignments:asgn.map(function(a){return Object.assign({},a,{estimatedHours:horasEst});}),due,priority,status:'pending',notes:taskNotes,estimatedHours:horasEst};
+      var assignments=[];
+      var due='';
+      var priority='Normal';
+      var horasEst=0;
+      var notes='';
+      group.rows.forEach(function(r){
+        var ana=nameToId(r.analista);
+        var fechaAna=normDate(r.fechaAnalisis);
+        var rowDue=normDate(r.due);
+        if(rowDue&&!due)due=rowDue;
+        if(r.priority&&['Normal','Alta','Urgente'].includes(r.priority))priority=r.priority;
+        if(r.horasEst)horasEst=r.horasEst;
+        if(r.notes)notes=r.notes;
+        if(ana&&fechaAna){
+          assignments.push({analyst:ana.id,date:fechaAna,estimatedHours:r.horasEst||0});
+        }
+      });
+      // Ensure at least one assignment even if analista not found
+      if(assignments.length===0){
+        var r0=group.rows[0];
+        var fechaAna0=normDate(r0.fechaAnalisis);
+        assignments=[{analyst:'',date:fechaAna0||due,estimatedHours:horasEst}];
+      }
+      return{id:nextId++,producto:prod,lote,created:today(),assignments,due,priority,status:'pending',notes,estimatedHours:horasEst};
     }).filter(Boolean);
     tasks=tasks.concat(newTasks);
     if(duplicates&&duplicates.length>0&&newTasks.length>0)alert('Importacion completada. '+newTasks.length+' registro(s) importados. '+duplicates.length+' duplicado(s) omitido(s).');
     pastePreview=[];
     showImportModal=false;
+    // Check for due date issues on imported tasks
+    var lateImports=newTasks.filter(function(t){
+      return t.due&&(t.assignments||[]).some(function(a){return a.date&&a.date>=t.due;});
+    });
+    if(lateImports.length>0){
+      alert('⚠ AVISO: '+lateImports.length+' análisis importados tienen fecha de análisis igual o posterior a la fecha límite de aprobación. Revisar: '+lateImports.map(function(t){return t.producto+' '+t.lote;}).join(', '));
+    }
     auditLog('IMPORT','TASK','BATCH',{count:newTasks.length},'Importación masiva');
     saveLS();
     saveNow().catch(function(e){console.error('saveNow import:',e);});
@@ -5637,6 +5695,13 @@ function xlsxDownload(wb, filename){
       setTimeout(()=>{try{URL.revokeObjectURL(url);}catch(e2){}a.remove();},1000);
     }catch(e2){alert('No se pudo descargar el archivo. Usá la opción "Copiar encabezados" disponible en la pantalla.');}
   }
+}
+function copyHeadersNow(btn){
+  const text='Producto\tLote\tAnalista\tFecha análisis\tFecha entrega\tPrioridad\tHoras estimadas\tNotas';
+  const done=function(){if(btn){btn.textContent='✓ Copiado';btn.style.background='var(--green)';btn.style.color='#fff';setTimeout(function(){btn.textContent='📋 Copiar encabezados';btn.style.background='';btn.style.color='';},2500);}};
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(done).catch(function(){fallbackCopy(text);done();});
+  }else{fallbackCopy(text);done();}
 }
 function copyHeaders(){
   const text='Producto\tLote\tAnalista\tFecha análisis\tFecha entrega\tPrioridad\tHoras estimadas\tNotas';
