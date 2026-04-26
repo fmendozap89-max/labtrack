@@ -3094,11 +3094,24 @@ function weekDayLabel(dateStr){
 // ── RENDER ──
 let _lastHtml='';
 let _renderPending=false;
+function recalcLateStatus(){
+  var todayStr=today();
+  tasks.forEach(function(t){
+    if(!t.due)return;
+    var active=t.status==='pending'||t.status==='scheduled'||t.status==='progress'||t.status==='late';
+    if(active&&t.due<todayStr){t.status='late';}
+    else if(t.status==='late'&&t.due>=todayStr){
+      t.status=(t.assignments&&t.assignments.filter(function(a){return !a._removed;}).length>0)?'scheduled':'pending';
+    }
+  });
+}
+
 function render(){
   if(_renderPending)return;
   _renderPending=true;
   requestAnimationFrame(()=>{
     _renderPending=false;
+    recalcLateStatus();
     const el=document.getElementById('app');
       if(!el)return;
     if(!currentUser){
@@ -5282,8 +5295,8 @@ function renderTaskModal(){
   if(!isEdit&&selectedAnalysts.length===0){selectedAnalysts=[];analystDates={};analystEstimHours={};multiAssigns=[];}
   else if(isEdit){
     selectedAnalysts=getAssignees(t);analystDates={};analystEstimHours={};
-    multiAssigns=(t.assignments||[]).map(function(a,i){return{_key:a.analyst+'_'+i+'_'+Date.now(),analyst:a.analyst,date:a.date||'',estH:a.estimatedHours||0};});
-    selectedAnalysts=[...new Set(multiAssigns.map(function(r){return r.analyst;}))];
+    multiAssigns=(t.assignments||[]).filter(function(a){return !a._removed;}).map(function(a,i){return{_key:a.analyst+'_'+i+'_'+Date.now(),analyst:a.analyst,date:a.date||'',estH:a.estimatedHours||0};});
+    selectedAnalysts=[...new Set(multiAssigns.map(function(r){return r.analyst;}).filter(Boolean))];
     (t.assignments||[]).forEach(function(a){analystDates[a.analyst]=a.date;analystEstimHours[a.analyst]=a.estimatedHours||0;});
   }
   else if(isEdit){
@@ -5305,7 +5318,7 @@ function renderTaskModal(){
     +'<div class="frow"><label>Producto</label><input type="text" id="f-prod" value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg"></div>'
     +'<div class="frow"><label>N° de Lote</label><input type="text" id="f-lote" value="'+escH(t.lote||'')+'" placeholder="Ej: L-2024-001"></div>'
     +'<div class="frow"><label>Fecha de creación</label><input type="date" id="f-created" value="'+(t.created||today())+'"></div>'
-    +'<div class="frow"><label>Fecha límite de aprobación'+(isEdit&&!t.due?' <span style="color:var(--red);font-size:11px">⚠ no definida</span>':'')+'</label><input type="date" id="f-due" value="'+(t.due||'')+'" style="'+(isEdit&&!t.due?'border-color:var(--red);':'')+'">/div>'
+    +'<div class="frow"><label>Fecha límite de aprobación'+(isEdit&&!t.due?' <span style="color:var(--red);font-size:11px">⚠ no definida</span>':'')+'</label><input type="date" id="f-due" value="'+(t.due||'')+'" style="'+(isEdit&&!t.due?'border-color:var(--red);':'')+'">'+'</div>'
     +'<div class="frow"><label>Prioridad</label><select id="f-prio">'
     +'<option'+(t.priority==='Normal'?' selected':'')+'>Normal</option>'
     +'<option'+(t.priority==='Alta'?' selected':'')+'>Alta</option>'
