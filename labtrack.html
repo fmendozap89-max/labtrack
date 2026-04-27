@@ -4205,7 +4205,7 @@ function renderDashboard(){
         </div>
       </div>
       <div class="filter-row" style="margin-bottom:8px">${searchBarHtml()}</div><div class="tbl" id="tbl-dash">
-        <div class="thead" style="grid-template-columns:1.9fr 1fr 0.85fr 0.85fr 0.7fr 0.55fr 0.65fr 0.9fr 0.3fr">'+sortHdr('producto','Producto / Lote')+'<div>Analistas</div>'+sortHdr('due','Aprob. límite')+sortHdr('status','Estado')+sortHdr('priority','Prioridad')+'<div>H.Est.</div><div>H.Real</div><div></div><div></div></div><div>Analistas</div><div onclick="setTaskSort('due')" style="cursor:pointer">Aprob. límite ↕</div><div onclick="setTaskSort('status')" style="cursor:pointer">Estado ↕</div><div onclick="setTaskSort('priority')" style="cursor:pointer">Prioridad ↕</div><div>H.Est.</div><div>H.Real</div><div></div><div></div></div><div>Lote</div><div>Analistas</div><div title="Estimado · Real · Barra">Horas</div><div>Vence</div><div>Estado</div><div></div></div>
+        <div class="thead" style="grid-template-columns:1.9fr 1fr 0.85fr 0.85fr 0.7fr 0.55fr 0.65fr 0.9fr 0.3fr">${sortHdr('producto','Producto / Lote')}<div>Analistas</div>${sortHdr('due','Aprob. límite')}${sortHdr('status','Estado')}${sortHdr('priority','Prioridad')}<div>H.Est.</div><div>H.Real</div><div></div><div></div></div>
         ${filtered.length===0?'<div class="empty">Sin resultados para este filtro</div>':filtered.map(t=>tRowSupLote(t)).join('')}
       </div>`;
   }
@@ -4312,7 +4312,7 @@ function tRowSupLote(t){
 }
 
 function tRowSupAnalista(t){
-  const assigns=t.assignments||[];
+  const assigns=(t.assignments||[]).filter(a=>!a._removed);
   if(assigns.length===0)return tRowSupLote(t);
   const pendReplan=replanNotifs.some(n=>n.taskId===t.id&&n.status==='pending');
   const cols='grid-template-columns:1.9fr 1fr 0.85fr 0.85fr 0.7fr 0.55fr 0.65fr 0.9fr 0.3fr';
@@ -4329,43 +4329,54 @@ function tRowSupAnalista(t){
     const pct=aEst>0?Math.min(aReal/aEst*100,120):0;
     const isFirst=i===0;
     const aTlCount=a.timeLog?a.timeLog.length:0;
-    const aTlToday=a.timeLog?(a.timeLog.find(function(e){return e.date===today();})||null):null;
     const rowBg=i%2===0?'var(--surface)':'rgba(0,0,0,.014)';
 
     var row='<div class="trow" style="'+cols+';background:'+rowBg+';'
       +(isFirst?'border-top:2px solid '+stripe+';':'border-top:1px solid var(--border);')
       +'border-left:3px solid '+stripe+';" onclick="openEdit('+t.id+')">';
 
-    // Producto — every row, dimmed on non-first
-    row+='<div class="cell-trunc" style="'+(isFirst?'font-weight:600':'color:var(--text3);font-size:11px')+'">'+escH(t.producto)+'</div>';
-    // Lote — every row
-    row+='<div class="cell-sub cell-trunc" style="'+(isFirst?'':'color:var(--text3)')+'">'+escH(t.lote)+'</div>';
-    // Analyst
-    row+='<div style="display:flex;align-items:center;gap:6px">'
-      +'<div class="av '+u.av+'" style="width:22px;height:22px;font-size:9px;flex-shrink:0">'+escH(u.avInit)+'</div>'
-      +'<div>'
-      +'<div style="font-size:12px;font-weight:500">'+escH(u.name.split(' ')[0])+'</div>'
-      +(aTlCount>0?'<div style="font-size:9px;color:var(--text3);font-family:var(--mono)">'+aTlCount+' entrada'+(aTlCount>1?'s':'')+(aTlToday?' · hoy':'')+'</div>':'')
-      +'</div></div>';
-    // T.Est
-    row+='<div style="font-family:var(--mono);font-size:12px;text-align:right;font-weight:600">'+(aEst?aEst+'h':'<span style="color:var(--text3)">—</span>')+'</div>';
-    // T.Real
+    // Col 1: Producto + Lote (both rows)
+    row+='<div>'
+      +'<div class="cell-trunc" style="'+(isFirst?'font-weight:600;font-size:12px':'color:var(--text3);font-size:11px')+'">'+escH(t.producto)+'</div>'
+      +'<div class="cell-sub cell-trunc" style="font-size:10px;'+(isFirst?'':'color:var(--text3)')+'">'+escH(t.lote)+'</div>'
+      +'</div>';
+    // Col 2: Analista (per row)
+    row+='<div style="display:flex;align-items:center;gap:5px">'
+      +'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px;flex-shrink:0">'+escH(u.avInit)+'</div>'
+      +'<div style="font-size:11px;font-weight:500">'+escH(u.name.split(' ')[0])+'</div>'
+      +(aTlCount>0?'<span style="font-size:9px;color:var(--text3);font-family:var(--mono)">'+aTlCount+'✎</span>':'')
+      +'</div>';
+    // Col 3: Aprob. límite (first row only)
+    row+='<div style="font-family:var(--mono);font-size:11px;color:'+(t.due&&t.due<today()?'var(--red)':'var(--text2)')+';">'
+      +(isFirst&&t.due?fmtDDMMYY(t.due):isFirst?'<span style="color:var(--text3)">—</span>':'')
+      +'</div>';
+    // Col 4: Estado (first row only)
+    row+='<div>'
+      +(isFirst?'<span class="pill '+t.status+'" style="font-size:10px">'+statusLabel(t.status)+'</span>':'')
+      +'</div>';
+    // Col 5: Prioridad (first row only)
+    row+='<div>'
+      +(isFirst?'<span class="pill '+(t.priority||'Normal').toLowerCase()+'" style="font-size:10px">'+(t.priority||'Normal')+'</span>':'')
+      +'</div>';
+    // Col 6: H.Est (per analyst)
+    row+='<div style="font-family:var(--mono);font-size:11px;text-align:right;font-weight:600">'
+      +(aEst?aEst+'h':'<span style="color:var(--text3)">—</span>')
+      +'</div>';
+    // Col 7: H.Real + bar (per analyst)
     row+='<div style="text-align:right">'
       +(aReal>0
-        ?'<div style="font-family:var(--mono);font-size:12px;font-weight:700;color:'+barColor+'">'+aReal.toFixed(1)+'h</div>'
-          +(aEst>0?'<div style="background:rgba(0,0,0,.08);border-radius:2px;height:3px;overflow:hidden;margin-top:2px"><div style="height:100%;background:'+barColor+';width:'+Math.min(pct,100).toFixed(0)+'%"></div></div>':'')
+        ?'<div style="font-family:var(--mono);font-size:11px;font-weight:700;color:'+barColor+'">'+aReal.toFixed(1)+'h</div>'
+          +(aEst>0?'<div style="background:rgba(0,0,0,.08);border-radius:2px;height:3px;overflow:hidden;margin-top:2px"><div style="height:100%;background:'+barColor+';width:'+pct+'%"></div></div>':'')
         :'<span style="color:var(--text3);font-size:11px">—</span>')
       +'</div>';
-    // Dif
-    row+='<div style="font-family:var(--mono);font-size:12px;text-align:right">'
-      +(diff!==null?'<span style="font-weight:700;color:'+(over?'var(--red)':diff<-0.1?'var(--amber)':'var(--green)')+';">'+(diff>0?'+':'')+diff.toFixed(1)+'h</span>':'<span style="color:var(--text3)">—</span>')
-      +'</div>';
-    // Vence + Estado + Acciones — solo primera fila
-    row+='<div style="font-family:var(--mono);font-size:12px">'+(isFirst?fmtD(t.due):'')+'</div>';
-    row+='<div>'+(isFirst?'<span class="pill '+t.status+'">'+statusLabel(t.status)+'</span>':'')+'</div>';
+    // Col 8: Actions (first row only)
     row+='<div onclick="event.stopPropagation()">'
       +(isFirst&&assigns.length>0?'<button class="btn sm" title="Replanificar" onclick="openReplanSuper('+t.id+')">📅</button>':'')
-      +(isFirst&&pendReplan?'<span style="font-size:9px;background:var(--amber-bg);color:var(--amber-text);padding:1px 3px;border-radius:3px">⏳</span>':'')
+      +(isFirst&&pendReplan?'<span style="font-size:8px;background:var(--amber-bg);color:var(--amber-text);padding:1px 3px;border-radius:3px">↻</span>':'')
+      +'</div>';
+    // Col 9: Delete (first row only)
+    row+='<div onclick="event.stopPropagation()">'
+      +(isFirst&&isSupRole()?'<button class="btn sm" style="color:var(--text3)" title="Eliminar" onclick="event.stopPropagation();deleteTask('+t.id+')">🗑</button>':'')
       +'</div>';
     row+='</div>';
     return row;
