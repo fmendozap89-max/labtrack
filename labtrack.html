@@ -554,6 +554,7 @@ async function gistSyncFromRemote() {
     }
 
     gistStatus = 'ok'; gistLastSync = new Date();
+    if(!currentUser) _restoreSession();
     render(); // siempre refrescar — puede haber audit trail nuevo
   } catch(e) { console.error('gistSync:', e); gistStatus = 'error'; }
   renderSpBadge();
@@ -680,6 +681,27 @@ function loadSpConfig() {
 // BOOT
 // ══════════════════════════════════════════════════════════════
 
+
+// Restore session from localStorage after page refresh
+function _restoreSession(){
+  try{
+    var s=localStorage.getItem('lt9-session');
+    if(!s)return;
+    var obj=JSON.parse(s);
+    if(!obj||!obj.uid)return;
+    // Session expires after 12 hours
+    if(Date.now()-obj.ts>12*60*60*1000){
+      localStorage.removeItem('lt9-session');
+      return;
+    }
+    var u=USERS.find(function(x){return x.id===obj.uid;});
+    if(!u)return;
+    currentUser=u;
+    currentView=localStorage.getItem('lt9-lastView')||'dashboard';
+    loginStep=1;loginError='';
+  }catch(e){}
+}
+
 async function gistBoot() {
   if (!GIST_CONFIG.configured) {
     _initDefaultState();
@@ -734,7 +756,10 @@ async function gistBoot() {
     } else {
       alert('Error al conectar:\n' + msg + '\n\nLa app funciona en modo local sin sincronización.');
     }
-    _initDefaultState(); render();
+    _initDefaultState();
+    // Restore session after state load
+    _restoreSession();
+    render();
   }
 }
 
@@ -3212,6 +3237,8 @@ function render(){
   requestAnimationFrame(()=>{
     _renderPending=false;
     recalcLateStatus();
+    // Persist current view for page-refresh restore
+    if(currentUser)try{localStorage.setItem('lt9-lastView',currentView);}catch(e){}
     const el=document.getElementById('app');
       if(!el)return;
     if(!currentUser){
@@ -3270,9 +3297,11 @@ function doLogin(){
   if(v===passwords[uid]){
     currentUser=uMap[uid];
     loginStep=1;loginError='';
-    currentView='dashboard';
+    currentView=localStorage.getItem('lt9-lastView')||'dashboard';
     recordLoginSuccess(uid);
     // LOGIN no se registra en audit trail (Punto 6)
+    // Persist session so page refresh stays logged in
+    try{localStorage.setItem('lt9-session',JSON.stringify({uid:uid,ts:Date.now()}));}catch(e){}
     render();
   } else {
     loginError='Contraseña incorrecta. Intentá de nuevo.';
@@ -5908,8 +5937,8 @@ function exportXLSX(){
 }
 
 // ── GENERAL ACTIONS ──
-function setView(v){currentView=v;render();}
-function logout(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';render();}
+function setView(v){currentView=v;try{localStorage.setItem('lt9-lastView',v);}catch(e){}render();}
+function logout(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';try{localStorage.removeItem('lt9-session');localStorage.removeItem('lt9-lastView');}catch(e){}render();}
 function openNewTask(){editingTask=null;selectedAnalysts=[];analystDates={};analystEstimHours={};multiAssigns=[];showModal=true;render();}
 function openEdit(id){
   // Supervisor: edición completa. Revisor: solo visualización.
