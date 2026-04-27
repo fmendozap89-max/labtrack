@@ -903,12 +903,25 @@ function isWorkday(dateStr){
   return workdayConfig.weekdays[day]===true;
 }
 // isWorkdayFor: is this date a working day for a specific analyst?
+// For overnight shifts, the working day is the shift START day (not end day).
 function isWorkdayFor(analystId, dateStr){
   if(workdayConfig.off.some(o=>(o.date||o)===dateStr))return false;
+  // Check explicit per-analyst schedule override for this date
+  const stored=analystSchedules[analystId];
+  if(stored&&stored.overrides&&stored.overrides[dateStr]){
+    const ov=stored.overrides[dateStr];
+    if(ov.status==='approved'||ov.status==='assigned') return true;
+  }
+  // Check per-analyst workday config (stored as analystSchedules[id].workdays)
+  if(stored&&stored.workdays){
+    const day=new Date(dateStr+'T12:00:00').getDay();
+    // workdays is an object like {1:true,2:true,...} same as global
+    if(stored.workdays[day]===true) return true;
+    if(stored.workdays[day]===false) return false;
+  }
   // Check if there's a per-analyst extra for this date
   const extra=workdayConfig.extra.find(e=>(e.date||e)===dateStr);
   if(extra){
-    // Extra exists — analyst works if they're in the list (or list is 'all')
     const analysts=extra.analysts||[];
     return analysts==='all'||analysts.includes(analystId);
   }
@@ -1143,8 +1156,9 @@ function renderSchedModal(){
       <div class="frow"><label>Descanso (min)</label><input type="number" id="sm-brk" value="${s.breakMinutes||60}" min="0" step="15"></div>
     </div>
     <div style="background:var(--bg);border-radius:var(--radius);padding:8px 12px;margin-bottom:12px;font-size:12px;text-align:center">
-      Jornada: <b id="sm-hours-preview">${calcHours(s).toFixed(1)}h</b>
+      Jornada: <b id="sm-hours-preview">${calcHours(s).toFixed(1)}h</b>${(()=>{const sh=(s.startTime||'08:00').split(':').map(Number);const eh=(s.endTime||'16:00').split(':').map(Number);return (eh[0]*60+eh[1])<(sh[0]*60+sh[1])?'<span style="font-size:10px;color:var(--amber-text);margin-left:6px">↻ Turno nocturno (cruza medianoche)</span>':''})()}
     </div>
+    ${!isDay&&isSup?`<div class="frow"><label>Días laborales</label><div style="display:flex;gap:6px;flex-wrap:wrap">${[1,2,3,4,5,6,0].map(d=>{  const lbls=['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];  const stored2=analystSchedules[schedModalAnalyst];  const wd=stored2&&stored2.workdays?stored2.workdays:workdayConfig.weekdays;  const on=wd[d]===true;  return`<label style="display:flex;align-items:center;gap:3px;font-size:12px;cursor:pointer;padding:3px 6px;border:1px solid var(--border);border-radius:var(--radius);background:${on?'var(--blue-bg)':'var(--surface)'}"><input type="checkbox" id="sm-wd-${d}" ${on?'checked':''} onchange="(function(){var el=document.getElementById('sm-wd-${d}');el.closest('label').style.background=el.checked?'var(--blue-bg)':'var(--surface)';el.closest('label').style.color=el.checked?'var(--blue)':'';})()">${lbls[d]}</label>`;}).join('')}</div></div>`:''}
     <div class="frow"><label>${isSup?'Nota (opcional)':'Motivo (requerido)'}</label>
       <input type="text" id="sm-note" value="${escH(s.note||s.reason||'')}" placeholder="${isDay?'Ej: Turno especial, horas extra por urgencia...':'Ej: Cambio de horario permanente'}">
     </div>
@@ -1176,6 +1190,17 @@ function saveSchedModal(){
       setAnalystDayOverride(schedModalAnalyst,schedModalDate,{...proposed,status:'assigned'});
     } else {
       setAnalystDefault(schedModalAnalyst,proposed);
+      // Save per-analyst workdays if checkboxes are present
+      var wdResult={};
+      var hasWd=false;
+      [0,1,2,3,4,5,6].forEach(function(d){
+        var cb=document.getElementById('sm-wd-'+d);
+        if(cb){wdResult[d]=cb.checked;hasWd=true;}
+      });
+      if(hasWd){
+        if(!analystSchedules[schedModalAnalyst])analystSchedules[schedModalAnalyst]={overrides:{}};
+        analystSchedules[schedModalAnalyst].workdays=wdResult;
+      }
     }
     showSchedModal=false;saveLS();render();
   } else {
