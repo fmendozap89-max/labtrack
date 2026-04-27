@@ -705,6 +705,7 @@ function _restoreSession(){
 async function gistBoot() {
   if (!GIST_CONFIG.configured) {
     _initDefaultState();
+    _restoreSession();
     gistStatus = 'offline'; renderSpBadge();
     render();
     return;
@@ -743,6 +744,7 @@ async function gistBoot() {
     gistStatus = 'ok'; gistLastSync = new Date(); renderSpBadge();
     if (_syncTimer) clearInterval(_syncTimer);
     _syncTimer = setInterval(gistSyncFromRemote, SYNC_INTERVAL);
+    _restoreSession(); // restore login after data loaded
     render();
   } catch(e) {
     _hideSpinner();
