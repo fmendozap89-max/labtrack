@@ -57,6 +57,8 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:13
 .sb-role-badge{font-size:10px;padding:2px 6px;border-radius:20px;font-weight:500;margin-left:auto}
 .sb-role-badge.sup{background:var(--blue-bg);color:var(--blue-text)}
 .sb-role-badge.ana{background:var(--green-bg);color:var(--green-text)}
+.sb-role-badge.stf{background:var(--amber-bg);color:var(--amber-text)}
+.sb-role-badge.rev{background:var(--teal, #ccfbf1);color:var(--teal-text, #0d9488)}
 .nav-item{padding:7px 16px;font-size:12px;cursor:pointer;color:var(--text2);display:flex;align-items:center;gap:8px;border-left:2px solid transparent;transition:all .1s}
 .nav-item:hover{background:var(--bg);color:var(--text)}
 .nav-item.active{background:var(--blue-bg);color:var(--blue-text);border-left-color:var(--blue);font-weight:500}
@@ -3267,7 +3269,7 @@ function render(){
 // ── LOGIN ──
 function renderLogin(){
   const roleLabel=function(r){
-    return r==='supervisor'?'Supervisor':r==='reviewer'?'Revisor':'Analista';
+    return r==='supervisor'?'Supervisor':r==='reviewer'?'Revisor':r==='staff'?'Personal':'Analista';
   };
   const sorted=[...USERS].sort(function(a,b){return a.name.localeCompare(b.name,'es');});
   const logo='<div class="login-logo"><div class="icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="2" y="10" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="10" width="6" height="6" rx="1.5" fill="white"/></svg></div><span class="name">Lab<span>Track</span></span></div>';
@@ -4246,7 +4248,7 @@ function renderShell(){
       <div class="sb-header">
         <div class="sb-logo-icon"><svg width="16" height="16" viewBox="0 0 18 18" fill="none"><rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="2" y="10" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="10" width="6" height="6" rx="1.5" fill="white"/></svg></div>
         <span class="sb-logo-text">Lab<span>Track</span></span>
-        <span class="sb-role-badge ${sup?'sup':'ana'}">${sup?'Sup.':'Ana.'}</span>
+        <span class="sb-role-badge ${currentUser.role==='supervisor'?'sup':currentUser.role==='staff'?'stf':'ana'}">${currentUser.role==='supervisor'?'Sup.':currentUser.role==='reviewer'?'Rev.':currentUser.role==='staff'?'Pers.':'Ana.'}</span>
       </div>
       ${navs.map(n=>`<div class="nav-item${currentView===n.id?' active':''}" onclick="setView('${n.id}')"><span class="ni">${n.icon}</span>${n.label}${n.badge?`<span class="nbadge ${n.bc||''}">${n.badge}</span>`:''}</div>`).join('')}
       <div class="sb-user">
@@ -4274,6 +4276,29 @@ function renderShell(){
 }
 
 // ── DASHBOARD ──
+
+function renderStaffFreeTasksWidget(){
+  var myFT=freeTasks.filter(function(ft){return ft.analystId===currentUser.id;})
+    .sort(function(a,b){return(b.date||'').localeCompare(a.date||'');}).slice(0,5);
+  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
+    +'<div class="sec" style="margin-bottom:0">Mis tareas libres</div>'
+    +'<button class="btn sm pri" onclick="openFreeTaskModal(null)">+ Agregar tarea</button>'
+    +'</div>';
+  if(myFT.length===0){
+    return html+'<div class="empty" style="margin-bottom:12px">Sin tareas libres registradas</div>';
+  }
+  html+=myFT.map(function(ft){
+    var stC=ft.status==='confirmed'?'var(--green)':'var(--amber)';
+    var stL=ft.status==='confirmed'?'✓ Confirmada':'Pend. confirmación';
+    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;margin-bottom:5px;display:flex;gap:8px;align-items:center">'
+      +'<div style="flex:1"><b>'+escH(ft.description)+'</b>'
+      +'<span style="font-size:11px;color:var(--text2);margin-left:6px">'+fmtDF(ft.date)+' · '+ft.hours+'h</span></div>'
+      +'<span style="font-size:10px;font-weight:700;color:'+stC+'">'+stL+'</span>'
+      +'</div>';
+  }).join('');
+  return html+'<div style="margin-bottom:12px"></div>';
+}
+
 function renderDashboard(){
   const sup=currentUser.role==='supervisor';
   if(sup){
@@ -4329,7 +4354,7 @@ function renderDashboard(){
     ${myHEst>0?`<div class="stat-card"><div class="stat-n">${myHEst.toFixed(0)}h</div><div class="stat-l">H.Est.</div></div>`:''}
     ${myHReal>0?`<div class="stat-card"><div class="stat-n" style="color:${myHReal>myHEst&&myHEst>0?'var(--red)':'var(--green)'};">${myHReal.toFixed(1)}h</div><div class="stat-l">H.Real</div></div>`:''}
   </div>
-  ${myObs.length?`<div class="sec" style="color:var(--amber);margin-bottom:8px">⚑ Análisis observados</div>
+  ${currentUser.role==='staff'?renderStaffFreeTasksWidget():''}  ${myObs.length?`<div class="sec" style="color:var(--amber);margin-bottom:8px">⚑ Análisis observados</div>
   <div class="tbl" style="margin-bottom:16px">${myObs.map(t=>tRowAna(t)).join('')}</div>`:''}
   <div class="sec" style="margin-bottom:8px">Mis análisis activos</div>
   <div class="tbl">${myPend.concat(myProg).length===0?'<div class="empty">No tenés análisis pendientes ✓</div>':myPend.concat(myProg).map(t=>tRowAna(t)).join('')}</div>`;
