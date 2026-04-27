@@ -2018,6 +2018,7 @@ function renderFreeTasksTable(isSup){
         +(approver?'<span style="font-size:11px">'+escH(approver.name)+'</span>':'')
         +'<span style="display:block;font-size:10px;font-weight:700;color:'+stColor+'">'+stLabel+'</span>'
         +(isSup&&ft.status==='pending-confirm'?'<button class="btn sm suc" onclick="confirmFreeTask('+ft.id+')" style="margin-top:3px;font-size:10px">✓ Confirmar</button>':'')
+        +(isSup?'<button class="btn sm dan" onclick="deleteFreeTask('+ft.id+')" style="margin-top:3px;font-size:10px">🗑 Eliminar</button>':'')
       +'</div>'
       +'</div>';
   });
@@ -4575,6 +4576,7 @@ function renderTasks(){
             +'<div style="font-size:11px;color:var(--text2)">'+fmtDF(ft.date)+' · '+ft.hours+'h'+(ft.notes?' · '+escH(ft.notes):'')+'</div></div>'
             +'<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:'+stColor+'22;color:'+stColor+'">'+stLabel+'</span>'
             +(ft.status==='pending-confirm'?'<button class="btn sm" style="margin-left:4px" onclick="openFreeTaskModal('+ft.id+')">✎</button>':'')
+            +(isSupRole()?'<button class="btn sm dan" style="margin-left:4px" onclick="deleteFreeTask('+ft.id+')">🗑</button>':'')
             +'</div>';
         }).join(''))
       +'</div>';
@@ -4764,6 +4766,7 @@ function renderPending(){
             +'<div style="font-size:11px;color:var(--text2)">'+escH(u.name)+' · '+fmtDF(ft.date)+' · '+ft.hours+'h'+(ft.notes?' · '+escH(ft.notes):'')+'</div></div>'
             +'<button class="btn sm suc" onclick="confirmFreeTask('+ft.id+')">✓ Confirmar</button>'
             +'<button class="btn sm dan" onclick="rejectFreeTask('+ft.id+')">✗ Rechazar</button>'
+            +'<button class="btn sm" style="color:var(--text3)" onclick="deleteFreeTask('+ft.id+')">🗑</button>'
             +'</div>';
         }).join(''))
     +'</div>':'';
@@ -6644,6 +6647,26 @@ function rejectFreeTask(ftId){
   ft.rejectedTs=Date.now();
   auditLog('REJECT','FREE_TASK',ftId,{description:ft.description},'');
   saveLS();render();
+}
+
+function deleteFreeTask(ftId){
+  if(!isSupRole()){alert('Solo el Supervisor puede eliminar tareas libres.');return;}
+  const ft=freeTasks.find(function(x){return x.id===ftId;});if(!ft)return;
+  const u=getU(ft.analystId);
+  requireSignature(
+    'Eliminar tarea libre',
+    'Eliminar: '+ft.description+' ('+escH(u.name)+', '+fmtDF(ft.date)+', '+ft.hours+'h)',
+    function(reason){
+      freeTasks=freeTasks.filter(function(x){return x.id!==ftId;});
+      auditLog('DELETE','FREE_TASK',ftId,{
+        description:ft.description,hours:ft.hours,
+        analystId:ft.analystId,analystName:u.name,date:ft.date
+      },reason||'Eliminación por Supervisor');
+      saveLS();render();
+      saveNow().catch(function(e){console.error('saveNow delFT:',e);});
+    },
+    currentUser.id
+  );
 }
 
 function requestPlanification(taskId){
