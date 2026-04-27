@@ -273,9 +273,11 @@ let ANALYSTS=[];
 let uMap={};
 function isReviewerRole(){return currentUser&&currentUser.role==='reviewer';}
 function isSupRole(){return currentUser&&currentUser.role==='supervisor';}
+function isStaffRole(){return currentUser&&currentUser.role==='staff';}
+function isScheduleUser(){return currentUser&&(currentUser.role==='analyst'||currentUser.role==='staff'||currentUser.role==='reviewer');}
 
 function rebuildDerived(){
-  ANALYSTS=USERS.filter(u=>u.role==='analyst').sort((a,b)=>a.name.localeCompare(b.name,'es'));
+  ANALYSTS=USERS.filter(u=>u.role==='analyst'||u.role==='staff').sort((a,b)=>a.name.localeCompare(b.name,'es'));
   uMap={};
   USERS.forEach((u,i)=>{
     u.av=avClass(i);
@@ -1188,7 +1190,7 @@ function renderSchedulesTab(){
   try{
     const isSup=currentUser.role==='supervisor';
     const rows=isSup
-      ?USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer';}).sort(function(a,b){return a.name.localeCompare(b.name,'es');})
+      ?USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer'||u.role==='staff'||u.role==='staff';}).sort(function(a,b){return a.name.localeCompare(b.name,'es');})
       :[USERS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
     if(!rows||rows.length===0)return'<div class="empty">No hay analistas configurados.</div>';
     const pendTotal=scheduleRequests.filter(r=>r.status==='pending').length;
@@ -4217,7 +4219,7 @@ function renderShell(){
     {id:'notificaciones',label:'Solicitudes',icon:'🔔',badge:(()=>{const p=scheduleRequests.filter(r=>r.status==="pending").length;return p>0?p:"";})(),bc:'w'},
     {id:'week',label:'Calendario',icon:'▦'},
     {id:'analysts',label:'Equipo',icon:'◉'},
-    {id:'rrhh',label:'Gestión analistas',icon:'👤',badge:(()=>{const c=checkAbsenceConflicts();return c.length>0?c.length:'';})(),bc:'d'},
+    {id:'rrhh',label:'Gestión de personal',icon:'👤',badge:(()=>{const c=checkAbsenceConflicts();return c.length>0?c.length:'';})(),bc:'d'},
     {id:'mgmt',label:'Actividades gestión',icon:'📋'},
     {id:'admin',label:'Administración',icon:'⚙'},
     {id:'audittrail',label:'Audit Trail',icon:'📋'},
@@ -4228,6 +4230,9 @@ function renderShell(){
     {id:'pendientes',label:'Pendientes',icon:'📋'},
     {id:'week',label:'Calendario equipo',icon:'▦'},
     {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
+  ]:isStaffRole()?[
+    {id:'dashboard',label:'Mi día',icon:'▪'},
+    {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending');return p.length>0?p.length:'';})()},
   ]:[
     {id:'dashboard',label:'Mi día',icon:'▪'},
     {id:'tasks',label:'Mis análisis',icon:'≡',badge:lateC>0?lateC:'',bc:'d'},
@@ -5080,10 +5085,12 @@ function renderAdmin(){
     {id:'supervisor',label:'Supervisor'},
     {id:'reviewer',  label:'Revisor'},
     {id:'analyst',   label:'Analista'},
+    {id:'staff',     label:'Personal'},
   ];
   const roleBadgeStyle=function(r){
     return r==='supervisor'?'background:var(--blue-bg);color:var(--blue)'
           :r==='reviewer'  ?'background:var(--green-bg);color:var(--green-text)'
+          :r==='staff'     ?'background:var(--amber-bg);color:var(--amber-text)'
                            :'background:var(--bg2);color:var(--text2)';
   };
   const roleLabel=function(r){return(roleOpts.find(function(x){return x.id===r;})||{label:r}).label;};
