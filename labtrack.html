@@ -1959,6 +1959,72 @@ function expandMgmt(mt, fromDate, toDate){
   return occ;
 }
 
+function renderFreeTasksTable(isSup){
+  // Filter state
+  if(typeof window.ftFilterAnalyst==='undefined') window.ftFilterAnalyst='';
+  if(typeof window.ftFilterMonth==='undefined') window.ftFilterMonth='';
+  var fa=window.ftFilterAnalyst;
+  var fm=window.ftFilterMonth;
+
+  // Filtered list
+  var list=freeTasks.filter(function(ft){
+    if(fa&&ft.analystId!==fa) return false;
+    if(fm&&ft.date.slice(0,7)!==fm) return false;
+    return true;
+  }).sort(function(a,b){return(b.date||'').localeCompare(a.date||'');});
+
+  // Available months
+  var months=[...new Set(freeTasks.map(function(ft){return ft.date.slice(0,7);}).filter(Boolean))].sort().reverse();
+
+  var html='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">';
+  // Analyst filter (supervisor only)
+  if(isSup){
+    html+='<select onchange="window.ftFilterAnalyst=this.value;render()" style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;background:var(--surface)">'
+      +'<option value="">Todos los analistas</option>'
+      +ANALYSTS.map(function(a){return'<option value="'+a.id+'"'+(fa===a.id?' selected':'')+'>'+escH(a.name)+'</option>';}).join('')
+      +'</select>';
+  }
+  // Month filter
+  html+='<select onchange="window.ftFilterMonth=this.value;render()" style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;background:var(--surface)">'
+    +'<option value="">Todos los meses</option>'
+    +months.map(function(m){var d=new Date(m+'-01');return'<option value="'+m+'"'+(fm===m?' selected':'')+'>'
+      +d.toLocaleDateString('es',{month:'long',year:'numeric'})+'</option>';}).join('')
+    +'</select>';
+  if(fa||fm) html+='<button class="btn sm" onclick="window.ftFilterAnalyst=\'\';window.ftFilterMonth=\'\';render()">✕ Limpiar</button>';
+  html+='<span style="font-size:12px;color:var(--text3);margin-left:auto">'+list.length+' registro(s)</span>';
+  html+='</div>';
+
+  if(list.length===0){
+    return html+'<div class="empty">Sin tareas libres para los filtros seleccionados</div>';
+  }
+
+  // Table
+  var COLS='grid-template-columns:100px 140px 1fr 80px 1fr 130px';
+  html+='<div class="tbl"><div class="thead" style="'+COLS+'">'
+    +'<div>Fecha</div><div>Usuario</div><div>Descripción</div><div>Horas</div><div>Comentario</div><div>Aprobado por</div>'
+    +'</div>';
+  list.forEach(function(ft){
+    var u=getU(ft.analystId);
+    var approver=ft.confirmedBy?getU(ft.confirmedBy):null;
+    var stColor=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'?'var(--red)':'var(--amber)';
+    var stLabel=ft.status==='confirmed'?'Confirmada':ft.status==='rejected'?'Rechazada':'Pend. confirmación';
+    html+='<div class="trow" style="'+COLS+'">'
+      +'<div style="font-family:var(--mono);font-size:11px">'+fmtDF(ft.date)+'</div>'
+      +'<div style="display:flex;align-items:center;gap:5px"><div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px">'+escH(u.avInit)+'</div><span style="font-size:11px">'+escH(u.name)+'</span></div>'
+      +'<div style="font-size:11px;font-weight:500">'+escH(ft.description)+'</div>'
+      +'<div style="font-family:var(--mono);font-size:11px;font-weight:700">'+ft.hours+'h</div>'
+      +'<div style="font-size:11px;color:var(--text2)">'+(ft.notes?escH(ft.notes):'<span style="color:var(--text3)">—</span>')+'</div>'
+      +'<div>'
+        +(approver?'<span style="font-size:11px">'+escH(approver.name)+'</span>':'')
+        +'<span style="display:block;font-size:10px;font-weight:700;color:'+stColor+'">'+stLabel+'</span>'
+        +(isSup&&ft.status==='pending-confirm'?'<button class="btn sm suc" onclick="confirmFreeTask('+ft.id+')" style="margin-top:3px;font-size:10px">✓ Confirmar</button>':'')
+      +'</div>'
+      +'</div>';
+  });
+  html+='</div>';
+  return html;
+}
+
 function renderMgmtModule(){
   const isSup=currentUser.role==='supervisor';
   const wd=getWeekDates(weekOffset);
@@ -1970,11 +2036,12 @@ function renderMgmtModule(){
       <button class="btn sm" onclick="mgmtView='list';render()" style="${mgmtView==='list'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Lista</button>
       <button class="btn sm" onclick="mgmtView='calendar';render()" style="${mgmtView==='calendar'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Semana</button>
       <button class="btn sm" onclick="mgmtView='month';render()" style="${mgmtView==='month'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Mes</button>
-      ${isSup?`<button class="btn sm" onclick="mgmtView='categories';render()" style="${mgmtView==='categories'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">⚙ Categorías</button>`:''}
+      <button class="btn sm" onclick="mgmtView='freetasks';render()" style="${mgmtView==='freetasks'?'background:var(--surface);box-shadow:var(--shadow-sm)':''}">Tareas libres</button>
+            ${isSup?`<button class="btn sm" onclick="mgmtView='categories';render()" style="${mgmtView==='categories'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">⚙ Categorías</button>`:''}
     </div>
     ${isSup&&mgmtView!=='categories'?`<button class="btn pri sm" style="margin-left:auto" onclick="openMgmtModal(null)">+ Nueva actividad</button>`:''}
   </div>
-  ${mgmtView==='list'?renderMgmtList(isSup,weekOccs,myOccs):mgmtView==='month'?renderMgmtMonth(isSup):mgmtView==='categories'?renderMgmtCategories():renderMgmtWeek(isSup,wd,weekOccs)}`;
+  ${mgmtView==='freetasks'?renderFreeTasksTable(isSup):mgmtView==='list'?renderMgmtList(isSup,weekOccs,myOccs):mgmtView==='month'?renderMgmtMonth(isSup):mgmtView==='categories'?renderMgmtCategories():renderMgmtWeek(isSup,wd,weekOccs)}`;
 }
 
 function renderMgmtList(isSup, weekOccs, myOccs){
@@ -4768,7 +4835,7 @@ function renderCalWeek(sup){
       <div class="whead" style="${cols}"><div>Analista</div>${dayLbls.map((d,i)=>`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
       ${rows.map(a=>`<div class="wrow" style="${cols}">
         <div class="wcell-name"><div class="av ${a.av}" style="flex-shrink:0">${escH(a.avInit)}</div>${escH(a.name.split(' ')[0])}</div>
-        ${wd.map(d=>{const dt=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>`<div class="chip ${hasConflict?'':''+a.chip}" onclick="openEdit(${t.id})" style="cursor:pointer;margin-bottom:2px;${hasConflict?'border:1px solid var(--red);background:var(--red-bg);':''}">${hasConflict?'⚠ ':''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.estimatedHours?' ('+o.estimatedHours+'h)':'')+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}</div>`;}).join('')}
+        ${wd.map(d=>{const dt=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>`<div class="chip ${hasConflict?'':''+a.chip}" onclick="openEdit(${t.id})" style="cursor:pointer;margin-bottom:2px;${hasConflict?'border:1px solid var(--red);background:var(--red-bg);':''}">${hasConflict?'⚠ ':''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.estimatedHours?' ('+o.estimatedHours+'h)':'')+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>`<div style="padding:1px 3px;font-size:9px;background:var(--surface);border:1px dashed var(--border2);border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2)" title="${escH(ft.description)}">✎ ${escH(ft.description.slice(0,14))} ${ft.hours}h</div>`).join('')}</div>`;}).join('')}
       </div>`).join('')}
     </div>
   </div>
@@ -4897,6 +4964,21 @@ function renderCalMonth(sup){
         gridHtml+='<div style="padding:1px 4px;border-radius:3px;margin-bottom:2px;background:'+c.color+';border-left:2px solid '+c.text+'">'
           +'<span style="font-weight:600;font-size:9px;color:'+c.text+'">'+escH(c.label)+'</span>'
           +'</div>';
+      });
+
+      // Tareas libres en este día
+      var dayFT=freeTasks.filter(function(ft){
+        return ft.date===dateStr&&(ft.status==='confirmed'||ft.status==='pending-confirm')
+          &&rows.some(function(r){return r.id===ft.analystId;});
+      });
+      dayFT.forEach(function(ft){
+        var fu=getU(ft.analystId);
+        gridHtml+='<div style="padding:1px 4px;border-radius:3px;margin-bottom:2px;background:var(--surface);border:1px dashed var(--border2);border-left:2px solid var(--text3)">'
+          +'<div style="display:flex;align-items:center;gap:2px;">'
+          +(sup&&!selA?'<span class="av '+fu.av+'" style="width:12px;height:12px;font-size:6px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0">'+escH(fu.avInit)+'</span>':'')
+          +'<span style="font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2)">'+escH(ft.description.slice(0,18))+'</span>'
+          +'<span style="font-size:8px;color:var(--text3);margin-left:2px;flex-shrink:0">'+ft.hours+'h</span>'
+          +'</div></div>';
       });
 
 
@@ -5189,6 +5271,7 @@ function doSystemReset(){
       var _absenceTypesDef=JSON.parse(JSON.stringify(typeof absenceTypesDef!=='undefined'?absenceTypesDef:[]));
       var _nextUid=nextUid;
       tasks=[];nextId=1;
+      freeTasks=[];nextFreeTaskId=1;
       replanNotifs=[];nextNotifId=1;
       scheduleRequests=[];nextSchedReqId=1;
       mgmtTasks=[];nextMgmtId=1;
