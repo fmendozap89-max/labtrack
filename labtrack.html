@@ -4803,8 +4803,9 @@ function tRowAna(t,maOverride){
   var iThisAssignPendConf=ma&&ma._pendingConfirm&&!ma._supervisorConfirmed;
   // Task is in an actionable state (not finished)
   var taskActive=['pending','scheduled','progress','pending-confirm','observed'].indexOf(t.status)>=0;
-  // canStart: assignment not done, in window, task active (including already progress for 2nd assignment)
-  var canStart=!iThisAssignDone&&!iThisAssignPendConf&&inActionWindow&&taskActive;
+  // canStart: assignment not done/started, in window, task active
+  var iThisAssignStarted=!!(ma&&ma._started);
+  var canStart=!iThisAssignDone&&!iThisAssignPendConf&&!iThisAssignStarted&&inActionWindow&&taskActive;
   var pendingReplan=replanNotifs.find(function(n){return n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';});
   var replanLabel=pendingReplan?'<span style="font-size:10px;background:var(--amber-bg);color:var(--amber-text);padding:1px 5px;border-radius:4px;font-weight:500">Replan. pendiente</span>':'';
   // Horas: solo de esta asignación específica (independiente por fecha)
@@ -7101,10 +7102,15 @@ document.body.appendChild(obsDiv);
 }
 
 }
-function confirmAssignment(taskId, analystId){
+function confirmAssignment(taskId, analystId, assignDate){
   var t=tasks.find(function(x){return x.id==Number(taskId)||x.id===taskId;});
   if(!t)return;
-  var a=(t.assignments||[]).find(function(x){return x.analyst===analystId;});
+  // Use assignDate to target the specific assignment when analyst has multiple dates
+  var a=(t.assignments||[]).find(function(x){
+    return x.analyst===analystId&&(!assignDate||x.date===assignDate);
+  });
+  // Fallback: if not found by date, try first match (backwards compat)
+  if(!a)a=(t.assignments||[]).find(function(x){return x.analyst===analystId;});
   if(!a)return;
   // Mark this assignment as confirmed
   a._pendingConfirm=false;
@@ -7207,7 +7213,7 @@ function confirmDone(id){
     }
     return;
   }
-  assigns.forEach(function(a){confirmAssignment(id,a.analyst);});
+  assigns.forEach(function(a){confirmAssignment(id,a.analyst,a.date);});
 }
 function markSampleReceived(id){
   var t=tasks.find(function(x){return x.id===id;});
@@ -7713,10 +7719,12 @@ function renderNotifPanel(){
         +'<div style="font-weight:600">'+escH(t.producto)+' — '+escH(t.lote)+'</div>'
         +'<div style="font-size:11px;color:var(--text2);margin:2px 0">'
         +'<span class="av '+u.av+'" style="width:16px;height:16px;font-size:8px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-right:4px">'+escH(u.avInit)+'</span>'
-        +escH(u.name)+' · '+hours.toFixed(1)+'h</div>'
+        +escH(u.name)+' · '+hours.toFixed(1)+'h'
+        +(a.date?' · <span style="font-family:var(--mono);color:var(--text3)">'+fmtDDMMYY(a.date)+'</span>':'')
+        +'</div>'
         +(lastCmt?'<div style="font-size:11px;color:var(--text2);background:var(--bg);border-radius:4px;padding:4px 7px;margin:4px 0;border-left:2px solid var(--border2)">💬 '+escH(lastCmt.comment)+'</div>':'')
         +'<div style="display:flex;gap:4px;margin-top:5px">'
-        +'<button class="btn sm suc" onclick="confirmAssignment(\''+t.id+'\',\''+a.analyst+'\');showNotifPanel=false;render()">✓ Confirmar</button>'
+        +'<button class="btn sm suc" onclick="confirmAssignment(\''+t.id+'\',\''+a.analyst+'\',\''+( a.date||'')+'\');showNotifPanel=false;render()">✓ Confirmar</button>'
         +'<button class="btn sm" onclick="openEdit('+t.id+');showNotifPanel=false">🔍 Ver</button>'
         +'</div></div>';
     });
