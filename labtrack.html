@@ -532,9 +532,35 @@ async function _executeSave() {
   _pendingSaves = {};
   gistStatus = 'syncing'; renderSpBadge();
   try {
+    // ── Fetch-merge-save: evita pérdida de datos con edición simultánea ──
+    let contentToSave = getSnapshot();
+    try {
+      const remoteGist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+      const remoteContent = remoteGist.files[GIST_FILE_STATE]?.content;
+      if (remoteContent) {
+        let remoteState;
+        try { remoteState = JSON.parse(remoteContent); } catch(e) {}
+        if (remoteState && (remoteState.savedAt||0) > _lastRemoteTs) {
+          // Otro usuario guardó mientras trabajábamos — mergear antes de escribir
+          const localSnap = JSON.parse(contentToSave);
+          const merged = mergeSnapshot(localSnap, remoteState);
+          merged.savedAt = Date.now();
+          // Preservar sesión activa — applySnapshot puede resetear currentUser
+          const _prevUser = currentUser;
+          applySnapshot(JSON.stringify(merged));
+          currentUser = _prevUser;
+          contentToSave = JSON.stringify(merged);
+          render();
+        }
+      }
+    } catch(fetchErr) {
+      // Si el GET falla (sin conexión, etc.), guardar igual con estado local
+      console.warn('fetch-before-save falló, guardando estado local:', fetchErr);
+    }
     await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
-      files: { [GIST_FILE_STATE]: { content: getSnapshot() } }
+      files: { [GIST_FILE_STATE]: { content: contentToSave } }
     });
+    _lastRemoteTs = JSON.parse(contentToSave).savedAt || Date.now();
     gistStatus = 'ok'; gistLastSync = new Date();
   } catch(e) { console.error('save:', e); gistStatus = 'error'; }
   renderSpBadge();
@@ -3866,7 +3892,7 @@ function mergeSnapshot(local, remote) {
   try {
     var L = typeof local === 'string' ? JSON.parse(local) : local;
     var R = typeof remote === 'string' ? JSON.parse(remote) : remote;
-    if(!L || !R) return R || L;
+    if(!L || !R) return L || R; // FIX: preferir local ante falta de datos
 
     var merged = Object.assign({}, R); // start from remote base
 
@@ -3881,12 +3907,22 @@ function mergeSnapshot(local, remote) {
     });
     merged.tasks = Object.values(taskMap).filter(function(t){ return !t._deleted; });
 
+    // ── FreeTasks: merge by id, keep newer ──
+    var ftMap = {};
+    (R.freeTasks||[]).forEach(function(t){ ftMap[t.id] = t; });
+    (L.freeTasks||[]).forEach(function(t){
+      var rt = ftMap[t.id];
+      if(!rt || (t._ts||0) > (rt._ts||0)) ftMap[t.id] = t;
+    });
+    merged.freeTasks = Object.values(ftMap).filter(function(t){ return !t._deleted; });
+
     // ── Counters: keep max ──
-    merged.nextId = Math.max(L.nextId||0, R.nextId||0);
-    merged.nextUid = Math.max(L.nextUid||0, R.nextUid||0);
-    merged.nextNotifId = Math.max(L.nextNotifId||0, R.nextNotifId||0);
-    merged.nextAbsId = Math.max(L.nextAbsId||0, R.nextAbsId||0);
-    merged.nextMgmtId = Math.max(L.nextMgmtId||0, R.nextMgmtId||0);
+    merged.nextId         = Math.max(L.nextId||0,         R.nextId||0);
+    merged.nextUid        = Math.max(L.nextUid||0,        R.nextUid||0);
+    merged.nextNotifId    = Math.max(L.nextNotifId||0,    R.nextNotifId||0);
+    merged.nextAbsId      = Math.max(L.nextAbsId||0,      R.nextAbsId||0);
+    merged.nextMgmtId     = Math.max(L.nextMgmtId||0,     R.nextMgmtId||0);
+    merged.nextFreeTaskId = Math.max(L.nextFreeTaskId||0, R.nextFreeTaskId||0);
     merged.nextSchedReqId = Math.max(L.nextSchedReqId||0, R.nextSchedReqId||0);
 
     // ── Schedule requests: merge by id ──
@@ -3993,7 +4029,7 @@ function mergeSnapshot(local, remote) {
     return merged;
   } catch(e) {
     console.error('mergeSnapshot error:', e);
-    return remote; // fallback: use remote
+    return local; // FIX: fallback = local para no perder trabajo del usuario activo
   }
 }
 
