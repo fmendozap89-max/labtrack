@@ -4778,9 +4778,8 @@ function tRowAna(t,maOverride){
   var md=ma?ma.date:t.due;
   var assignedDate=new Date((md||todayStr)+'T12:00:00');
   var diffDays=Math.ceil((assignedDate-todayDate)/(1000*60*60*24));
-  // canStart: dentro de la ventana de 2 días Y estado permite iniciar (vencimiento no bloquea)
+  // canStart: siguiente día como máximo (diffDays≤1) + vencidos siempre permitidos
   var startableStatus=t.status==='pending'||t.status==='scheduled';
-  // Also allow start for overdue assignments (past assigned date)
   var canStart=(diffDays<=1||t._dueStatus==='late')&&startableStatus;
   var pendingReplan=replanNotifs.find(function(n){return n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';});
   var replanLabel=pendingReplan?'<span style="font-size:10px;background:var(--amber-bg);color:var(--amber-text);padding:1px 5px;border-radius:4px;font-weight:500">Replan. pendiente</span>':'';
@@ -4810,7 +4809,11 @@ function tRowAna(t,maOverride){
     +(function(){
       var myA2=(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed;});
       var iAlreadyDone=myA2&&((myA2.realHours>0)||(myA2.sessions&&myA2.sessions.length>0));
-      var canComplete=(t.status==='progress'||t.status==='pending-confirm')&&!iAlreadyDone;
+      // Puede completar: ya en progreso/conf.pendiente, O actividad programada dentro de 3 días
+      var canComplete=!iAlreadyDone&&(
+        (t.status==='progress'||t.status==='pending-confirm')
+        ||(startableStatus&&diffDays<=3)
+      );
       return canComplete?'<button class="btn suc sm" onclick="markDone('+t.id+')">✓ Completar</button>':'';
     })()
     +(t.status==='observed'?'<button class="btn suc sm" onclick="markDone('+t.id+')">↩ Re-enviar</button>':'')
@@ -6886,6 +6889,13 @@ function markDone(id){
         }
 
         var prevStatus=t.status;
+        // Auto-iniciar si todavía está en pending/scheduled (completado 3 días antes)
+        if(t.status==='pending'||t.status==='scheduled'){
+          t.startedTs=Date.now();
+          if(!t.startDatetime)t.startDatetime=new Date().toISOString().slice(0,16);
+          auditLog('START','TASK',tid,{field:'status',oldVal:prevStatus,newVal:'progress',
+            description:'Auto-inicio por completado anticipado: '+t.producto+' '+t.lote},'');
+        }
         // Mark this specific assignment as pending confirmation
         if(myA){myA._pendingConfirm=true;myA._completedTs=Date.now();}
         // Advance task status if not already pending
@@ -7297,7 +7307,7 @@ function markProg(id){
         var diff=Math.abs(Math.round((ad-todayDate)/(1000*60*60*24)));
         if(diff<minDiff)minDiff=diff;
       });
-      if(minDiff>2){alert('Solo podés iniciar esta actividad dentro de los 2 días anteriores o posteriores a la fecha asignada.');return;}
+      if(minDiff>1){alert('Solo podés iniciar esta actividad el día asignado o el día anterior.');return;}
     }
   }
   t.status='progress';t.startedTs=Date.now();
