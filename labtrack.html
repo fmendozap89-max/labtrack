@@ -164,7 +164,8 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:13
   .time-pick select:focus{outline:none;color:var(--blue);}
 
   .pill.reviewed{background:#e4f2ea;color:#1e5c35}
- 
+  .pill.a-ingresar{background:#ede9fe;color:#5b21b6}
+  .arrival-fields{background:var(--bg);border:1px solid #d8b4fe;border-radius:var(--radius);padding:10px 12px;margin-top:6px}
 
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (max-width:600px){
@@ -943,7 +944,7 @@ const INIT_TASKS=[
 
 // ── HELPERS ──
 function getU(id){return uMap[id]||{name:id,av:'av1',avInit:'?',chip:'c1'};}
-function statusLabel(s){return{pending:'Ingresado',scheduled:'Programado',progress:'En análisis','pending-confirm':'Completado (conf. pendiente)',done:'Completado p/ revisar',reviewed:'Revisado',approved:'Aprobado',late:'Vencido',observed:'Observado','partial':'Completado parcial'}[s]||s;}
+function statusLabel(s){return{'a-ingresar':'A ingresar',pending:'Ingresado',scheduled:'Programado',progress:'En análisis','pending-confirm':'Completado (conf. pendiente)',done:'Completado p/ revisar',reviewed:'Revisado',approved:'Aprobado',late:'Vencido',observed:'Observado','partial':'Completado parcial'}[s]||s;}
 // Returns display status accounting for partial completion
 function taskDisplayStatus(t){
   if(t.status!=='progress'&&t.status!=='pending-confirm') return t.status;
@@ -3508,6 +3509,8 @@ function recalcLateStatus(){
   tasks.forEach(function(t){
     // Approved tasks: freeze _dueStatus at approval time
     if(t.status==='approved'){t._dueStatus=t._dueStatus||'ok';return;}
+    // a-ingresar tasks: never mark late by due date; track expected arrival separately
+    if(t.status==='a-ingresar'){t._dueStatus='ok';return;}
     if(!t.due){t._dueStatus='ok';return;}
     var dueMs=new Date(t.due+'T12:00:00').getTime();
     var daysLeft=Math.ceil((dueMs-todayMs)/(1000*60*60*24));
@@ -3540,7 +3543,7 @@ function render(){
       return;
     }
     const shell=renderShell();
-    const modal=showImportModal?renderImportModal():showModal?renderTaskModal():showChangePwd?renderChangePwdModal():showReplanModal?renderReplanModal():showExtraModal?renderExtraWorkdayModal():showMgmtModal?renderMgmtModal():showSchedModal?renderSchedModal():showMgmtOccModal?renderMgmtOccModal():showTimeLogModal?renderTimeLogModal():'';
+    const modal=showImportModal?renderImportModal():showModal?renderTaskModal():showChangePwd?renderChangePwdModal():showReplanModal?renderReplanModal():showExtraModal?renderExtraWorkdayModal():showMgmtModal?renderMgmtModal():showSchedModal?renderSchedModal():showMgmtOccModal?renderMgmtOccModal():showTimeLogModal?renderTimeLogModal():showReceiveModal?renderReceiveModal():'';
     const notif=renderNotifPanel();
     const spModal=showSpConfig?renderSpConfigModal():'';
   const ftModal=showFreeTaskModal?renderFreeTaskModal():'';
@@ -4591,12 +4594,17 @@ function renderDashboard(){
     const done=tasks.filter(t=>['done','reviewed','approved'].includes(t.status)).length;
     const pend=tasks.filter(t=>t.status==='pending'||t.status==='scheduled').length;
     const toConfirm=tasks.filter(t=>t.status==='pending-confirm').length;
+    const aIngresar=tasks.filter(t=>t.status==='a-ingresar').length;
+    const aIngresarOverdue=tasks.filter(t=>t.status==='a-ingresar'&&t.expectedArrival&&t.expectedArrival<today()).length;
     let filtered=((dashFilter&&dashFilter!=='all')?tasks.filter(t=>dashFilter==='late'?t._dueStatus==='late'&&t.status!=='approved':dashFilter==='done'?['done','reviewed','approved'].includes(t.status):dashFilter==='progress'?(t.status==='progress'||t.status==='pending-confirm'):t.status===dashFilter):sortTasks([...tasks],taskSort,taskSortDir)).filter(t=>!filterSearch||t.producto.toLowerCase().includes(filterSearch.toLowerCase())||t.lote.toLowerCase().includes(filterSearch.toLowerCase()));
     const filterLabel={'':`Todos (${tasks.length})`,'pending':`Pendientes (${pend})`,'progress':`En análisis (${prog})`,'late':`Vencidos (${late})`,'done':`Completados p/revisar (${done})`};
     return`
       <div class="stats-row">
         <div class="scard" onclick="dashFilter='';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter===''?';box-shadow:0 0 0 2px var(--navy,#1a4f8a)':''}">
           <div class="scard-lbl">LOTES TOTALES</div><div class="scard-val">${tasks.length}</div></div>
+        ${aIngresar>0?`<div class="scard" onclick="currentView='pending';window.pendingStatusFilter='a-ingresar';render()" style="cursor:pointer;transition:box-shadow .15s;border-color:#d8b4fe">
+          <div class="scard-lbl" style="color:#5b21b6">A INGRESAR</div><div class="scard-val" style="color:#5b21b6">${aIngresar}${aIngresarOverdue>0?`<span style="font-size:12px;color:var(--red);margin-left:4px">⚠${aIngresarOverdue}</span>`:''}
+          </div></div>`:''}
         <div class="scard" onclick="dashFilter=dashFilter==='progress'?'':'progress';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter==='progress'?';box-shadow:0 0 0 2px var(--blue)':''}">
           <div class="scard-lbl">EN ANÁLISIS</div><div class="scard-val" style="color:${prog>0?'var(--blue)':'inherit'}">${prog}</div></div>
         <div class="scard" onclick="dashFilter=dashFilter==='late'?'':'late';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter==='late'?';box-shadow:0 0 0 2px var(--red)':''}">
@@ -4623,8 +4631,8 @@ function renderDashboard(){
         ${filtered.length===0?'<div class="empty">Sin resultados para este filtro</div>':filtered.map(t=>tRowSupLote(t)).join('')}
       </div>`;
   }
-  // Analyst/Reviewer view
-  const myTasks=tasks.filter(t=>(t.assignments||[]).some(a=>a.analyst===currentUser.id));
+  // Analyst/Reviewer view — exclude a-ingresar (supervisor-only pre-pending state)
+  const myTasks=tasks.filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id));
   const myPend=myTasks.filter(t=>t.status==='pending'||t._dueStatus==='late');
   const myProg=myTasks.filter(t=>t.status==='progress'||t.status==='pending-confirm');
   const myDone=myTasks.filter(t=>['done','reviewed','approved'].includes(t.status));
@@ -4853,7 +4861,7 @@ function renderTasks(){
     +'<div>Acciones</div>'
     +'</div>';
   let rows='';
-  let f=sup?sortTasks([...tasks],taskSort,taskSortDir):sortTasks(tasks.filter(function(t){return isMyTask(t);}),taskSort,taskSortDir);
+  let f=sup?sortTasks([...tasks],taskSort,taskSortDir):sortTasks(tasks.filter(function(t){return isMyTask(t)&&t.status!=='a-ingresar';}),taskSort,taskSortDir);
   if(filterAnalyst)f=f.filter(function(t){return getAssignees(t).includes(filterAnalyst);});
   if(filterStatus)f=f.filter(function(t){return filterStatus==='late'?t._dueStatus==='late':t.status===filterStatus;});
   if(filterSearch){var fs2=filterSearch.toLowerCase();f=f.filter(function(t){return t.producto.toLowerCase().includes(fs2)||t.lote.toLowerCase().includes(fs2);});}
@@ -5175,11 +5183,11 @@ function renderPendingContent(){
   function mQ2(t){return !pq2||t.producto.toLowerCase().includes(pq2)||t.lote.toLowerCase().includes(pq2);}
   var psf=window.pendingStatusFilter||'all';
 
-  // Unified task list — all active + pending-confirm
+  // Unified task list — all active + pending-confirm (+ a-ingresar for supervisor only)
   var allT=sortTasks(tasks.filter(function(t){
-    return (t.status==='pending'||t.status==='scheduled'||t.status==='progress'
-            ||t.status==='pending-confirm'||t.status==='done'||t.status==='observed')
-           &&mQ2(t);
+    var visibleStatuses=['pending','scheduled','progress','pending-confirm','done','observed'];
+    if(isSupRole())visibleStatuses.unshift('a-ingresar');
+    return visibleStatuses.indexOf(t.status)>=0&&mQ2(t);
   }),taskSort,taskSortDir);
 
   // Apply status filter
@@ -5192,6 +5200,7 @@ function renderPendingContent(){
   // Dashboard chip counts
   var counts={
     all:allT.length,
+    'a-ingresar':allT.filter(function(t){return t.status==='a-ingresar';}).length,
     pending:allT.filter(function(t){return t.status==='pending';}).length,
     scheduled:allT.filter(function(t){return t.status==='scheduled';}).length,
     progress:allT.filter(function(t){return t.status==='progress';}).length,
@@ -5209,6 +5218,7 @@ function renderPendingContent(){
 
   var chips='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">'
     +chip('all','Todos','var(--navy,#1a4f8a)')
+    +(isSupRole()?chip('a-ingresar','📦 A ingresar','#5b21b6'):'')
     +chip('pending','📥 Ingresado','#64748b')
     +chip('scheduled','📅 Programado','var(--blue)')
     +chip('progress','🔬 En análisis','var(--green)')
@@ -5234,7 +5244,19 @@ function renderPendingContent(){
     var firstDate=assigns.reduce(function(mn,a){return !mn||a.date<mn?a.date:mn;},null);
     var anaAv=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':''}).join('');
     var obsHtml=t.observations&&t.observations.length
-      ?'<span style="cursor:help;font-size:10px;font-weight:700;color:var(--amber-text);margin-left:4px" title="'+escH(t.observations.map(function(o,i){return '#'+(i+1)+' '+(o.byName||'')+': '+(o.comment||'');}).join('\n'))+'">⚑ ('+t.observations.length+')</span>':''
+      ?'<span style="cursor:help;font-size:10px;font-weight:700;color:var(--amber-text);margin-left:4px" title="'+escH(t.observations.map(function(o,i){return '#'+(i+1)+' '+(o.byName||'')+': '+(o.comment||'');}).join('\n'))+'">⚑ ('+t.observations.length+')</span>':'';
+    // Arrival date badge for a-ingresar
+    var arrivalHtml='';
+    if(t.status==='a-ingresar'){
+      var todayStr2=today();
+      var isOverdue=t.expectedArrival&&t.expectedArrival<todayStr2;
+      var arrTooltip='Llegada esperada: '+(t.expectedArrival?fmtDDMMYY(t.expectedArrival):'no definida')+(t.arrivalNotes?'\n'+t.arrivalNotes:'');
+      arrivalHtml='<span title="'+escH(arrTooltip)+'" style="cursor:help;margin-left:4px;font-size:11px">'
+        +(isOverdue
+          ?'<span style="color:var(--red-text);font-weight:700">⚠ '+fmtDDMMYY(t.expectedArrival)+'</span>'
+          :(t.expectedArrival?'📦 '+fmtDDMMYY(t.expectedArrival):'📦 —'))
+        +'</span>';
+    }
     return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
       +'<div><div class="cell-trunc" style="font-weight:500;font-size:12px">'+escH(t.producto)+'</div>'
       +'<div class="cell-sub cell-trunc" style="font-size:10px">'+escH(t.lote)+'</div></div>'
@@ -5243,8 +5265,9 @@ function renderPendingContent(){
       +'<div style="font-family:var(--mono);font-size:11px">'+(firstDate?fmtDDMMYY(firstDate):'—')+'</div>'
       +'<div style="font-size:11px">'+(t.due?dueBadge(t):'—')+'</div>'
       +'<div><span class="pill '+(t.priority||'Normal').toLowerCase()+'" style="font-size:10px">'+(t.priority||'Normal')+'</span></div>'
-      +'<div><span class="pill '+(taskDisplayStatus(t)==='partial'?'partial':t.status)+'" style="font-size:10px">'+statusLabel(taskDisplayStatus(t))+'</span>'+obsHtml+'</div>'
+      +'<div><span class="pill '+(taskDisplayStatus(t)==='partial'?'partial':t.status)+'" style="font-size:10px">'+statusLabel(taskDisplayStatus(t))+'</span>'+obsHtml+arrivalHtml+'</div>'
       +'<div onclick="event.stopPropagation()" style="display:flex;gap:3px">'
+      +(isSupRole()&&t.status==='a-ingresar'?'<button class="btn sm suc" onclick="event.stopPropagation();markSampleReceived('+t.id+')" style="font-size:10px;background:#5b21b6;border-color:#5b21b6;color:#fff">✓ Recibida</button>':'')
       +(isSupRole()&&t.status==='pending-confirm'?'<button class="btn sm suc" onclick="event.stopPropagation();confirmDone('+t.id+')" style="font-size:10px">✓ Conf.</button>':'')
       +(isSupRole()?'<button class="btn sm" onclick="event.stopPropagation();deleteTask('+t.id+')" style="color:var(--text3);padding:2px 4px" title="Eliminar">🗑</button>':'')
       +'</div>'
@@ -5324,7 +5347,7 @@ function renderCalWeek(sup){
   </div>
   ${!sup?`<div class="sec" style="margin-top:16px">Mis análisis de esta semana</div><div class="tbl">
     <div class="thead" style="grid-template-columns:1.4fr .8fr .7fr .7fr .9fr"><div>Producto / Lote</div><div>Fecha asig.</div><div>Prioridad</div><div>Estado</div><div></div></div>
-    ${tasks.filter(t=>(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))).map(t=>tRowAna(t)).join('')||'<div class="empty">Sin análisis esta semana</div>'}
+    ${tasks.filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))).map(t=>tRowAna(t)).join('')||'<div class="empty">Sin análisis esta semana</div>'}
   </div>`:''}`;
 }
 
@@ -6026,14 +6049,23 @@ function renderTaskModal(){
     +'<option'+(t.priority==='Alta'?' selected':'')+'>Alta</option>'
     +'<option'+(t.priority==='Urgente'?' selected':'')+'>Urgente</option>'
     +'</select></div>'
-    +'<div class="frow"><label>Estado</label><select id="f-status">'
+    +'<div class="frow"><label>Estado</label><select id="f-status" onchange="(function(){var v=document.getElementById(\'f-status\').value;var af=document.getElementById(\'arrival-fields\');if(af)af.style.display=v===\'a-ingresar\'?\'block\':\'none\';})()">'
+    +(isSupRole()?'<option value="a-ingresar"'+(t.status==='a-ingresar'?' selected':'')+'>A ingresar</option>':'')
     +'<option value="pending"'+(t.status==='pending'?' selected':'')+'>Pendiente</option>'
     +'<option value="scheduled"'+(t.status==='scheduled'?' selected':'')+'>Programado</option>'
     +'<option value="progress"'+(t.status==='progress'?' selected':'')+'>En curso</option>'
     +'<option value="pending-confirm"'+(t.status==='pending-confirm'?' selected':'')+'>Completado p/ revisar</option>'
     +'<option value="reviewed"'+(t.status==='reviewed'?' selected':'')+'>Revisado p/ aprobar</option>'
     +'<option value="approved"'+(t.status==='approved'?' selected':'')+'>Aprobado</option>'
-    +'</select></div>'
+    +'</select>'
+    +(isSupRole()?'<div class="arrival-fields" id="arrival-fields" style="display:'+(t.status==='a-ingresar'?'block':'none')+'">'
+      +'<div style="font-size:11px;font-weight:600;color:#5b21b6;margin-bottom:8px">📦 Datos de llegada esperada</div>'
+      +'<div class="frow" style="margin-bottom:6px"><label style="font-size:11px">Fecha de llegada esperada</label>'
+      +'<input type="date" id="f-expected-arrival" value="'+(t.expectedArrival||'')+'"></div>'
+      +'<div class="frow" style="margin-bottom:0"><label style="font-size:11px">Comentarios de ingreso</label>'
+      +'<textarea id="f-arrival-notes" style="min-height:50px;font-size:11px" placeholder="Ej: Muestra enviada por transporte X, contacto: …">'+escH(t.arrivalNotes||'')+'</textarea></div>'
+      +'</div>':'')
+    +'</div>'
     +'<div class="frow form-full"><label>Analistas asignados</label>'
     +'<div class="analysts-check">'+analChecks+'</div>'
     +'</div>'
@@ -6507,7 +6539,9 @@ function _lazyXLSX(fn){
 function copyPendientes(btn){
   var pq=(window.pendingSearch||'').toLowerCase().trim();
   var psf=window.pendingStatusFilter||'all';
-  var list=tasks.filter(function(t){return['pending','scheduled','progress','pending-confirm','done','observed'].includes(t.status);})
+  var _cpStatuses=['pending','scheduled','progress','pending-confirm','done','observed'];
+  if(isSupRole())_cpStatuses.unshift('a-ingresar');
+  var list=tasks.filter(function(t){return _cpStatuses.includes(t.status);})
     .filter(function(t){return !pq||t.producto.toLowerCase().includes(pq)||t.lote.toLowerCase().includes(pq);})
     .filter(function(t){if(psf==='all')return true;if(psf==='late')return t._dueStatus==='late';return t.status===psf;});
   var HDR='Producto\tLote\tAnalistas\tF. Ingreso\tF. Planificado\tF. Aprobación límite\tPrioridad\tEstado';
@@ -6523,14 +6557,18 @@ function exportPendientesXLSX(){
   _lazyXLSX(function(){
     var pq=(window.pendingSearch||'').toLowerCase().trim();
     var psf=window.pendingStatusFilter||'all';
-    var list=tasks.filter(function(t){return['pending','scheduled','progress','pending-confirm','done','observed'].includes(t.status);})
+    var _expStatuses=['pending','scheduled','progress','pending-confirm','done','observed'];
+    if(isSupRole())_expStatuses.unshift('a-ingresar');
+    var list=tasks.filter(function(t){return _expStatuses.includes(t.status);})
       .filter(function(t){return !pq||t.producto.toLowerCase().includes(pq)||t.lote.toLowerCase().includes(pq);})
       .filter(function(t){if(psf==='all')return true;if(psf==='late')return t._dueStatus==='late';return t.status===psf;});
     var data=list.map(function(t){
       var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
       var anas=assigns.map(function(a){return getU(a.analyst).name;}).join(', ');
       var firstDate=assigns.reduce(function(mn,a){return !mn||a.date<mn?a.date:mn;},null);
-      return{'Producto':t.producto,'Lote':t.lote,'Analistas':anas,'F. Ingreso':t.created||'','F. Planificado':firstDate||'','F. Aprobación límite':t.due||'','Prioridad':t.priority||'Normal','Estado':statusLabel(t.status)};
+      var row={'Producto':t.producto,'Lote':t.lote,'Analistas':anas,'F. Ingreso':t.created||'','F. Planificado':firstDate||'','F. Aprobación límite':t.due||'','Prioridad':t.priority||'Normal','Estado':statusLabel(t.status)};
+      if(t.status==='a-ingresar'){row['F. Llegada esperada']=t.expectedArrival||'';row['Comentarios ingreso']=t.arrivalNotes||'';}
+      return row;
     });
     var ws=XLSX.utils.json_to_sheet(data);
     ws['!cols']=[{wch:24},{wch:14},{wch:22},{wch:12},{wch:14},{wch:18},{wch:10},{wch:16}];
@@ -7140,6 +7178,53 @@ function confirmDone(id){
   }
   assigns.forEach(function(a){confirmAssignment(id,a.analyst);});
 }
+function markSampleReceived(id){
+  var t=tasks.find(function(x){return x.id===id;});
+  if(!t||t.status!=='a-ingresar')return;
+  receiveTaskId=id;
+  showReceiveModal=true;
+  render();
+}
+function renderReceiveModal(){
+  var t=tasks.find(function(x){return x.id===receiveTaskId;});
+  if(!t)return'';
+  return'<div class="modal-overlay" onclick="if(event.target===this){showReceiveModal=false;receiveTaskId=null;render();}">'
+    +'<div class="modal" style="max-width:380px">'
+    +'<h3 style="margin-bottom:4px">✓ Muestra recibida</h3>'
+    +'<div style="font-size:12px;color:var(--text3);margin-bottom:16px">'+escH(t.producto)+' — '+escH(t.lote)+'</div>'
+    +(t.expectedArrival?'<div style="font-size:12px;margin-bottom:10px;padding:7px 10px;background:var(--bg);border-radius:var(--radius);border:1px solid var(--border)">'
+      +'<span style="color:var(--text3)">Llegada esperada: </span><b style="font-family:var(--mono)">'+fmtDDMMYY(t.expectedArrival)+'</b></div>':'')
+    +(t.arrivalNotes?'<div style="font-size:11px;color:var(--text2);margin-bottom:12px;padding:6px 10px;background:var(--bg);border-radius:var(--radius)">'+escH(t.arrivalNotes)+'</div>':'')
+    +'<div class="frow" style="margin-bottom:0">'
+    +'<label>Fecha de recepción <span style="color:var(--red)">*</span></label>'
+    +'<input type="date" id="f-received-date" value="'+today()+'" style="font-weight:600">'
+    +'<div style="font-size:11px;color:var(--text3);margin-top:4px">Esta fecha reemplazará la fecha de ingreso de la muestra.</div>'
+    +'</div>'
+    +'<div class="modal-btns" style="margin-top:16px">'
+    +'<button class="btn" onclick="showReceiveModal=false;receiveTaskId=null;render()">Cancelar</button>'
+    +'<button class="btn pri" style="background:#5b21b6;border-color:#5b21b6" onclick="confirmSampleReceived()">✓ Confirmar recepción</button>'
+    +'</div>'
+    +'</div></div>';
+}
+function confirmSampleReceived(){
+  var t=tasks.find(function(x){return x.id===receiveTaskId;});
+  if(!t)return;
+  var receivedDate=document.getElementById('f-received-date').value;
+  if(!receivedDate){alert('Ingresá la fecha de recepción.');return;}
+  var oldCreated=t.created;
+  t.status='pending';
+  t.created=receivedDate;       // reemplaza la fecha de ingreso
+  t.arrivedDate=receivedDate;
+  t.arrivedBy=currentUser.id;
+  t.arrivedTs=Date.now();
+  auditLog('RECEIVE','TASK',receiveTaskId,{field:'status',oldVal:'a-ingresar',newVal:'pending',
+    description:'Muestra recibida: '+t.producto+' '+t.lote,
+    expectedArrival:t.expectedArrival||'',
+    oldCreated:oldCreated,arrivedDate:receivedDate},'Muestra recibida en laboratorio');
+  showReceiveModal=false;receiveTaskId=null;
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow confirmSampleReceived:',e);});
+}
 function requestScheduleChange(analystId,dateStr){
   schedModalAnalyst=analystId;schedModalDate=dateStr||null;showSchedModal=true;render();
 }
@@ -7670,6 +7755,10 @@ function saveTask(){
   const priority=document.getElementById('f-prio').value;
   const status=document.getElementById('f-status').value;
   const notes=document.getElementById('f-notes').value;
+  const _expectedArrivalEl=document.getElementById('f-expected-arrival');
+  const _arrivalNotesEl=document.getElementById('f-arrival-notes');
+  const expectedArrival=_expectedArrivalEl?_expectedArrivalEl.value:'';
+  const arrivalNotes=_arrivalNotesEl?_arrivalNotesEl.value.trim():'';
   // Build assignments from multiAssigns — same analyst can appear N times (multi-day)
   var _editForSave=editingTask!==null?tasks.find(function(x){return x.id===editingTask;}):null;
   var _usedKeys={};
@@ -7690,10 +7779,19 @@ function saveTask(){
   // Auto-derive status; analyst is optional
   var _autoStatus=status;
   if(!editingTask){
-    _autoStatus=assignments.length===0?'pending':'scheduled';
+    // a-ingresar is a special pre-pending state — do NOT override
+    if(isSupRole()&&status==='a-ingresar'){
+      _autoStatus='a-ingresar';
+    } else {
+      _autoStatus=assignments.length===0?'pending':'scheduled';
+    }
   } else {
     var _et2=tasks.find(function(x){return x.id===editingTask;});
     if(_et2&&_et2.status==='pending'&&assignments.length>0)_autoStatus='scheduled';
+    // Allow supervisor to demote to a-ingresar only from pending/scheduled
+    if(isSupRole()&&status==='a-ingresar'&&(_et2&&(_et2.status==='pending'||_et2.status==='scheduled'||_et2.status==='a-ingresar'))){
+      _autoStatus='a-ingresar';
+    }
   }
   // Warn if any assignment date is >= due (no time left for review + approval)
   if(assignments.length>0&&due){
@@ -7741,11 +7839,16 @@ function saveTask(){
       t.producto=prod;t.lote=lote;t.created=created;t.due=due;
       t.priority=priority;t.notes=notes;
       t.assignments=finalAssignments;
-      // Estado: solo retroceder si aún no inició (pending/scheduled)
-      if(t.status==='pending'||t.status==='scheduled')t.status=_autoStatus;
+      // Arrival fields for a-ingresar
+      if(_autoStatus==='a-ingresar'||t.status==='a-ingresar'){
+        t.expectedArrival=expectedArrival||t.expectedArrival||'';
+        t.arrivalNotes=arrivalNotes||t.arrivalNotes||'';
+      }
+      // Estado: solo retroceder si aún no inició (pending/scheduled/a-ingresar)
+      if(t.status==='pending'||t.status==='scheduled'||t.status==='a-ingresar')t.status=_autoStatus;
     }
   }
-  else tasks.push({id:nextId++,producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes});
+  else{var _newT={id:nextId++,producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes};if(_autoStatus==='a-ingresar'){if(expectedArrival)_newT.expectedArrival=expectedArrival;if(arrivalNotes)_newT.arrivalNotes=arrivalNotes;}tasks.push(_newT);}
   const _eid2=editingTask;
   showModal=false;editingTask=null;
   auditLog(_eid2?'EDIT':'CREATE','TASK',_eid2||nextId-1,{description:(_eid2?'Edicion':'Nuevo analisis')+': '+prod+' '+lote},'');
@@ -7786,6 +7889,8 @@ function markObsNotifRead(notifId){
 // Marcar cambio de horario aprobado como visto
 // Solicitar al Supervisor que planifique un ensayo
 // ── TAREAS LIBRES (sin producto) ──
+let showReceiveModal=false;
+let receiveTaskId=null;
 let showFreeTaskModal=false;
 let editingFreeTask=null;
 
