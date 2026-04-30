@@ -959,6 +959,7 @@ function isMyTask(t){
   return (t.assignments||[]).some(a=>a.analyst===currentUser.id);
 }
 function today(){var d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function _relDate(n){var d=new Date();d.setDate(d.getDate()+n);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
 function fmtD(d){if(!d)return'';const p=d.split('-');return p[2]+'/'+p[1];}
 function fmtDDMMYY(d){if(!d)return'';const p=d.split('-');return p[2]+'/'+p[1]+'/'+(p[0]||'').slice(2);}
 function dueBadge(t){
@@ -6222,7 +6223,7 @@ function renderImportModal(){
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">L-2024-011</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${ANALYSTS[0]?ANALYSTS[0].name:'Ana López'}</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${today()}</td>
-          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${(()=>{var d=new Date();d.setDate(d.getDate()+3);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}())}</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${_relDate(3)}</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Normal</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Control fisicoquímico</td>
         </tr>
@@ -6230,8 +6231,8 @@ function renderImportModal(){
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Amoxicilina 500mg</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">L-2024-011</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${ANALYSTS[1]?ANALYSTS[1].name:'Luis Ramírez'}</td>
-          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${(()=>{var d=new Date();d.setDate(d.getDate()+1);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}())}</td>
-          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${(()=>{var d=new Date();d.setDate(d.getDate()+3);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}())}</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${_relDate(1)}</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${_relDate(3)}</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Normal</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Microbiológico</td>
         </tr>
@@ -6453,8 +6454,8 @@ function downloadTemplate(){
   function go(){
     const ws=XLSX.utils.aoa_to_sheet([
       ['Producto','Lote','Analista','Fecha análisis','Fecha entrega','Prioridad','Notas'],
-      ['Amoxicilina 500mg','L-2024-011',ANALYSTS[0]?ANALYSTS[0].name:'Analista 1',today(),(()=>{var d=new Date();d.setDate(d.getDate()+3);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');})(),'Normal','Control fisicoquímico'],
-      ['Ibuprofeno 400mg','L-2024-012',ANALYSTS[1]?ANALYSTS[1].name:'Analista 2',(()=>{var d=new Date();d.setDate(d.getDate()+1);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');})(), (()=>{var d=new Date();d.setDate(d.getDate()+5);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');})(),'Alta','Microbiológico + fisicoquímico'],
+      ['Amoxicilina 500mg','L-2024-011',ANALYSTS[0]?ANALYSTS[0].name:'Analista 1',today(),_relDate(3),'Normal','Control fisicoquímico'],
+      ['Ibuprofeno 400mg','L-2024-012',ANALYSTS[1]?ANALYSTS[1].name:'Analista 2',_relDate(1),_relDate(5),'Alta','Microbiológico + fisicoquímico'],
     ]);
     ws['!cols']=[{wch:24},{wch:14},{wch:18},{wch:16},{wch:16},{wch:12},{wch:30}];
     const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,'Análisis',ws);
