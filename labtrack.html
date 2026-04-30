@@ -4633,22 +4633,32 @@ function renderDashboard(){
   }
   // Analyst/Reviewer view — exclude a-ingresar (supervisor-only pre-pending state)
   const myTasks=tasks.filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id));
-  const myPend=myTasks.filter(t=>t.status==='pending'||t._dueStatus==='late');
-  const myProg=myTasks.filter(t=>t.status==='progress'||t.status==='pending-confirm');
+  const todayD=new Date(today()+'T12:00:00');
+  const minWin=_relDate(-3);const maxWin=_relDate(1);
+  // "Mi día": tareas que requieren acción — asignaciones dentro de la ventana, o ya en progreso/observadas
+  const myActionable=myTasks.filter(function(t){
+    if(['done','reviewed','approved'].includes(t.status))return false;
+    if(t.status==='progress'||t.status==='pending-confirm'||t.status==='observed')return true;
+    // pending/scheduled: mostrar si hay alguna asignación dentro de la ventana de acción
+    return(t.assignments||[]).some(function(a){
+      return a.analyst===currentUser.id&&!a._removed&&a.date>=minWin&&a.date<=maxWin;
+    });
+  });
   const myDone=myTasks.filter(t=>['done','reviewed','approved'].includes(t.status));
   const myObs=myTasks.filter(t=>t.status==='observed');
-  const myHReal=myTasks.reduce((s,t)=>s+((t.assignments||[]).find(a=>a.analyst===currentUser.id)?.realHours||0),0);
+  // Horas reales: suma de todas las asignaciones del analista
+  const myHReal=myTasks.reduce((s,t)=>s+((t.assignments||[]).filter(a=>a.analyst===currentUser.id).reduce((s2,a)=>s2+(a.realHours||0),0)),0);
   return`<div class="dash-grid" style="margin-bottom:16px">
-    <div class="stat-card"><div class="stat-n" style="color:var(--amber)">${myPend.length}</div><div class="stat-l">Pendientes</div></div>
-    <div class="stat-card"><div class="stat-n" style="color:var(--blue)">${myProg.length}</div><div class="stat-l">En curso</div></div>
+    <div class="stat-card"><div class="stat-n" style="color:var(--amber)">${myActionable.length}</div><div class="stat-l">Requieren acción</div></div>
+    <div class="stat-card"><div class="stat-n" style="color:var(--blue)">${myTasks.filter(t=>t.status==='progress'||t.status==='pending-confirm').length}</div><div class="stat-l">En curso</div></div>
     <div class="stat-card"><div class="stat-n" style="color:var(--green)">${myDone.length}</div><div class="stat-l">Completados</div></div>
     ${myObs.length?`<div class="stat-card"><div class="stat-n" style="color:var(--amber)">${myObs.length}</div><div class="stat-l">Observados</div></div>`:''}
     ${myHReal>0?`<div class="stat-card"><div class="stat-n" style="color:var(--green);">${myHReal.toFixed(1)}h</div><div class="stat-l">H.Real</div></div>`:''}
   </div>
   ${currentUser.role==='staff'?renderStaffFreeTasksWidget():''}  ${myObs.length?`<div class="sec" style="color:var(--amber);margin-bottom:8px">⚑ Análisis observados</div>
-  <div class="tbl" style="margin-bottom:16px">${myObs.map(t=>tRowAna(t)).join('')}</div>`:''}
-  <div class="sec" style="margin-bottom:8px">Mis análisis activos</div>
-  <div class="tbl">${myPend.concat(myProg).length===0?'<div class="empty">No tenés análisis pendientes ✓</div>':myPend.concat(myProg).map(t=>tRowAna(t)).join('')}</div>`;
+  <div class="tbl" style="margin-bottom:16px">${myObs.map(t=>tRowsAna(t)).join('')}</div>`:''}
+  <div class="sec" style="margin-bottom:8px">Mis análisis — actividades que requieren acción</div>
+  <div class="tbl">${myActionable.length===0?'<div class="empty">No tenés análisis con acción pendiente hoy ✓</div>':myActionable.map(t=>tRowsAna(t)).join('')}</div>`;
 }
 
 function avStack(t){return getAssignees(t).map(function(id){var u=getU(id);return'<div class="av '+u.av+'" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>';}).join('');}
@@ -4762,6 +4772,13 @@ function openReplanSuper(taskId){
     else{alert('No se encontró ese analista.');}
   }
 }
+// Expand a task to one row per assignment for the current analyst (independent per-date)
+function tRowsAna(t){
+  var myA=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
+  if(myA.length<=1)return tRowAna(t,myA[0]||null);
+  return myA.slice().sort(function(a,b){return(a.date||'').localeCompare(b.date||'');})
+    .map(function(ma){return tRowAna(t,ma);}).join('');
+}
 function tRowAna(t,maOverride){
   var todayStr=today();
   var todayDate=new Date(todayStr+'T12:00:00');
@@ -4777,23 +4794,35 @@ function tRowAna(t,maOverride){
     || null;
   var md=ma?ma.date:t.due;
   var assignedDate=new Date((md||todayStr)+'T12:00:00');
-  var diffDays=Math.ceil((assignedDate-todayDate)/(1000*60*60*24));
-  // canStart: siguiente día como máximo (diffDays≤1) + vencidos siempre permitidos
-  var startableStatus=t.status==='pending'||t.status==='scheduled';
-  var canStart=(diffDays<=1||t._dueStatus==='late')&&startableStatus;
+  // diffDays: signed — negative=past, positive=future
+  var diffDays=Math.round((assignedDate-todayDate)/(1000*60*60*24));
+  // Ventana de acción: 3 días atrás hasta 1 día adelante
+  var inActionWindow=(diffDays>=-3&&diffDays<=1)||t._dueStatus==='late';
+  // Per-assignment state (independent per date)
+  var iThisAssignDone=ma&&((ma.realHours>0)||(ma.sessions&&ma.sessions.length>0));
+  var iThisAssignPendConf=ma&&ma._pendingConfirm&&!ma._supervisorConfirmed;
+  // Task is in an actionable state (not finished)
+  var taskActive=['pending','scheduled','progress','pending-confirm','observed'].indexOf(t.status)>=0;
+  // canStart: assignment not done, in window, task active (including already progress for 2nd assignment)
+  var canStart=!iThisAssignDone&&!iThisAssignPendConf&&inActionWindow&&taskActive;
   var pendingReplan=replanNotifs.find(function(n){return n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';});
   var replanLabel=pendingReplan?'<span style="font-size:10px;background:var(--amber-bg);color:var(--amber-text);padding:1px 5px;border-radius:4px;font-weight:500">Replan. pendiente</span>':'';
-  var tl=myAssigns.flatMap(function(a){return a.timeLog||[];});
-  var realH=tl.reduce(function(s,e){return s+(e.hours||0);},0)
-    ||myAssigns.reduce(function(s,a){return s+(a.realHours||0);},0);
-  // Today's time log entry
-  var todayEntry=tl.find(function(e){return e.date===today();});
+  // Horas: solo de esta asignación específica (independiente por fecha)
+  var maRealH=ma?((ma.sessions||[]).reduce(function(s,e){return s+(e.hours||0);},0)||(ma.realHours||0)):0;
+  var maTL=ma?(ma.timeLog||[]):[];
+  var todayEntry=maTL.find(function(e){return e.date===todayStr;});
   var todayStatus=todayEntry?'<span style="font-size:9px;font-family:var(--mono);color:var(--green)">'+todayEntry.start+'→'+todayEntry.end+'</span>':'';
 
   var hoursCol='<div style="display:flex;flex-direction:column;gap:2px">'
-    +(realH?'<span style="font-size:11px;font-weight:700;color:var(--green);font-family:var(--mono)">Real: '+realH.toFixed(1)+'h</span>':'<span style="font-size:10px;color:var(--text3)">Sin datos</span>')
+    +(maRealH?'<span style="font-size:11px;font-weight:700;color:var(--green);font-family:var(--mono)">Real: '+maRealH.toFixed(1)+'h</span>':'<span style="font-size:10px;color:var(--text3)">Sin datos</span>')
     +(todayStatus?todayStatus:'')
     +'</div>';
+
+  // Encode assignment date for targeted markProg/markDone calls
+  var dateParam=ma&&ma.date?',\''+ma.date+'\'':'';
+
+  // canComplete: assignment not done and not pending-confirm, task active, date in window
+  var canComplete=!iThisAssignDone&&!iThisAssignPendConf&&inActionWindow&&taskActive;
 
   return'<div class="trow" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr">'
     +'<div><div class="cell-trunc">'+escH(t.producto)+'</div><div class="cell-sub">'+escH(t.lote)+'</div></div>'
@@ -4802,26 +4831,16 @@ function tRowAna(t,maOverride){
     +'<div>'
     +'<span class="pill '+(taskDisplayStatus(t)==='partial'?'partial':t.status)+'">'+statusLabel(taskDisplayStatus(t))+'</span>'
         +(t.observations&&t.observations.length?'<span title="'+escH(t.observations[t.observations.length-1].comment||'')+'" style="cursor:help;font-size:11px;color:var(--amber-text);margin-left:4px">⚑</span>':'')
-    +(t.status==='approved'?'<div style="font-size:9px;color:var(--green);margin-top:1px;font-weight:600">✓ Aprobado'+( t.approvedDate?' '+fmtDF(t.approvedDate):'')+'</div>':'')
+    +(t.status==='approved'?'<div style="font-size:9px;color:var(--green);margin-top:1px;font-weight:600">✓ Aprobado'+(t.approvedDate?' '+fmtDF(t.approvedDate):'')+'</div>':'')
     +'</div>'
     +'<div style="display:flex;gap:3px;flex-wrap:wrap;align-items:center">'
-    +(canStart?'<button class="btn pri sm" onclick="markProg('+t.id+')">▶ Iniciar</button>':'')
-    +(function(){
-      var myA2=(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed;});
-      var iAlreadyDone=myA2&&((myA2.realHours>0)||(myA2.sessions&&myA2.sessions.length>0));
-      // Puede completar: ya en progreso/conf.pendiente, O actividad programada dentro de 3 días
-      var canComplete=!iAlreadyDone&&(
-        (t.status==='progress'||t.status==='pending-confirm')
-        ||(startableStatus&&diffDays<=3)
-      );
-      return canComplete?'<button class="btn suc sm" onclick="markDone('+t.id+')">✓ Completar</button>':'';
-    })()
-    +(t.status==='observed'?'<button class="btn suc sm" onclick="markDone('+t.id+')">↩ Re-enviar</button>':'')
-    +(t.status==='pending-confirm'?'<span style="font-size:10px;background:var(--blue-bg);color:var(--blue-text);padding:2px 6px;border-radius:4px;font-weight:500">⏳ Confirmación pendiente</span>':'')
-    +(t.status==='done'?'<span style="font-size:11px;color:var(--green)">✓ Completado</span>':'')
-    +(!pendingReplan&&t.status!=='done'&&t.status!=='pending-confirm'?'<button class="btn sm" onclick="openReplan('+t.id+',\''+currentUser.id+'\')" title="Replanificar">📅</button>':'')
+    +(canStart?'<button class="btn pri sm" onclick="markProg('+t.id+dateParam+')">▶ Iniciar</button>':'')
+    +(canComplete?'<button class="btn suc sm" onclick="markDone('+t.id+dateParam+')">✓ Completar</button>':'')
+    +(t.status==='observed'?'<button class="btn suc sm" onclick="markDone('+t.id+dateParam+')">↩ Re-enviar</button>':'')
+    +(iThisAssignPendConf?'<span style="font-size:10px;background:var(--blue-bg);color:var(--blue-text);padding:2px 6px;border-radius:4px;font-weight:500">⏳ Conf. pendiente</span>':'')
+    +(iThisAssignDone&&!iThisAssignPendConf&&t.status!=='pending-confirm'?'<span style="font-size:11px;color:var(--green)">✓ Completado</span>':'')
+    +(!pendingReplan&&!iThisAssignDone&&t.status!=='done'&&t.status!=='pending-confirm'?'<button class="btn sm" onclick="openReplan('+t.id+',\''+currentUser.id+'\')" title="Replanificar">📅</button>':'')
     +((t.observations&&t.observations.length)||(t.completionComments&&t.completionComments.length)||(t.resubmitHistory&&t.resubmitHistory.length)?'<button class="btn sm" onclick="openEdit('+t.id+')" title="Ver comentarios del proceso" style="color:var(--blue)">💬</button>':'')
-    
     +'</div>'
     +'</div>';
 }
@@ -5350,7 +5369,7 @@ function renderCalWeek(sup){
   </div>
   ${!sup?`<div class="sec" style="margin-top:16px">Mis análisis de esta semana</div><div class="tbl">
     <div class="thead" style="grid-template-columns:1.4fr .8fr .7fr .7fr .9fr"><div>Producto / Lote</div><div>Fecha asig.</div><div>Prioridad</div><div>Estado</div><div></div></div>
-    ${tasks.filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))).map(t=>tRowAna(t)).join('')||'<div class="empty">Sin análisis esta semana</div>'}
+    ${tasks.filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))).map(t=>tRowsAna(t)).join('')||'<div class="empty">Sin análisis esta semana</div>'}
   </div>`:''}`;
 }
 
@@ -6795,7 +6814,7 @@ function setFA(v){filterAnalyst=v;render();}
 function setFSearch(v){filterSearch=v;render();}
 
 function setFS(v){filterStatus=v;render();}
-function markDone(id){
+function markDone(id,assignDate){
   const t=tasks.find(x=>x.id===id);if(!t)return;
   if(currentUser.role==='analyst'||currentUser.role==='reviewer'){
     if(t.status==='observed'){
@@ -6872,16 +6891,18 @@ function markDone(id){
         +'<textarea id="complete-cmt" rows="2" placeholder="Observaciones del análisis, condiciones especiales, resultados relevantes…" style="width:100%;resize:vertical;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:12px"></textarea></div>'
         +'<div style="display:flex;gap:8px;justify-content:flex-end">'
         +'<button onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
-        +'<button onclick="window._doComplete('+id+')" class="btn pri">✓ Confirmar</button>'
+        +'<button onclick="window._doComplete('+id+',\''+( assignDate||'')+'\')'+'" class="btn pri">✓ Confirmar</button>'
         +'</div></div></div>';
       document.body.appendChild(hDiv);
-      window._doComplete=function(tid){
+      window._doComplete=function(tid,_assignDate){
         var hVal=parseFloat((document.getElementById('hrs-input')||{}).value||0);
         var completeCmt=((document.getElementById('complete-cmt')||{}).value||'').trim();
         if(isNaN(hVal)||hVal<=0){alert('Ingresá un valor de horas válido (mayor a 0).');return;}
         document.body.removeChild(hDiv);
-        // Accumulate session hours
-        var myA=(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed;});
+        // Target the specific assignment by date (independent per-assignment completion)
+        var myA=_assignDate
+          ?(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed&&a.date===_assignDate;})
+          :(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed;});
         if(myA){
           if(!myA.sessions)myA.sessions=[];
           myA.sessions.push({date:today(),hours:hVal,ts:Date.now(),comment:completeCmt||undefined});
@@ -6894,7 +6915,7 @@ function markDone(id){
           t.startedTs=Date.now();
           if(!t.startDatetime)t.startDatetime=new Date().toISOString().slice(0,16);
           auditLog('START','TASK',tid,{field:'status',oldVal:prevStatus,newVal:'progress',
-            description:'Auto-inicio por completado anticipado: '+t.producto+' '+t.lote},'');
+            description:'Auto-inicio por completado anticipado: '+t.producto+' '+t.lote+(_assignDate?' (asig. '+_assignDate+')':'') },'');
         }
         // Mark this specific assignment as pending confirmation
         if(myA){myA._pendingConfirm=true;myA._completedTs=Date.now();}
@@ -7295,25 +7316,39 @@ function rejectDone(id){
   t.status='progress';delete t.completedBy;delete t.completedTs;
   saveLS();render();
 }
-function markProg(id){
+function markProg(id,assignDate){
   const t=tasks.find(x=>x.id===id);if(!t)return;
   if(currentUser.role==='analyst'||currentUser.role==='reviewer'){
     var todayDate=new Date(today()+'T12:00:00');
-    var myAssigns=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id;});
-    if(myAssigns.length>0){
-      var minDiff=Infinity;
-      myAssigns.forEach(function(ma){
+    // If a specific assignment date is provided, only check that one
+    var checkAssigns=assignDate
+      ?(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&a.date===assignDate;})
+      :(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id;});
+    if(checkAssigns.length>0){
+      // Ventana permitida: 3 días hacia atrás hasta 1 día adelante
+      var allOutOfWindow=checkAssigns.every(function(ma){
         var ad=new Date((ma.date||today())+'T12:00:00');
-        var diff=Math.abs(Math.round((ad-todayDate)/(1000*60*60*24)));
-        if(diff<minDiff)minDiff=diff;
+        var diff=Math.round((ad-todayDate)/(1000*60*60*24));
+        return diff<-3||diff>1;
       });
-      if(minDiff>1){alert('Solo podés iniciar esta actividad el día asignado o el día anterior.');return;}
+      if(allOutOfWindow&&t._dueStatus!=='late'){
+        alert('Solo podés iniciar esta actividad dentro de los 3 días previos o el día siguiente a la fecha asignada.');return;
+      }
     }
   }
-  t.status='progress';t.startedTs=Date.now();
-  if(!t.startDatetime)t.startDatetime=new Date().toISOString().slice(0,16);
-  auditLog('START','TASK',id,{field:'status',oldVal:'scheduled',newVal:'progress',
-    description:'Inicio de análisis: '+t.producto+' '+t.lote},'');
+  // Mark the specific assignment as started (per-assignment independent tracking)
+  var targetAssign=assignDate
+    ?(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&a.date===assignDate;})
+    :(t.assignments||[]).find(function(a){return a.analyst===currentUser.id;});
+  if(targetAssign)targetAssign._started=true;
+  // Only advance task status if not already running/further along
+  var prevStatus=t.status;
+  if(t.status==='pending'||t.status==='scheduled'){
+    t.status='progress';t.startedTs=Date.now();
+    if(!t.startDatetime)t.startDatetime=new Date().toISOString().slice(0,16);
+  }
+  auditLog('START','TASK',id,{field:'status',oldVal:prevStatus,newVal:t.status,
+    description:'Inicio de análisis: '+t.producto+' '+t.lote+(assignDate?' (asig. '+assignDate+')':'') },'');
   saveLS();render();
 }
 function deleteTask(id){
