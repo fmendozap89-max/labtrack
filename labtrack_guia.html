@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LabTrack — Guía de Usuario</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --sup:#6366f1; --sup-light:#eef2ff; --sup-dark:#4f46e5;
+  --rev:#f59e0b; --rev-light:#fffbeb; --rev-dark:#d97706;
+  --ana:#10b981; --ana-light:#ecfdf5; --ana-dark:#059669;
+  --mue:#3b82f6; --mue-light:#eff6ff; --mue-dark:#2563eb;
+  --per:#6b7280; --per-light:#f3f4f6; --per-dark:#4b5563;
+  --bg:#f8fafc; --surface:#fff; --border:#e2e8f0;
+  --text:#0f172a; --text2:#475569; --text3:#94a3b8;
+  --shadow:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.05);
+  --shadow-md:0 4px 6px rgba(0,0,0,.07),0 2px 4px rgba(0,0,0,.05);
+  --radius:10px;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+}
+body{display:flex;min-height:100vh;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
+
+/* ── SIDEBAR ── */
+.sidebar{
+  width:220px;min-width:220px;background:var(--surface);border-right:1px solid var(--border);
+  position:sticky;top:0;height:100vh;overflow-y:auto;display:flex;flex-direction:column;z-index:10;
+}
+.sb-logo{padding:20px 16px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border)}
+.sb-logo-icon{width:32px;height:32px;background:#1e293b;border-radius:8px;display:flex;align-items:center;justify-content:center}
+.sb-logo-text{font-size:16px;font-weight:700;color:#1e293b}
+.sb-logo-text span{color:#6366f1}
+.sb-section{padding:10px 8px 4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text3);padding-left:16px}
+.nav-item{
+  display:flex;align-items:center;gap:10px;padding:9px 16px;cursor:pointer;
+  border-radius:8px;margin:1px 6px;font-size:13px;font-weight:500;color:var(--text2);
+  transition:background .15s,color .15s;text-decoration:none;
+}
+.nav-item:hover{background:var(--bg);color:var(--text)}
+.nav-item.active{color:var(--surface);font-weight:600}
+.nav-item .ni{width:18px;text-align:center;font-size:14px;flex-shrink:0}
+.nav-item.sup.active{background:var(--sup)}
+.nav-item.rev.active{background:var(--rev)}
+.nav-item.ana.active{background:var(--ana)}
+.nav-item.mue.active{background:var(--mue)}
+.nav-item.per.active{background:var(--per)}
+.nav-item.gen.active{background:#1e293b}
+.sb-footer{margin-top:auto;padding:12px 16px;font-size:11px;color:var(--text3);border-top:1px solid var(--border)}
+
+/* ── MAIN ── */
+.main{flex:1;overflow-y:auto;padding:32px 40px;max-width:900px}
+@media(max-width:768px){
+  body{flex-direction:column}
+  .sidebar{width:100%;min-width:0;height:auto;position:relative;flex-direction:row;flex-wrap:wrap}
+  .main{padding:20px 16px}
+  .sb-section{display:none}
+}
+
+/* ── SECTION ── */
+section{margin-bottom:60px;scroll-margin-top:24px}
+.section-hero{
+  border-radius:var(--radius);padding:28px 32px;margin-bottom:28px;
+  background:linear-gradient(135deg,var(--hero-color) 0%,var(--hero-dark) 100%);
+  color:#fff;
+}
+.section-hero h1{font-size:26px;font-weight:700;margin-bottom:6px}
+.section-hero p{opacity:.88;font-size:14px;max-width:600px;line-height:1.6}
+.role-badge{
+  display:inline-flex;align-items:center;gap:6px;padding:4px 12px;
+  border-radius:20px;background:rgba(255,255,255,.22);font-size:12px;font-weight:600;
+  margin-bottom:12px;
+}
+
+/* ── CARDS GRID ── */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;margin-bottom:24px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;box-shadow:var(--shadow)}
+.card-icon{font-size:22px;margin-bottom:8px}
+.card h3{font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px}
+.card p{font-size:12px;color:var(--text2);line-height:1.5}
+
+/* ── STEPS ── */
+.steps{display:flex;flex-direction:column;gap:12px;margin-bottom:24px}
+.step{display:flex;gap:14px;align-items:flex-start;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow)}
+.step-num{
+  width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:700;color:#fff;flex-shrink:0;margin-top:1px;
+}
+.step-body h4{font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px}
+.step-body p{font-size:12px;color:var(--text2);line-height:1.5}
+.step-body .tip{
+  margin-top:6px;padding:6px 10px;background:var(--bg);border-radius:6px;
+  font-size:11px;color:var(--text2);border-left:3px solid var(--border);
+}
+
+/* ── MENU LIST ── */
+.menu-list{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px}
+.menu-chip{
+  display:flex;align-items:center;gap:6px;padding:6px 12px;
+  background:var(--surface);border:1px solid var(--border);border-radius:20px;
+  font-size:12px;font-weight:500;color:var(--text2);
+}
+.menu-chip .badge{
+  background:#ef4444;color:#fff;font-size:10px;font-weight:700;
+  padding:1px 5px;border-radius:10px;
+}
+
+/* ── SECTION TITLE ── */
+.sec-title{font-size:15px;font-weight:700;color:var(--text);margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.sec-title::after{content:'';flex:1;height:1px;background:var(--border)}
+
+/* ── FAQ ── */
+.faq{display:flex;flex-direction:column;gap:8px}
+.faq-item{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.faq-q{
+  display:flex;align-items:center;gap:12px;padding:14px 16px;cursor:pointer;
+  font-size:13px;font-weight:600;color:var(--text);user-select:none;
+}
+.faq-q:hover{background:var(--bg)}
+.faq-q .faq-icon{font-size:16px;flex-shrink:0}
+.faq-q .faq-arrow{margin-left:auto;color:var(--text3);transition:transform .2s;font-size:12px}
+.faq-item.open .faq-arrow{transform:rotate(180deg)}
+.faq-a{
+  display:none;padding:0 16px 14px 44px;font-size:13px;color:var(--text2);line-height:1.7;
+  border-top:1px solid var(--border);padding-top:12px;
+}
+.faq-item.open .faq-a{display:block}
+
+/* ── STATUS TAGS ── */
+.status{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:600}
+.status.pending{background:#fef3c7;color:#92400e}
+.status.progress{background:#dbeafe;color:#1e40af}
+.status.done{background:#d1fae5;color:#065f46}
+.status.partial{background:#e0e7ff;color:#3730a3}
+.status.reviewed{background:#dcfce7;color:#166534}
+.status.observed{background:#fee2e2;color:#991b1b}
+.status.late{background:#fee2e2;color:#991b1b}
+
+/* ── NOTE BOX ── */
+.note{display:flex;gap:10px;padding:12px 14px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;margin-bottom:16px;font-size:12px;color:#78350f;line-height:1.5}
+.note-warn{background:#fff7ed;border-color:#fed7aa;color:#7c2d12}
+.note-info{background:#eff6ff;border-color:#bfdbfe;color:#1e3a8a}
+.note-success{background:#f0fdf4;border-color:#bbf7d0;color:#14532d}
+
+/* ── TABLE ── */
+.tbl-guide{width:100%;border-collapse:collapse;margin-bottom:16px;font-size:12px}
+.tbl-guide th{text-align:left;padding:8px 12px;background:var(--bg);font-weight:600;color:var(--text2);border-bottom:2px solid var(--border);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+.tbl-guide td{padding:8px 12px;border-bottom:1px solid var(--border);color:var(--text2)}
+.tbl-guide tr:last-child td{border-bottom:none}
+.tbl-guide tr:hover td{background:var(--bg)}
+
+/* ── SCREENSHOTS PLACEHOLDER ── */
+.screen-mock{
+  background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px;margin-bottom:16px;display:flex;align-items:center;justify-content:center;
+  min-height:80px;font-size:12px;color:var(--text3);flex-direction:column;gap:6px;
+}
+</style>
+</head>
+<body>
+
+<!-- ─── SIDEBAR ─── -->
+<nav class="sidebar">
+  <div class="sb-logo">
+    <div class="sb-logo-icon">
+      <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+        <rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/>
+        <rect x="10" y="2" width="6" height="6" rx="1.5" fill="white"/>
+        <rect x="2" y="10" width="6" height="6" rx="1.5" fill="white"/>
+        <rect x="10" y="10" width="6" height="6" rx="1.5" fill="white"/>
+      </svg>
+    </div>
+    <span class="sb-logo-text">Lab<span>Track</span></span>
+  </div>
+
+  <div class="sb-section">General</div>
+  <a class="nav-item gen active" href="#inicio" onclick="setActive(this)" data-id="inicio">
+    <span class="ni">🏠</span>Inicio &amp; Login
+  </a>
+
+  <div class="sb-section">Por rol</div>
+  <a class="nav-item sup" href="#supervisor" onclick="setActive(this)" data-id="supervisor">
+    <span class="ni">⭐</span>Supervisor
+  </a>
+  <a class="nav-item rev" href="#revisor" onclick="setActive(this)" data-id="revisor">
+    <span class="ni">🔍</span>Revisor
+  </a>
+  <a class="nav-item ana" href="#analista" onclick="setActive(this)" data-id="analista">
+    <span class="ni">🧪</span>Analista
+  </a>
+  <a class="nav-item mue" href="#muestreador" onclick="setActive(this)" data-id="muestreador">
+    <span class="ni">💧</span>Muestreador
+  </a>
+  <a class="nav-item per" href="#personal" onclick="setActive(this)" data-id="personal">
+    <span class="ni">👤</span>Personal
+  </a>
+
+  <div class="sb-section">Ayuda</div>
+  <a class="nav-item gen" href="#estados" onclick="setActive(this)" data-id="estados">
+    <span class="ni">🏷</span>Estados
+  </a>
+  <a class="nav-item gen" href="#problemas" onclick="setActive(this)" data-id="problemas">
+    <span class="ni">❓</span>Problemas frecuentes
+  </a>
+
+  <div class="sb-footer">LabTrack v9 · Guía de usuario</div>
+</nav>
+
+<!-- ─── MAIN ─── -->
+<main class="main">
+
+<!-- ═══════════════════════════ INICIO ═══════════════════════════ -->
+<section id="inicio">
+  <div class="section-hero" style="--hero-color:#1e293b;--hero-dark:#0f172a">
+    <div class="role-badge">📖 Guía de usuario</div>
+    <h1>LabTrack</h1>
+    <p>Sistema de gestión de laboratorio farmacéutico. Esta guía cubre el uso diario para cada rol. Encontrás tu sección en el menú lateral izquierdo.</p>
+  </div>
+
+  <div class="sec-title">¿Qué es LabTrack?</div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-icon">🧪</div>
+      <h3>Análisis y lotes</h3>
+      <p>Gestiona tareas de análisis asignadas a analistas, con seguimiento de estado en tiempo real.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">📅</div>
+      <h3>Calendario y horarios</h3>
+      <p>Cada usuario tiene un cronograma con horario de trabajo, ausencias y solicitudes de cambio.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">📋</div>
+      <h3>Actividades de gestión</h3>
+      <p>Tareas recurrentes del laboratorio (Sueros, TOC, Revisión, etc.) planificadas por período.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🔔</div>
+      <h3>Notificaciones</h3>
+      <p>Las solicitudes de horario y horas extra se aprueban o rechazan desde el menú Solicitudes.</p>
+    </div>
+  </div>
+
+  <div class="sec-title">Cómo iniciar sesión</div>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num" style="background:#1e293b">1</div>
+      <div class="step-body">
+        <h4>Abrir LabTrack en el navegador</h4>
+        <p>Ingresá a la URL del sistema. Verás la pantalla de selección de usuario con los avatares de todo el equipo agrupados por rol.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:#1e293b">2</div>
+      <div class="step-body">
+        <h4>Seleccionar tu usuario</h4>
+        <p>Hacé clic en tu cuadro de iniciales. El sistema avanza automáticamente a la pantalla de contraseña.</p>
+        <div class="tip">💡 Los cuadros están agrupados por rol y con distintos colores para encontrarte rápido.</div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:#1e293b">3</div>
+      <div class="step-body">
+        <h4>Ingresar contraseña y entrar</h4>
+        <p>Escribí tu contraseña y presioná <strong>Enter</strong> o el botón <strong>Ingresar</strong>. La sesión dura 30 minutos de inactividad o 12 horas.</p>
+        <div class="tip">🔒 Las contraseñas se almacenan de forma segura (SHA-256). La primera vez pedí la contraseña a tu supervisor.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note note-info">
+    <span>ℹ️</span>
+    <span>La sesión se mantiene activa aunque recargues el navegador. Para cerrar sesión usá el botón <strong>Cerrar sesión</strong> en el panel lateral inferior.</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ SUPERVISOR ═══════════════════════════ -->
+<section id="supervisor">
+  <div class="section-hero" style="--hero-color:var(--sup);--hero-dark:var(--sup-dark)">
+    <div class="role-badge">⭐ Rol</div>
+    <h1>Supervisor</h1>
+    <p>Acceso completo al sistema. Crea y asigna tareas, aprueba solicitudes, gestiona el equipo y configura el sistema.</p>
+  </div>
+
+  <div class="sec-title">Menú disponible</div>
+  <div class="menu-list">
+    <div class="menu-chip">▪ Panel general</div>
+    <div class="menu-chip">≡ Análisis / Lotes <span class="badge">N</span></div>
+    <div class="menu-chip">📊 Informes</div>
+    <div class="menu-chip">▲ Pendientes <span class="badge">!</span></div>
+    <div class="menu-chip">🔔 Solicitudes <span class="badge">N</span></div>
+    <div class="menu-chip">▦ Calendario</div>
+    <div class="menu-chip">👤 Gestión de personal</div>
+    <div class="menu-chip">📋 Actividades de gestión</div>
+    <div class="menu-chip">🕐 Historial notificaciones</div>
+    <div class="menu-chip">⚙ Administración</div>
+    <div class="menu-chip">✅ Aprobados</div>
+    <div class="menu-chip">📋 Audit Trail</div>
+  </div>
+
+  <div class="sec-title">Flujo de trabajo diario</div>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num" style="background:var(--sup)">1</div>
+      <div class="step-body">
+        <h4>Revisar el Panel general</h4>
+        <p>Al entrar, el panel muestra un resumen del estado del laboratorio: tareas vencidas, en progreso, pendientes de confirmación y análisis pendientes de revisión.</p>
+        <div class="tip">🔴 Los números en rojo en el menú lateral indican ítems que requieren atención urgente.</div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--sup)">2</div>
+      <div class="step-body">
+        <h4>Crear y asignar tareas — Análisis / Lotes</h4>
+        <p>Entrá a <strong>Análisis / Lotes</strong> → botón <strong>+ Nueva tarea</strong>. Completá producto, lote, analista asignado, horario estimado y fecha límite. Podés asignar múltiples analistas a un mismo lote.</p>
+        <div class="tip">📌 Al asignar un analista adicional a una tarea ya completada, el estado vuelve automáticamente a <em>En progreso</em>.</div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--sup)">3</div>
+      <div class="step-body">
+        <h4>Aprobar solicitudes — Solicitudes</h4>
+        <p>Revisá los pedidos pendientes de <strong>cambio de horario</strong> y <strong>horas extra</strong>. Aprobás o rechazás cada uno individualmente. El analista recibe notificación inmediata.</p>
+        <div class="tip">📅 Un analista puede tener simultáneamente un cambio de horario y horas extra pendientes para el mismo día.</div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--sup)">4</div>
+      <div class="step-body">
+        <h4>Gestionar vencidos — Pendientes</h4>
+        <p>La sección <strong>Pendientes</strong> muestra tareas vencidas y pendientes de confirmar. Podés replanificar, reasignar o confirmar cierre de cada análisis.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--sup)">5</div>
+      <div class="step-body">
+        <h4>Actividades de gestión recurrentes</h4>
+        <p>En <strong>Actividades de gestión</strong> definís tareas periódicas (Sueros, TOC, Revisión, etc.). Usá la pestaña <strong>Definidas</strong> para ver y editar el listado maestro. Las pestañas <strong>Semana / Mes</strong> muestran las ocurrencias generadas.</p>
+        <div class="tip">✎ Podés crear excepciones en ocurrencias individuales sin modificar la definición base.</div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--sup)">6</div>
+      <div class="step-body">
+        <h4>Administrar el equipo — Gestión de personal</h4>
+        <p>Gestioná ausencias, vacaciones y conflictos de horario del equipo. El sistema alerta automáticamente si hay conflictos.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="sec-title">Administración del sistema</div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-icon">👥</div>
+      <h3>Usuarios</h3>
+      <p>Creá, editá y eliminá usuarios. Asignales rol y contraseña inicial. Acceso desde <strong>Administración → Usuarios</strong>.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">⚙️</div>
+      <h3>Configuración del día</h3>
+      <p>Define horario laboral, días hábiles y calendario de la semana desde <strong>Administración → Configuración</strong>.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🔄</div>
+      <h3>Sincronización (Gist)</h3>
+      <p>Configurá el GitHub Gist para sincronizar datos entre múltiples equipos desde el botón <strong>Configurar sync</strong> en la barra superior.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">📋</div>
+      <h3>Audit Trail</h3>
+      <p>Registro completo de todas las acciones realizadas en el sistema: quién hizo qué y cuándo.</p>
+    </div>
+  </div>
+
+  <div class="note">
+    <span>⚠️</span>
+    <span>Al configurar Gist por primera vez, el sistema usa los datos del Gist como fuente principal. Asegurate de tener el estado correcto en el Gist antes de conectar.</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ REVISOR ═══════════════════════════ -->
+<section id="revisor">
+  <div class="section-hero" style="--hero-color:var(--rev);--hero-dark:var(--rev-dark)">
+    <div class="role-badge">🔍 Rol</div>
+    <h1>Revisor</h1>
+    <p>Valida los análisis completados por los analistas. Puede aprobar, observar y gestionar su propio cronograma.</p>
+  </div>
+
+  <div class="sec-title">Menú disponible</div>
+  <div class="menu-list">
+    <div class="menu-chip">▪ Mi día</div>
+    <div class="menu-chip">✓ Revisión <span class="badge">N</span></div>
+    <div class="menu-chip">≡ Mis análisis</div>
+    <div class="menu-chip">📋 Pendientes</div>
+    <div class="menu-chip">▦ Calendario equipo</div>
+    <div class="menu-chip">🕐 Mi cronograma</div>
+  </div>
+
+  <div class="sec-title">Flujo de trabajo</div>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num" style="background:var(--rev)">1</div>
+      <div class="step-body">
+        <h4>Ver tareas pendientes de revisión</h4>
+        <p>La sección <strong>Revisión</strong> muestra todos los análisis que los analistas marcaron como completados (<em>Listo para revisar</em>). El badge en el menú indica cuántos esperan tu atención.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--rev)">2</div>
+      <div class="step-body">
+        <h4>Revisar y decidir</h4>
+        <p>Hacé clic en una tarea para ver el detalle. Tenés dos opciones:</p>
+        <p style="margin-top:6px">
+          ✅ <strong>Aprobar</strong> — el análisis pasa a estado <em>Revisado</em> y queda archivado.<br>
+          🔴 <strong>Observar</strong> — indicás que hay algo a corregir. El analista debe replanificar y repetir la tarea observada.
+        </p>
+        <div class="tip">📝 Al observar podés agregar un comentario que verá el analista.</div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--rev)">3</div>
+      <div class="step-body">
+        <h4>Gestionar tu cronograma</h4>
+        <p>Desde <strong>Mi cronograma</strong> podés ver tu horario semanal/mensual y solicitar cambios de horario o horas extra al supervisor.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="note note-info">
+    <span>ℹ️</span>
+    <span>Si un analista solicita replanificación de una tarea que observaste, el producto vuelve automáticamente a estado <em>Parcial</em> hasta que complete la nueva actividad.</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ ANALISTA ═══════════════════════════ -->
+<section id="analista">
+  <div class="section-hero" style="--hero-color:var(--ana);--hero-dark:var(--ana-dark)">
+    <div class="role-badge">🧪 Rol</div>
+    <h1>Analista</h1>
+    <p>Ejecuta los análisis asignados, registra el trabajo realizado y gestiona su propio horario.</p>
+  </div>
+
+  <div class="sec-title">Menú disponible</div>
+  <div class="menu-list">
+    <div class="menu-chip">▪ Mi día</div>
+    <div class="menu-chip">≡ Mis análisis <span class="badge">!</span></div>
+    <div class="menu-chip">📋 Pendientes</div>
+    <div class="menu-chip">▦ Mi cronograma</div>
+  </div>
+
+  <div class="sec-title">Flujo de trabajo</div>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num" style="background:var(--ana)">1</div>
+      <div class="step-body">
+        <h4>Revisar el panel Mi día</h4>
+        <p>Al entrar verás un resumen con tus tareas de hoy, las observadas y el estado general de tus análisis asignados.</p>
+        <div class="tip">🔴 Las tareas en rojo están vencidas o próximas a vencer. Dales prioridad.</div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--ana)">2</div>
+      <div class="step-body">
+        <h4>Registrar trabajo — Mis análisis</h4>
+        <p>Entrá a <strong>Mis análisis</strong> y buscá la tarea asignada. Hacé clic para abrirla y registrá:</p>
+        <p style="margin-top:6px">
+          • <strong>Horas reales</strong> dedicadas<br>
+          • <strong>Sesiones</strong> si el análisis se divide en varios días<br>
+          • <strong>Notas</strong> sobre observaciones o incidencias
+        </p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--ana)">3</div>
+      <div class="step-body">
+        <h4>Marcar como completo</h4>
+        <p>Cuando terminaste el análisis, cambiá el estado a <strong>Listo para revisar</strong>. El revisor/supervisor recibirá la notificación.</p>
+        <div class="tip">📌 Si el lote tiene múltiples analistas asignados, el estado del producto queda en <em>Parcial</em> hasta que todos completen sus partes.</div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--ana)">4</div>
+      <div class="step-body">
+        <h4>Solicitar replanificación</h4>
+        <p>Si no podés completar el análisis en el tiempo previsto, usá el botón <strong>Solicitar replanificación</strong>. El supervisor recibe la solicitud y puede aprobarla o reasignar.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--ana)">5</div>
+      <div class="step-body">
+        <h4>Gestionar tu cronograma</h4>
+        <p>Desde <strong>Mi cronograma</strong> podés ver tu horario y hacer dos tipos de solicitudes <strong>independientes</strong> para el mismo día:</p>
+        <p style="margin-top:6px">
+          📅 <strong>Cambio de horario</strong> — modificar entrada/salida de un día específico.<br>
+          ⭐ <strong>Horas extra</strong> — solicitar trabajar fuera del horario habitual.
+        </p>
+        <div class="tip">⏳ Mientras la solicitud está pendiente, aparece un indicador en ese día del calendario. Una solicitud no bloquea la otra.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note note-warn">
+    <span>⚠️</span>
+    <span>Si el revisor observa tu análisis, debés solicitar replanificación para volver a realizarlo. El análisis vuelve al estado <em>Parcial</em> automáticamente.</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ MUESTREADOR ═══════════════════════════ -->
+<section id="muestreador">
+  <div class="section-hero" style="--hero-color:var(--mue);--hero-dark:var(--mue-dark)">
+    <div class="role-badge">💧 Rol</div>
+    <h1>Muestreador</h1>
+    <p>Gestiona el ingreso y registro de muestras. Ve su cronograma y puede registrar tareas libres.</p>
+  </div>
+
+  <div class="sec-title">Menú disponible</div>
+  <div class="menu-list">
+    <div class="menu-chip">▪ Mi día</div>
+    <div class="menu-chip">📦 A ingresar <span class="badge">N</span></div>
+    <div class="menu-chip">✏ Tareas libres</div>
+    <div class="menu-chip">🕐 Mi cronograma</div>
+  </div>
+
+  <div class="sec-title">Flujo de trabajo</div>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num" style="background:var(--mue)">1</div>
+      <div class="step-body">
+        <h4>Ver muestras a ingresar</h4>
+        <p>La sección <strong>A ingresar</strong> muestra los lotes asignados a vos pendientes de muestreo. El badge indica cuántos hay sin procesar.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--mue)">2</div>
+      <div class="step-body">
+        <h4>Registrar muestreo</h4>
+        <p>Hacé clic en la muestra correspondiente, completá los datos del muestreo y confirmá. El lote cambia al estado <em>Muestra OK</em> y queda disponible para el analista.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--mue)">3</div>
+      <div class="step-body">
+        <h4>Tareas libres y cronograma</h4>
+        <p>Registrá tareas libres adicionales y consultá tu cronograma semanal/mensual desde las secciones correspondientes.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ PERSONAL ═══════════════════════════ -->
+<section id="personal">
+  <div class="section-hero" style="--hero-color:var(--per);--hero-dark:var(--per-dark)">
+    <div class="role-badge">👤 Rol</div>
+    <h1>Personal</h1>
+    <p>Accede a su cronograma, actividades de gestión y tareas libres asignadas.</p>
+  </div>
+
+  <div class="sec-title">Menú disponible</div>
+  <div class="menu-list">
+    <div class="menu-chip">▪ Mi día</div>
+    <div class="menu-chip">✏ Tareas libres</div>
+    <div class="menu-chip">📋 Actividades de gestión</div>
+    <div class="menu-chip">🕐 Mi cronograma</div>
+  </div>
+
+  <div class="sec-title">Flujo de trabajo</div>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num" style="background:var(--per)">1</div>
+      <div class="step-body">
+        <h4>Consultar Mi día</h4>
+        <p>El panel inicial muestra las tareas y actividades asignadas para hoy.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--per)">2</div>
+      <div class="step-body">
+        <h4>Ver actividades de gestión</h4>
+        <p>Revisá las actividades recurrentes del laboratorio en las que participás (vistas de semana y mes).</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--per)">3</div>
+      <div class="step-body">
+        <h4>Registrar tareas libres</h4>
+        <p>Desde <strong>Tareas libres</strong> podés registrar trabajo adicional no vinculado a un análisis específico.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num" style="background:var(--per)">4</div>
+      <div class="step-body">
+        <h4>Consultar tu cronograma</h4>
+        <p>En <strong>Mi cronograma</strong> ves tu horario semanal y mensual. Podés solicitar cambio de horario o horas extra al supervisor.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ ESTADOS ═══════════════════════════ -->
+<section id="estados">
+  <div class="section-hero" style="--hero-color:#334155;--hero-dark:#1e293b">
+    <div class="role-badge">🏷 Referencia</div>
+    <h1>Estados de los análisis</h1>
+    <p>Cada tarea/análisis pasa por distintos estados a lo largo de su ciclo de vida.</p>
+  </div>
+
+  <table class="tbl-guide">
+    <thead>
+      <tr>
+        <th>Estado</th>
+        <th>Significado</th>
+        <th>Quién actúa</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="status pending">⏳ Pendiente</span></td>
+        <td>Tarea creada, sin iniciar</td>
+        <td>Analista asignado</td>
+      </tr>
+      <tr>
+        <td><span class="status progress">🔵 En progreso</span></td>
+        <td>El analista está trabajando en el análisis</td>
+        <td>Analista registra horas/sesiones</td>
+      </tr>
+      <tr>
+        <td><span class="status partial">🟣 Parcial</span></td>
+        <td>Lote con múltiples analistas: algunos completaron, otros no</td>
+        <td>Analistas pendientes continúan</td>
+      </tr>
+      <tr>
+        <td><span class="status done">🟢 Listo para revisar</span></td>
+        <td>Analista marcó como completo, espera revisión</td>
+        <td>Revisor / Supervisor</td>
+      </tr>
+      <tr>
+        <td><span class="status reviewed">✅ Revisado</span></td>
+        <td>El revisor aprobó el análisis</td>
+        <td>Supervisor puede confirmar cierre</td>
+      </tr>
+      <tr>
+        <td><span class="status observed">🔴 Observado</span></td>
+        <td>El revisor detectó un problema, requiere corrección</td>
+        <td>Analista solicita replanificación</td>
+      </tr>
+      <tr>
+        <td><span class="status late">⚠ Vencido</span></td>
+        <td>Superó la fecha límite sin completarse</td>
+        <td>Supervisor gestiona desde Pendientes</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="note note-info">
+    <span>ℹ️</span>
+    <span>El estado <strong>Parcial</strong> aparece automáticamente cuando hay múltiples asignaciones en un lote y al menos una está completa pero otra no. No es un estado que el usuario selecciona manualmente.</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ PROBLEMAS ═══════════════════════════ -->
+<section id="problemas">
+  <div class="section-hero" style="--hero-color:#dc2626;--hero-dark:#991b1b">
+    <div class="role-badge">❓ Ayuda</div>
+    <h1>Problemas frecuentes</h1>
+    <p>Soluciones a las situaciones más comunes. Hacé clic en cada problema para ver la solución.</p>
+  </div>
+
+  <div class="faq">
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">
+        <span class="faq-icon">🔄</span>
+        <span>Recargué el navegador y no veo mis datos</span>
+        <span class="faq-arrow">▼</span>
+      </div>
+      <div class="faq-a">
+        LabTrack guarda una copia local automática en el navegador (<em>localStorage</em>). Si los datos desaparecen al recargar, puede deberse a:
+        <ul style="margin:8px 0 0 16px">
+          <li><strong>Modo incógnito</strong>: el almacenamiento local no persiste en sesiones privadas.</li>
+          <li><strong>Caché borrado</strong>: si limpiaste los datos del navegador, se eliminó la copia local.</li>
+          <li><strong>Gist configurado</strong>: si usás sincronización, los datos se cargan desde el Gist al reconectar. Verificá que tenés conexión a internet.</li>
+        </ul>
+        <p style="margin-top:8px"><strong>Solución</strong>: Si tenés Gist configurado, recargá la página con conexión a internet. Los datos se restauran del servidor automáticamente.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">
+        <span class="faq-icon">🔑</span>
+        <span>No puedo ingresar — contraseña incorrecta</span>
+        <span class="faq-arrow">▼</span>
+      </div>
+      <div class="faq-a">
+        <ul style="margin:0 0 0 16px">
+          <li>Verificá que no tenés el <strong>Bloq Mayús</strong> activado.</li>
+          <li>La contraseña es <strong>sensible a mayúsculas y minúsculas</strong>.</li>
+          <li>Si olvidaste la contraseña, contactá al <strong>supervisor</strong> para que la restablezca desde <em>Administración → Usuarios</em>.</li>
+          <li>Si sos supervisor y no podés entrar, la contraseña por defecto inicial es la configurada en la instalación.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">
+        <span class="faq-icon">🧪</span>
+        <span>No veo las tareas que me asignaron</span>
+        <span class="faq-arrow">▼</span>
+      </div>
+      <div class="faq-a">
+        <ul style="margin:0 0 0 16px">
+          <li>Asegurate de estar en la sección correcta: <strong>Mis análisis</strong> (no Panel general).</li>
+          <li>Verificá con el supervisor que la tarea realmente está asignada a tu usuario.</li>
+          <li>Si la tarea aparece con estado <em>Parcial</em>, puede que otra parte esté asignada a un colega y la tuya sigue pendiente.</li>
+          <li>Probá recargar la página para sincronizar los últimos cambios.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">
+        <span class="faq-icon">📅</span>
+        <span>No puedo solicitar cambio de horario</span>
+        <span class="faq-arrow">▼</span>
+      </div>
+      <div class="faq-a">
+        <ul style="margin:0 0 0 16px">
+          <li>Solo podés tener <strong>una solicitud pendiente de cambio de horario</strong> por día. Si ya enviaste una y está pendiente, aparece el indicador ⏳ en ese día.</li>
+          <li>Una solicitud de <strong>horas extra</strong> y una de <strong>cambio de horario</strong> son independientes: podés tener ambas pendientes para el mismo día.</li>
+          <li>Si el supervisor rechazó tu solicitud anterior, podés enviar una nueva.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">
+        <span class="faq-icon">🔴</span>
+        <span>Mi análisis volvió a estado "Parcial" o "En progreso"</span>
+        <span class="faq-arrow">▼</span>
+      </div>
+      <div class="faq-a">
+        Esto es comportamiento esperado en dos situaciones:
+        <ul style="margin:8px 0 0 16px">
+          <li><strong>El supervisor asignó otro analista al lote</strong>: el estado vuelve a Parcial porque hay trabajo nuevo pendiente.</li>
+          <li><strong>El revisor observó el análisis</strong> y solicitaste replanificación: el estado vuelve a Parcial hasta que completes la nueva tarea generada.</li>
+        </ul>
+        <p style="margin-top:8px">Revisá la sección <strong>Mis análisis</strong> para ver si hay nuevas tareas asignadas.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">
+        <span class="faq-icon">🔄</span>
+        <span>Trabajamos varios en simultáneo — ¿los datos se sincronizan?</span>
+        <span class="faq-arrow">▼</span>
+      </div>
+      <div class="faq-a">
+        <p>Con <strong>Gist configurado</strong>, los datos se sincronizan automáticamente en la nube. Cada operación de guardado sube los cambios al servidor.</p>
+        <p style="margin-top:8px">El sistema aplica una estrategia de <em>merge</em>: si dos usuarios trabajan en paralelo, cuando uno guarda se fusionan los cambios de ambos por entidad (tarea, solicitud, etc.), evitando pérdida de datos.</p>
+        <p style="margin-top:8px"><strong>Sin Gist</strong>, los datos solo se guardan localmente y no se comparten entre equipos.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">
+        <span class="faq-icon">⚙️</span>
+        <span>La sincronización muestra error de conexión</span>
+        <span class="faq-arrow">▼</span>
+      </div>
+      <div class="faq-a">
+        <ul style="margin:0 0 0 16px">
+          <li>Verificá que tenés <strong>conexión a internet</strong>.</li>
+          <li>El token de GitHub Gist puede haber <strong>expirado</strong>. El supervisor debe generar uno nuevo en GitHub y actualizarlo en <em>Configurar sync</em>.</li>
+          <li>Mientras no hay conexión, el sistema funciona en <strong>modo offline</strong>: los cambios se guardan localmente y se sincronizan cuando vuelve la conexión.</li>
+          <li>Si el badge de sincronización está en rojo, los datos están en local pero aún no subieron al servidor.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">
+        <span class="faq-icon">🕐</span>
+        <span>La sesión se cerró sola</span>
+        <span class="faq-arrow">▼</span>
+      </div>
+      <div class="faq-a">
+        <p>Por seguridad, la sesión se cierra automáticamente tras <strong>30 minutos de inactividad</strong> o al cumplirse 12 horas desde el inicio de sesión.</p>
+        <p style="margin-top:8px">Ingresá nuevamente con tu usuario y contraseña. El sistema restaurará la vista donde estabas y todos los datos están intactos.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">
+        <span class="faq-icon">📊</span>
+        <span>No aparecen datos en los informes</span>
+        <span class="faq-arrow">▼</span>
+      </div>
+      <div class="faq-a">
+        <ul style="margin:0 0 0 16px">
+          <li>Verificá el <strong>rango de fechas</strong> seleccionado — por defecto muestra el mes actual.</li>
+          <li>Los informes solo reflejan análisis con al menos algún estado registrado (horas o sesiones).</li>
+          <li>Si el sistema se configuró recientemente, puede no haber suficiente historial para mostrar datos.</li>
+        </ul>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="note note-success" style="margin-top:20px">
+    <span>✅</span>
+    <span>Si el problema persiste o no está en esta lista, contactá al supervisor o al administrador del sistema. Toda la actividad queda registrada en el <strong>Audit Trail</strong> para diagnóstico.</span>
+  </div>
+</section>
+
+</main>
+
+<script>
+// ── Navigation
+function setActive(el) {
+  document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.remove('active'); });
+  el.classList.add('active');
+}
+
+// ── Scroll spy
+var sections = document.querySelectorAll('section[id]');
+var navItems = document.querySelectorAll('.nav-item[data-id]');
+var observer = new IntersectionObserver(function(entries){
+  entries.forEach(function(e){
+    if(e.isIntersecting){
+      var id = e.target.id;
+      navItems.forEach(function(n){
+        n.classList.remove('active');
+        if(n.dataset.id === id) n.classList.add('active');
+      });
+    }
+  });
+}, { rootMargin: '-30% 0px -60% 0px' });
+sections.forEach(function(s){ observer.observe(s); });
+
+// ── FAQ toggle
+function toggleFaq(btn) {
+  var item = btn.closest('.faq-item');
+  item.classList.toggle('open');
+}
+
+// ── Smooth scroll
+document.querySelectorAll('.nav-item[href^="#"]').forEach(function(a){
+  a.addEventListener('click', function(e){
+    e.preventDefault();
+    var target = document.querySelector(a.getAttribute('href'));
+    if(target) target.scrollIntoView({ behavior:'smooth', block:'start' });
+  });
+});
+</script>
+</body>
+</html>
