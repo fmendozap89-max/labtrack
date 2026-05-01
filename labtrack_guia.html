@@ -482,6 +482,84 @@ section{margin-bottom:64px;scroll-margin-top:20px}
   </div>
 </div>
 
+<!-- 3b. Alertas por atraso -->
+<div class="st">3b · Alertas por atraso — notificación automática al supervisor</div>
+<p style="font-size:12.5px;color:var(--txt2);margin-bottom:12px">Cuando una tarea asignada lleva <strong>3 días sin completarse</strong> desde la fecha programada, el supervisor recibe una alerta automática en el panel de notificaciones 🔔. La campana suma el contador y la sección <strong>🚨 Análisis atrasados</strong> aparece en primer lugar.</p>
+
+<div class="mock-wrap">
+  <div class="mock-label">Panel de notificaciones — alerta de atraso</div>
+  <div class="mock">
+    <div class="mock-bar"><span class="mock-bar-title">LabTrack — Notificaciones</span></div>
+    <div class="mock-inner-bg" style="padding:0">
+      <div style="padding:8px 12px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;gap:6px">
+        <span style="font-size:12px;font-weight:600">Notificaciones</span>
+        <span style="background:var(--red);color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;font-weight:700">3</span>
+        <div class="mb" style="margin-left:auto;font-size:10px">✕</div>
+      </div>
+      <!-- Sección de análisis atrasados -->
+      <div style="padding:10px 12px;background:#fef3c7;border-bottom:1px solid var(--bdr)">
+        <div style="font-size:11px;font-weight:700;color:#92400e;margin-bottom:8px">🚨 Análisis atrasados — acción requerida (2)</div>
+        <!-- Alerta 1 -->
+        <div style="background:var(--surf);border-radius:5px;padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--amber)">
+          <div style="font-size:11px;font-weight:600">Paracetamol 500mg — LOT-2024-045</div>
+          <div style="font-size:10px;color:var(--txt2);margin:3px 0;display:flex;align-items:center;gap:4px">
+            <div class="mav" style="background:var(--ana);width:14px;height:14px;font-size:7px">CS</div>
+            <b>Carla S.</b>
+          </div>
+          <div style="font-size:10px;color:#b45309;font-weight:600">⚠ 3 días de atraso · programado 28/04/2026</div>
+          <div style="display:flex;gap:4px;margin-top:7px;flex-wrap:wrap">
+            <div class="mb suc" style="font-size:9px;padding:3px 8px">✓ Completar por analista</div>
+            <div class="mb" style="font-size:9px;padding:3px 8px;background:var(--blue-bg);color:var(--blue)">↺ Replanificar</div>
+            <div class="mb dan" style="font-size:9px;padding:3px 8px">🗑 Eliminar</div>
+          </div>
+        </div>
+        <!-- Alerta 2 -->
+        <div style="background:var(--surf);border-radius:5px;padding:8px 10px;border-left:3px solid var(--amber)">
+          <div style="font-size:11px;font-weight:600">Ibuprofeno 400mg — LOT-2024-046</div>
+          <div style="font-size:10px;color:var(--txt2);margin:3px 0;display:flex;align-items:center;gap:4px">
+            <div class="mav" style="background:var(--ana);width:14px;height:14px;font-size:7px">VB</div>
+            <b>Valeria B.</b>
+          </div>
+          <div style="font-size:10px;color:#b45309;font-weight:600">⚠ 5 días de atraso · programado 26/04/2026</div>
+          <div style="display:flex;gap:4px;margin-top:7px;flex-wrap:wrap">
+            <div class="mb suc" style="font-size:9px;padding:3px 8px">✓ Completar por analista</div>
+            <div class="mb" style="font-size:9px;padding:3px 8px;background:var(--blue-bg);color:var(--blue)">↺ Replanificar</div>
+            <div class="mb dan" style="font-size:9px;padding:3px 8px">🗑 Eliminar</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="steps" style="margin-bottom:20px">
+  <div class="step">
+    <div class="sn" style="background:var(--green)">1</div>
+    <div class="sb">
+      <h4>✓ Completar por analista</h4>
+      <p>Abre un modal en dos pasos: primero ingresás las <strong>horas reales</strong> del análisis, luego se requiere tu <strong>firma electrónica</strong> (contraseña + motivo). La acción queda registrada en el Audit Trail indicando que fue completada por el supervisor en nombre del analista. El análisis pasa a estado <span class="pill p-done" style="font-size:10px">Listo p/revisar</span>.</p>
+      <div class="tip info">ℹ Usá esta opción cuando el análisis fue realizado pero el analista no pudo registrarlo (ausencia, problema técnico, etc.).</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="sn" style="background:var(--blue)">2</div>
+    <div class="sb">
+      <h4>↺ Replanificar</h4>
+      <p>Abre el modal de replanificación estándar: elegís la nueva fecha y el motivo. La asignación se actualiza y el analista puede continuar con la nueva fecha.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="sn" style="background:var(--red)">3</div>
+    <div class="sb">
+      <h4>🗑 Eliminar</h4>
+      <p>Elimina la tarea de análisis del sistema. Requiere firma electrónica. Solo disponible si el análisis no fue aprobado (ALCOA+). Usá esta opción si la tarea ya no tiene razón de ser (lote retirado, error de ingreso, etc.).</p>
+      <div class="tip warn">⚠ Esta acción es irreversible. El análisis desaparece del historial operativo. El Audit Trail mantiene el registro de la eliminación.</div>
+    </div>
+  </div>
+</div>
+
+<div class="note note-b"><span>ℹ️</span><span>La alerta persiste mientras la tarea no se complete, replanifique o elimine. El contador del 🔔 siempre refleja el estado real en tiempo real — no es necesario "marcar como leída".</span></div>
+
 <!-- 4. Solicitudes -->
 <div class="st">4 · Solicitudes — aprobar cambios de horario y horas extra</div>
 <p style="font-size:12.5px;color:var(--txt2);margin-bottom:12px">Los analistas pueden solicitar cambios de horario y horas extra de forma <strong>independiente</strong> para el mismo día. El supervisor aprueba o rechaza cada solicitud por separado.</p>
@@ -1221,6 +1299,7 @@ section{margin-bottom:64px;scroll-margin-top:20px}
     <div class="fq-a">
       <ul>
         <li>Solo podés tener <strong>una solicitud de cambio de horario pendiente por día</strong>. Si ya enviaste una, el botón muestra <em>⏳ Cambio pend.</em> y no se puede enviar otra hasta que el supervisor la resuelva.</li>
+        <li>Si tenés una <strong>tarea con alerta de atraso</strong> (borde naranja), usá los botones directamente en la banda de aviso: <em>✓ Completar ahora</em> o <em>📅 Replanificar</em>. No es necesario abrir la tarea.</li>
         <li>Sin embargo, podés enviar simultáneamente una solicitud de <strong>horas extra</strong> para el mismo día — son tipos independientes.</li>
         <li>Si el supervisor rechazó tu solicitud anterior, podés enviar una nueva.</li>
       </ul>
