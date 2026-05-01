@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -165,7 +165,10 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:13
 
   .pill.reviewed{background:#e4f2ea;color:#1e5c35}
   .pill.a-ingresar{background:#ede9fe;color:#5b21b6}
+  .pill.muestra-ok{background:#d1fae5;color:#065f46}
   .arrival-fields{background:var(--bg);border:1px solid #d8b4fe;border-radius:var(--radius);padding:10px 12px;margin-top:6px}
+  .sampler-card{background:var(--surface);border:1px solid #6ee7b7;border-radius:var(--radius);padding:12px 14px;margin-bottom:8px}
+  .sampling-info{background:#f0fdf4;border:1px solid #6ee7b7;border-radius:var(--radius);padding:8px 12px;margin-top:6px;font-size:11px}
 
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (max-width:600px){
@@ -216,9 +219,11 @@ let nextNotifId=1;
 let nextAbsId=1;
 let nextMgmtId=1;
 let currentUser=null,currentView='dashboard';
+let showSamplingModal=false,samplingTaskId=null;
 let showModal=false,editingTask=null;
 let selectedAnalysts=[],analystDates={};
 let showNotifPanel=false;
+let notifTab='active'; // 'active' | 'history'
 let mgmtView='list';
 let informeFilterStatus='';
 let auditTrail=[];
@@ -234,7 +239,7 @@ let modalTab='paste',pastePreview=[];
 let replanNotifs=[];
 let showReplanModal=false,replanTaskId=null;
 let absences={};
-let workdayConfig={weekdays:{1:true,2:true,3:true,4:true,5:true,0:false,6:false},extra:[],off:[]};
+let workdayConfig={weekdays:{1:true,2:true,3:true,4:true,5:true,0:false,6:false},extra:[],off:[],guideUrl:''};
 let mgmtTasks=[];
 let editingMgmt=null;
 let showMgmtModal=false;
@@ -245,6 +250,8 @@ let showMgmtOccModal=false;
 let mgmtOccTaskId=null;
 let mgmtOccDate=null;
 let calRoleFilter='all';
+let rrhhRoleFilter='all';
+let mgmtRoleFilter='all';
 let calMonthAnalyst=null;
 let mgmtMonthAnalyst=null;
 let weekOffset=0;
@@ -287,15 +294,21 @@ let absenceTypesDef={
 };
 
 // Derived (rebuilt after any USERS change)
-let ANALYSTS=[];
+let ANALYSTS=[];   // solo analistas
+let SAMPLERS=[];   // solo muestreadores
+let CAL_USERS=[];  // analistas + revisores + muestreadores + personal
 let uMap={};
 function isReviewerRole(){return currentUser&&currentUser.role==='reviewer';}
 function isSupRole(){return currentUser&&currentUser.role==='supervisor';}
 function isStaffRole(){return currentUser&&currentUser.role==='staff';}
-function isScheduleUser(){return currentUser&&(currentUser.role==='analyst'||currentUser.role==='staff'||currentUser.role==='reviewer');}
+function isSamplerRole(){return currentUser&&currentUser.role==='sampler';}
+function isScheduleUser(){return currentUser&&(['analyst','staff','reviewer','sampler'].includes(currentUser.role));}
 
 function rebuildDerived(){
-  ANALYSTS=USERS.filter(u=>u.role==='analyst'||u.role==='staff').sort((a,b)=>a.name.localeCompare(b.name,'es'));
+  ANALYSTS=USERS.filter(u=>u.role==='analyst').sort((a,b)=>a.name.localeCompare(b.name,'es'));
+  SAMPLERS=USERS.filter(u=>u.role==='sampler').sort((a,b)=>a.name.localeCompare(b.name,'es'));
+  // Todos los usuarios con agenda (calendario, horarios, ausencias)
+  CAL_USERS=USERS.filter(u=>['analyst','reviewer','sampler','staff'].includes(u.role)).sort((a,b)=>a.name.localeCompare(b.name,'es'));
   uMap={};
   USERS.forEach((u,i)=>{
     u.av=avClass(i);
@@ -338,6 +351,7 @@ function applySnapshot(json){
       workdayConfig.weekdays=d.workdayConfig.weekdays||workdayConfig.weekdays;
       workdayConfig.extra=d.workdayConfig.extra||[];
       workdayConfig.off=d.workdayConfig.off||[];
+      workdayConfig.guideUrl=d.workdayConfig.guideUrl||'';
     }
     USERS.forEach(u=>{if(!passwords[u.id])passwords[u.id]='labtrack123';});
     auditTrail=Array.isArray(d.auditTrail)?d.auditTrail:[];
@@ -351,6 +365,8 @@ function applySnapshot(json){
       if(t.status==='pending'&&(t.assignments||[]).filter(function(a){return !a._removed;}).length>0){
         t.status='scheduled';
       }
+      // Ensure samplerAssignments array exists
+      if(!t.samplerAssignments)t.samplerAssignments=[];
     });
     rebuildDerived();
     return true;
@@ -520,6 +536,15 @@ async function saveNow() {
 }
 
 function saveLS(hint) {
+  // Persistencia local permanente: sobrevive refresh aunque el Gist falle
+  // auditTrail se excluye para no superar la cuota de localStorage (~5 MB)
+  // _gistId identifica para qué Gist fue guardado — previene mezcla con datos de otro Gist
+  try {
+    const _snap = JSON.parse(getSnapshot());
+    _snap.auditTrail = [];
+    _snap._gistId = GIST_CONFIG.gistId || '';
+    localStorage.setItem('lt9-state', JSON.stringify(_snap));
+  } catch(e) {}
   if (hint) _pendingSaves[hint] = true;
   else ['workdayConfig','analystSchedules','mgmtCategories','users','passwords','absenceTypesDef','counters'].forEach(k=>{ _pendingSaves[k]=true; });
   if (_saveDebounce) clearTimeout(_saveDebounce);
@@ -741,6 +766,7 @@ function firstViewForRole(user){
     case 'reviewer':   return 'tasks';
     case 'analyst':    return 'dashboard';
     case 'staff':      return 'dashboard';
+    case 'sampler':    return 'dashboard';
     default:           return 'dashboard';
   }
 }
@@ -776,9 +802,28 @@ function _restoreSession(){
   }catch(e){}
 }
 
+// requireGistId: si se pasa, solo usa lt9-state si coincide con ese gistId.
+// Sin requireGistId (modo offline): usa cualquier lt9-state disponible.
+function _loadLocalState(requireGistId) {
+  try {
+    const ls = localStorage.getItem('lt9-state');
+    if (ls) {
+      const lsState = JSON.parse(ls);
+      const gistMatch = !requireGistId || (lsState._gistId || '') === requireGistId;
+      if (gistMatch && applySnapshot(ls)) return true;
+      if (!gistMatch) {
+        // lt9-state es de otro Gist o pre-configuración — descartarlo
+        try { localStorage.removeItem('lt9-state'); } catch(_) {}
+      }
+    }
+  } catch(e) {}
+  _initDefaultState();
+  return false;
+}
+
 async function gistBoot() {
   if (!GIST_CONFIG.configured) {
-    _initDefaultState();
+    _loadLocalState();
     _restoreSession();
     gistStatus = 'offline'; renderSpBadge();
     render();
@@ -799,12 +844,29 @@ async function gistBoot() {
     if (stateContent) {
       const remoteState = JSON.parse(stateContent);
       _lastRemoteTs = remoteState.savedAt || 0;
-      // Si tiene _operationalBase, cargar ese estado como base
-      if (applySnapshot(stateContent)) {
-        // OK
-      }
+      applySnapshot(stateContent);
+      // Si lt9-state del mismo Gist tiene cambios más recientes: mergear para no perder
+      // cambios locales no enviados antes del refresh. Si es de otro Gist → ignorar.
+      try {
+        const ls = localStorage.getItem('lt9-state');
+        if (ls) {
+          const lsState = JSON.parse(ls);
+          const sameGist = (lsState._gistId || '') === GIST_CONFIG.gistId;
+          if (!sameGist) {
+            localStorage.removeItem('lt9-state'); // basura de otra configuración
+          } else if ((lsState.savedAt||0) > _lastRemoteTs) {
+            const prevUser = currentUser;
+            const merged = mergeSnapshot(lsState, remoteState);
+            merged.savedAt = Date.now();
+            applySnapshot(JSON.stringify(merged));
+            currentUser = prevUser;
+            saveNow().catch(function(e){console.error('saveNow ls-restore:',e);});
+          }
+        }
+      } catch(e) {}
     } else {
-      _initDefaultState();
+      // Gist vacío (primera vez): usar lt9-state solo si era de este mismo Gist
+      _loadLocalState(GIST_CONFIG.gistId);
     }
     // Cargar audit trail — ordenar más reciente primero
     const auditContent = gist.files[GIST_FILE_AUDIT]?.content;
@@ -824,16 +886,17 @@ async function gistBoot() {
     _hideSpinner();
     console.error('gistBoot:', e);
     gistStatus = 'error'; renderSpBadge();
+    // Intentar recuperar desde localStorage antes de mostrar error o resetear
+    // Solo usar lt9-state del mismo Gist — evita cargar datos de otra configuración
+    const hadLocalState = _loadLocalState(GIST_CONFIG.gistId);
     const msg = e.message||'';
     if (msg.includes('401')) {
       alert('Token inválido o expirado.\nGenere un nuevo token en GitHub Settings → Developer settings.');
     } else if (msg.includes('404')) {
       alert('Gist no encontrado. Si tiene el Gist ID incorrecto, bórrelo del campo y reconecte para crear uno nuevo.');
-    } else {
+    } else if (!hadLocalState) {
       alert('Error al conectar:\n' + msg + '\n\nLa app funciona en modo local sin sincronización.');
     }
-    _initDefaultState();
-    // Restore session after state load
     _restoreSession();
     render();
   }
@@ -970,15 +1033,29 @@ const INIT_TASKS=[
 
 // ── HELPERS ──
 function getU(id){return uMap[id]||{name:id,av:'av1',avInit:'?',chip:'c1'};}
-function statusLabel(s){return{'a-ingresar':'A ingresar',pending:'Ingresado',scheduled:'Programado',progress:'En análisis','pending-confirm':'Completado (conf. pendiente)',done:'Completado p/ revisar',reviewed:'Revisado',approved:'Aprobado',late:'Vencido',observed:'Observado','partial':'Completado parcial'}[s]||s;}
+function statusLabel(s){return{'a-ingresar':'A ingresar','muestra-ok':'Muestra OK',pending:'Ingresado',scheduled:'Programado',progress:'En análisis','pending-confirm':'Completado (conf. pendiente)',done:'Completado p/ revisar',reviewed:'Revisado',approved:'Aprobado',late:'Vencido',observed:'Observado','partial':'Completado parcial'}[s]||s;}
 // Returns display status accounting for partial completion
 function taskDisplayStatus(t){
-  if(t.status!=='progress'&&t.status!=='pending-confirm') return t.status;
+  var s=t.status;
+  if(s!=='progress'&&s!=='pending-confirm'&&s!=='done') return s;
   var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
-  if(assigns.length<=1) return t.status;
+  if(assigns.length<=1) return s;
   var doneCount=assigns.filter(function(a){return (a.realHours>0)||(a.sessions&&a.sessions.length>0);}).length;
   if(doneCount>0&&doneCount<assigns.length) return 'partial';
-  return t.status;
+  return s;
+}
+// Revierte el estado del producto cuando se agrega/replanifica una actividad de análisis.
+// fromReplan=true: fuerza reversión en tareas 'observed' aunque ya tengan horas (el analista debe rehacer el trabajo).
+function _recalcStatusAfterAssignment(t, fromReplan){
+  var active=(t.assignments||[]).filter(function(a){return !a._removed;});
+  var hasPending=active.some(function(a){
+    return !(a.realHours>0||(a.sessions&&a.sessions.length>0));
+  });
+  if(!hasPending&&!(fromReplan&&t.status==='observed')) return;
+  if(t.status==='done'||t.status==='reviewed'||t.status==='observed'){
+    t.status='progress'; t._ts=Date.now();
+  }
+  // pending-confirm: se mantiene; taskDisplayStatus ya muestra 'partial' automáticamente
 }
 function prioClass(p){return{Normal:'nor',Alta:'hi',Urgente:'urg'}[p]||'nor';}
 function getAssignees(t){return[...new Set((t.assignments||[]).map(a=>a.analyst))];}
@@ -1238,7 +1315,7 @@ function renderSchedModal(){
   const hasOverride=isDay&&analystSchedules[schedModalAnalyst]?.overrides?.[schedModalDate];
   const s=existing||def;
   const typeOpts=SCHED_TYPES.map(t=>`<option value="${t.id}"${(s.type||'change')===t.id?' selected':''}>${t.label}</option>`).join('');
-  const pendingReq=isDay?scheduleRequests.find(r=>r.analystId===schedModalAnalyst&&r.dateStr===schedModalDate&&r.status==='pending'):null;
+  const pendingReq=isDay?scheduleRequests.find(r=>r.analystId===schedModalAnalyst&&r.dateStr===schedModalDate&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime'):null;
   return`<div class="modal-overlay" onclick="if(event.target===this){showSchedModal=false;render()}"><div class="modal" style="width:420px">
     <h3>${isSup?(isDay?'Horario del día':'Editar horario predeterminado'):(isDay?'Solicitar cambio de horario':'Solicitar cambio de horario predeterminado')}</h3>
     <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg);border-radius:var(--radius);margin-bottom:14px">
@@ -1312,6 +1389,7 @@ function saveSchedModal(){
       }
     }
     showSchedModal=false;saveLS();render();
+    saveNow().catch(function(e){console.error('saveNow schedSup:',e);});
   } else {
     if(!note&&!isSup){alert('Indicá el motivo del cambio.');return;}
     scheduleRequests.push({
@@ -1320,22 +1398,27 @@ function saveSchedModal(){
       proposed,reason:note,ts:Date.now(),requestedBy:currentUser.id
     });
     showSchedModal=false;saveLS();render();
+    saveNow().catch(function(e){console.error('saveNow schedReq:',e);});
     // No alert needed — bell will show it
   }
 }
 function renderSchedulesTab(){
   try{
     const isSup=currentUser.role==='supervisor';
-    const rows=isSup
-      ?USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer'||u.role==='staff'||u.role==='staff';}).sort(function(a,b){return a.name.localeCompare(b.name,'es');})
+    const allRows=isSup
+      ?USERS.filter(function(u){return['analyst','reviewer','staff','sampler'].includes(u.role);}).sort(function(a,b){return a.name.localeCompare(b.name,'es');})
       :[USERS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
-    if(!rows||rows.length===0)return'<div class="empty">No hay analistas configurados.</div>';
+    const rows=isSup&&rrhhRoleFilter!=='all'?allRows.filter(function(u){return u.role===rrhhRoleFilter;}):allRows;
+    if(!allRows||allRows.length===0)return'<div class="empty">No hay analistas configurados.</div>';
     const pendTotal=scheduleRequests.filter(r=>r.status==='pending').length;
     var _wA=(!schedView||schedView==='week');
     var _mA=(schedView==='month');
-    var viewToggle='<div style="display:flex;gap:4px;background:var(--bg2);border-radius:var(--radius);padding:3px;width:fit-content;margin-bottom:14px">'
-      +'<button class="btn sm" onclick="schedView=\'week\';render()" style="'+(_wA?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">'+'Semana'+'</button>'
-      +'<button class="btn sm" onclick="schedView=\'month\';render()" style="'+(_mA?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">'+'Mes'+'</button>'
+    var viewToggle='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">'
+      +'<div style="display:flex;gap:4px;background:var(--bg2);border-radius:var(--radius);padding:3px">'
+      +'<button class="btn sm" onclick="schedView=\'week\';render()" style="'+(_wA?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">Semana</button>'
+      +'<button class="btn sm" onclick="schedView=\'month\';render()" style="'+(_mA?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">Mes</button>'
+      +'</div>'
+      +(isSup?renderRrhhRoleFilter().replace('margin-bottom:8px','margin-bottom:0'):'')
       +'</div>';
     var _sv=schedView||'week';
     return viewToggle+(_sv==='week'?renderSchedulesWeek(isSup,rows,pendTotal):renderSchedulesMonth(isSup,rows));
@@ -1837,10 +1920,10 @@ function renderAbsencesTab(){
   </div>
   <div style="display:grid;grid-template-columns:220px 1fr;gap:14px;align-items:start">
     <div>
-      <div class="sec">Analistas</div>
+      <div class="sec">Personal</div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">
-        <div class="trow" style="grid-template-columns:1fr;cursor:pointer;${rrhhAnalyst===null?'background:var(--blue-bg);color:var(--blue-text);font-weight:500':''}" onclick="rrhhAnalyst=null;absFormOpen=false;render()">Todos los analistas</div>
-        ${[...ANALYSTS].sort((a,b)=>a.name.localeCompare(b.name,'es')).map(a=>{
+        <div class="trow" style="grid-template-columns:1fr;cursor:pointer;${rrhhAnalyst===null?'background:var(--blue-bg);color:var(--blue-text);font-weight:500':''}" onclick="rrhhAnalyst=null;absFormOpen=false;render()">Todos</div>
+        ${[...CAL_USERS].sort((a,b)=>a.name.localeCompare(b.name,'es')).map(a=>{
           const absCount=getAnalystAbsences(a.id).length;
           return`<div class="trow" style="grid-template-columns:1fr;cursor:pointer;${rrhhAnalyst===a.id?'background:var(--blue-bg);color:var(--blue-text);font-weight:500':''}" onclick="rrhhAnalyst='${a.id}';absFormOpen=false;render()">
             <div style="display:flex;align-items:center;gap:7px">
@@ -2074,23 +2157,24 @@ function getNotifBadge(){
   var isSup=currentUser.role==='supervisor';
   var isRev=currentUser.role==='reviewer';
   var uid=currentUser.id;
+  function unread(n){return !(n.readBy||[]).includes(uid);}
   // Observations: solo las dirigidas al usuario actual (analysts)
   var obsC=replanNotifs.filter(function(n){
-    return n.type==='observation'&&n.status==='pending'
+    return n.type==='observation'&&n.status==='pending'&&unread(n)
       &&(n.forUserId===uid||n.analystId===uid);
   }).length;
   // Replan requests
   var replanC=replanNotifs.filter(function(n){
-    return n.type==='replan'&&n.status==='pending'&&(isSup||(n.analystId===uid));
+    return n.type==='replan'&&n.status==='pending'&&unread(n)&&(isSup||(n.analystId===uid));
   }).length;
-  // Schedule requests
+  // Schedule requests (usan flags separados, sin cambios)
   var schedPC=isSup
     ?scheduleRequests.filter(function(r){return r.status==='pending'&&!r._seenBySup;}).length
-    :scheduleRequests.filter(function(r){return r.analystId===uid&&r.status==='pending';}).length;
+    :0;
   var schedAC=!isSup
     ?scheduleRequests.filter(function(r){return r.analystId===uid&&r.status==='approved'&&!r._seenByAnalyst;}).length
     :0;
-  // Confirm pending (supervisor) — computed from tasks same way as panel
+  // Confirm pending (supervisor) — computed from tasks, no readBy
   var confC=0;
   if(isSup){
     tasks.forEach(function(t){
@@ -2102,25 +2186,37 @@ function getNotifBadge(){
   }
   // Resubmit (supervisor + reviewer)
   var resubC=(isSup||isRev)
-    ?replanNotifs.filter(function(n){return n.type==='resubmit'&&n.forUserId===uid&&n.status==='pending';}).length
+    ?replanNotifs.filter(function(n){return n.type==='resubmit'&&n.forUserId===uid&&n.status==='pending'&&unread(n);}).length
     :0;
   // Free task notifications
   var ftC=0;
   if(isSup){
-    ftC=replanNotifs.filter(function(n){return n.type==='free_task_completed'&&n.forUserId===uid&&n.status==='pending';}).length;
+    // Direct scan — does not depend on notification delivery
+    ftC=freeTasks.filter(function(ft){return ft.status==='pending-confirm';}).length;
   } else {
     ftC=replanNotifs.filter(function(n){
       var ft=freeTasks.find(function(x){return x.id===n.freeTaskId;});
       return n.type==='free_task_assigned'&&n.forUserId===uid
-        &&(n.status==='pending'||n.status==='read')
+        &&n.status!=='resolved'&&unread(n)
         &&ft&&(ft.status==='pending'||ft.status==='pending-confirm');
     }).length;
   }
   // Planification requests (supervisor)
   var planC=isSup
-    ?replanNotifs.filter(function(n){return n.type==='planification_request'&&n.status==='pending';}).length
+    ?replanNotifs.filter(function(n){return n.type==='planification_request'&&n.status==='pending'&&unread(n);}).length
     :0;
-  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC;
+  // Sampling done notifications (supervisor)
+  var samplingC=isSup
+    ?replanNotifs.filter(function(n){return n.type==='sampling_done'&&n.status==='pending'&&unread(n);}).length
+    :0;
+  // Response notifications (single-user, resolved on read — status==='pending' is correct)
+  var responseC=replanNotifs.filter(function(n){
+    if(n.status!=='pending'||n.forUserId!==uid) return false;
+    return ['sampling_rejected','replan_rejected','planification_accepted',
+            'planification_rejected','hours_rejected','free_task_declined',
+            'free_task_rejected','schedule_rejected'].indexOf(n.type)>=0;
+  }).length;
+  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC+samplingC+responseC;
 }
 function renderNotifBtn(){
   var totalAlerts=getNotifBadge();
@@ -2227,18 +2323,19 @@ function renderFreeTasksTable(isSup){
   list.forEach(function(ft){
     var u=getU(ft.analystId);
     var approver=ft.confirmedBy?getU(ft.confirmedBy):null;
-    var stColor=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'?'var(--red)':'var(--amber)';
-    var stLabel=ft.status==='confirmed'?'Confirmada':ft.status==='rejected'?'Rechazada':'Pend. confirmación';
+    var stColor=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'?'var(--red)':ft.status==='declined'?'var(--red)':'var(--amber)';
+    var stLabel=ft.status==='confirmed'?'Confirmada':ft.status==='rejected'?'Rechazada':ft.status==='declined'?'Declinada':'Pend. confirmación';
     html+='<div class="trow" style="'+COLS+'">'
       +'<div style="font-family:var(--mono);font-size:11px">'+fmtDF(ft.date)+'</div>'
       +'<div style="display:flex;align-items:center;gap:5px"><div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px">'+escH(u.avInit)+'</div><span style="font-size:11px">'+escH(u.name)+'</span></div>'
       +'<div style="font-size:11px;font-weight:500">'+escH(ft.description)+'</div>'
-      +'<div style="font-family:var(--mono);font-size:11px;font-weight:700">'+ft.hours+'h</div>'
+      +'<div style="font-family:var(--mono);font-size:11px;font-weight:700">'+(ft.realHours||ft.hours||0)+'h</div>'
       +'<div style="font-size:11px;color:var(--text2)">'+(ft.notes?escH(ft.notes):'<span style="color:var(--text3)">—</span>')+'</div>'
       +'<div>'
         +(approver?'<span style="font-size:11px">'+escH(approver.name)+'</span>':'')
         +'<span style="display:block;font-size:10px;font-weight:700;color:'+stColor+'">'+stLabel+'</span>'
         +(isSup&&ft.status==='pending-confirm'?'<button class="btn sm suc" onclick="confirmFreeTask('+ft.id+')" style="margin-top:3px;font-size:10px">✓ Confirmar</button>':'')
+        +(isSup&&ft.status==='declined'?'<button class="btn sm pri" onclick="duplicateFreeTask('+ft.id+')" style="margin-top:3px;font-size:10px">↩ Duplicar y reasignar</button>':'')
         +(isSup?'<button class="btn sm dan" onclick="deleteFreeTask('+ft.id+')" style="margin-top:3px;font-size:10px">🗑 Eliminar</button>':'')
       +'</div>'
       +'</div>';
@@ -2258,13 +2355,15 @@ function renderMgmtModule(){
       <button class="btn sm" onclick="mgmtView='list';render()" style="${mgmtView==='list'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Lista</button>
       <button class="btn sm" onclick="mgmtView='calendar';render()" style="${mgmtView==='calendar'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Semana</button>
       <button class="btn sm" onclick="mgmtView='month';render()" style="${mgmtView==='month'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Mes</button>
+      ${isSup?`<button class="btn sm" onclick="mgmtView='defined';render()" style="${mgmtView==='defined'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Definidas</button>`:''}
       <button class="btn sm" onclick="mgmtView='freetasks';render()" style="${mgmtView==='freetasks'?'background:var(--surface);box-shadow:var(--shadow-sm);font-weight:600':'border:none;background:transparent'}">📋 Actividades libres</button>
-            ${isSup?`<button class="btn sm" onclick="mgmtView='categories';render()" style="${mgmtView==='categories'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">⚙ Categorías</button>`:''}
+      ${isSup?`<button class="btn sm" onclick="mgmtView='categories';render()" style="${mgmtView==='categories'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">⚙ Categorías</button>`:''}
     </div>
     ${(mgmtView==='calendar'||mgmtView==='month')?'<button class="btn sm" onclick="printCalendar()">🖨 Imprimir / PDF</button>':''}
-    ${isSup&&mgmtView!=='categories'?`<button class="btn pri sm" style="margin-left:auto" onclick="openMgmtModal(null)">+ Nueva actividad</button>`:''}
+    ${isSup&&(mgmtView==='defined'||mgmtView==='list'||mgmtView==='calendar'||mgmtView==='month')?`<button class="btn pri sm" style="margin-left:auto" onclick="openMgmtModal(null)">+ Nueva actividad</button>`:''}
   </div>
-  ${mgmtView==='freetasks'?renderFreeTasksTable(isSup):mgmtView==='list'?renderMgmtList(isSup,weekOccs,myOccs):mgmtView==='month'?renderMgmtMonth(isSup):mgmtView==='categories'?renderMgmtCategories():renderMgmtWeek(isSup,wd,weekOccs)}`;
+  ${(isSup&&(mgmtView==='calendar'||mgmtView==='month'))?renderMgmtRoleFilter():''}
+  ${mgmtView==='freetasks'?renderFreeTasksTable(isSup):mgmtView==='defined'?renderMgmtDefined(isSup):mgmtView==='list'?renderMgmtList(isSup,weekOccs,myOccs):mgmtView==='month'?renderMgmtMonth(isSup):mgmtView==='categories'?renderMgmtCategories():renderMgmtWeek(isSup,wd,weekOccs)}`;
 }
 
 function renderMgmtList(isSup, weekOccs, myOccs){
@@ -2335,33 +2434,37 @@ function renderMgmtList(isSup, weekOccs, myOccs){
       }).join('')}
       ${periodOccs.length>50?`<div style="padding:8px 14px;font-size:12px;color:var(--text3);text-align:center">Mostrando 50 de ${periodOccs.length} — ajustá el período para ver más</div>`:''}
     </div>`}
-  ${isSup?`<div class="sec" style="margin-top:4px">Todas las actividades definidas (${mgmtTasks.length})</div>
-  <div class="tbl">
-    ${mgmtTasks.length===0?'<div class="empty">Sin actividades de gestión registradas</div>':
-      '<div class="thead" style="grid-template-columns:1.2fr .9fr .8fr .7fr .65fr .4fr"><div>Categoría</div><div>Inicio</div><div>Analista(s)</div><div>Frecuencia</div><div>Horario</div><div></div></div>'+
+  `;
+}
+
+function renderMgmtDefined(isSup){
+  if(!isSup) return '';
+  return `<div class="tbl">
+    ${mgmtTasks.length===0?'<div class="empty">Sin actividades de gestión definidas</div>':
+      '<div class="thead" style="grid-template-columns:1.2fr 1.1fr .8fr .7fr .65fr .65fr .4fr"><div>Categoría</div><div>Período</div><div>Analista(s)</div><div>Frecuencia</div><div>Horario</div><div>Excepciones</div><div></div></div>'+
       mgmtTasks.map(mt=>{
         const cat=getMgmtCat(mt.category);
         const analAvs=(mt.analysts||[]).map(id=>{const u=getU(id);return`<div class="av ${u.av}" title="${escH(u.name)}">${escH(u.avInit)}</div>`;}).join('');
+        const analNames=(mt.analysts||[]).map(id=>getU(id).name.split(' ')[0]).join(', ')||'—';
         const freq=MGMT_FREQS.find(f=>f.id===mt.frequency)?.label||'—';
         const excCount=(mt.exceptions||[]).length;
-        return`<div class="trow" style="grid-template-columns:1.2fr .9fr .8fr .7fr .65fr .4fr" onclick="openMgmtModal(${mt.id})">
-          <div style="display:flex;align-items:center;gap:7px">
-            <span style="font-size:11px;padding:2px 8px;border-radius:10px;font-weight:600;background:${cat.color};color:${cat.text}">${escH(cat.label)}</span>
-            ${excCount?`<span style="font-size:9px;color:var(--text3)">${excCount} excep.</span>`:''}
-          </div>
+        return`<div class="trow" style="grid-template-columns:1.2fr 1.1fr .8fr .7fr .65fr .65fr .4fr" onclick="openMgmtModal(${mt.id})" title="Clic para editar">
+          <div><span style="font-size:11px;padding:2px 8px;border-radius:10px;font-weight:600;background:${cat.color};color:${cat.text}">${escH(cat.label)}</span></div>
           <div style="font-size:12px;font-family:var(--mono)">${mt.startDate||'—'}${mt.endDate?' → '+mt.endDate:''}</div>
-          <div><div class="av-stack">${analAvs}</div></div>
+          <div><div class="av-stack">${analAvs}</div><div style="font-size:10px;color:var(--text2)">${escH(analNames)}</div></div>
           <div style="font-size:11px;color:var(--text2)">${escH(freq)}</div>
           <div style="font-size:12px">${mt.dedicacion?mt.dedicacion+'h':'—'}</div>
-          <div><button class="btn dan sm" onclick="event.stopPropagation();deleteMgmt(${mt.id})">✕</button></div>
+          <div style="font-size:11px;color:var(--text3)">${excCount?excCount+' excep.':'—'}</div>
+          <div><button class="btn dan sm" onclick="event.stopPropagation();deleteMgmt(${mt.id})" title="Eliminar">✕</button></div>
         </div>`;
       }).join('')}
-  </div>`:''}`;
+  </div>`;
 }
 function renderMgmtWeek(isSup, wd, weekOccs){
   const todayStr=today();
   const dayLbls=wd.map(function(d){return weekDayLabel(d);});
-  const rows=isSup?ANALYSTS:[ANALYSTS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
+  const _allMgmtRows=isSup?(mgmtRoleFilter==='all'?CAL_USERS:CAL_USERS.filter(function(u){return u.role===mgmtRoleFilter;})):[CAL_USERS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
+  const rows=_allMgmtRows;
   const cols='grid-template-columns:88px repeat(7,minmax(0,1fr))';
   let html='<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'
     +'<button class="btn" onclick="weekOffset--;render()">&#8592; Anterior</button>'
@@ -2370,7 +2473,7 @@ function renderMgmtWeek(isSup, wd, weekOccs){
     +'<button class="btn sm" onclick="weekOffset=0;render()">Hoy</button>'
     +'</div>';
   html+='<div style="overflow-x:auto"><div class="week-grid" style="min-width:700px">';
-  html+='<div class="whead" style="'+cols+'"><div>Analista</div>';
+  html+='<div class="whead" style="'+cols+'"><div>Usuario</div>';
   dayLbls.forEach(function(d,i){
     html+='<div style="'+(wd[i]===todayStr?'color:var(--blue);font-weight:700;':'')+'">'+d+'</div>';
   });
@@ -2418,7 +2521,7 @@ function renderMgmtMonth(isSup){
   const fromDate=year+'-'+pad(month+1)+'-01';
   const toDate=year+'-'+pad(month+1)+'-'+pad(daysInMonth);
   const monthOccs=mgmtTasks.flatMap(function(mt){return expandMgmt(mt,fromDate,toDate);});
-  const allAnalysts=isSup?ANALYSTS:[ANALYSTS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
+  const allAnalysts=isSup?(mgmtRoleFilter==='all'?CAL_USERS:CAL_USERS.filter(function(u){return u.role===mgmtRoleFilter;})):[CAL_USERS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
   const selA=mgmtMonthAnalyst;
   const showAnalysts=selA?allAnalysts.filter(function(a){return a.id===selA;}):allAnalysts;
   const DAY_HDR=['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
@@ -2573,7 +2676,8 @@ function renderCronogramaWeek(a, def){
     const h=calcHours(s);
     const absent=getAbsenceOnDate(currentUser.id,d);
     const isWork=isWorkdayFor(currentUser.id,d);
-    const pendReq=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending';});
+    const pendSched=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime';});
+    const pendOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime';});
     const approvedOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime';});
     const myTasks=tasks.filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===d;});});
     const mgmtOccs=(mgmtCache[d]||[]).filter(function(o){return(o.analysts||[]).includes(currentUser.id);});
@@ -2650,14 +2754,14 @@ function renderCronogramaWeek(a, def){
       const more=myTasks.length+mgmtOccs.length>5?myTasks.length+mgmtOccs.length-5:0;
       if(more) grid+='<div style="font-size:9px;color:var(--text3);text-align:center">+'+more+' m\u00e1s</div>';
       // Action buttons
-      if(!pendReq){
-        grid+='<div style="display:flex;gap:4px;margin-top:6px">'
-          +'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--blue);border-color:var(--blue)" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+d+'\')">&#x1F4C5; Cambio</button>'
-          +'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--green);border-color:var(--green)" onclick="requestOvertime(\''+d+'\')">&#x2605; Extra</button>'
-          +'</div>';
-      } else {
-        grid+='<div style="background:var(--amber-bg);border-radius:5px;padding:3px 7px;font-size:9px;font-weight:700;color:var(--amber-text);text-align:center;margin-top:5px">\u23f3 Solicitud pendiente</div>';
-      }
+      grid+='<div style="display:flex;gap:4px;margin-top:6px">';
+      grid+=(!pendSched
+        ?'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--blue);border-color:var(--blue)" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+d+'\')">&#x1F4C5; Cambio</button>'
+        :'<div style="flex:1;background:var(--amber-bg);border-radius:5px;padding:3px 4px;font-size:9px;font-weight:700;color:var(--amber-text);text-align:center">\u23f3 Cambio pend.</div>');
+      grid+=(!pendOT
+        ?'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--green);border-color:var(--green)" onclick="requestOvertime(\''+d+'\')">&#x2605; Extra</button>'
+        :'<div style="flex:1;background:var(--amber-bg);border-radius:5px;padding:3px 4px;font-size:9px;font-weight:700;color:var(--amber-text);text-align:center">\u23f3 Extra pend.</div>');
+      grid+='</div>';
     } else if(absent){
       grid+='<div style="font-size:10px;color:'+absTyp.text+';text-align:center;padding:10px 0;font-weight:500">'+(absent.note||absTyp.label)+'</div>';
     } else {
@@ -2710,7 +2814,8 @@ function renderCronogramaMonth(a, def){
       const h=calcHours(s);
       const absent=getAbsenceOnDate(currentUser.id,dateStr);
       const isWork=isWorkdayFor(currentUser.id,dateStr);
-      const pendReq=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending';});
+      const pendSched=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime';});
+      const pendOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime';});
       const approvedOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='approved'&&r.proposed.type==='overtime';});
       const myTasks=tasks.filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===dateStr;});});
       const dayMgmt=mgmtOccsByDay[dateStr]||[];
@@ -2726,7 +2831,7 @@ function renderCronogramaMonth(a, def){
       grid+='<div style="border-right:1px solid var(--border);min-height:100px;padding:4px;background:'+bg+';cursor:pointer" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+dateStr+'\')">';
       grid+='<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px">'
         +'<span style="font-size:'+(isToday?'14':'12')+'px;font-weight:'+(isToday?'800':'500')+';color:'+(isToday?'var(--blue)':isWE?'var(--amber)':'var(--text)')+';font-family:var(--mono)">'+dateStr.slice(8)+'</span>'
-        +(pendReq?'<span style="font-size:8px;background:var(--amber-bg);color:var(--amber-text);padding:1px 3px;border-radius:3px;font-weight:700">\u23f3</span>':'')
+        +((pendSched||pendOT)?'<span style="font-size:8px;background:var(--amber-bg);color:var(--amber-text);padding:1px 3px;border-radius:3px;font-weight:700">⏳</span>':'')
         +'</div>';
       if(!absent&&isWork){
         const schedColor=hasOv?'var(--blue)':'var(--text2)';
@@ -2838,8 +2943,8 @@ function renderMySchedWeek(a, def){
     const h=calcHours(s);
     const absent=getAbsenceOnDate(currentUser.id,d);
     const isWork=isWorkdayFor(currentUser.id,d);
-    const pendReq=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending');
-    const pendOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed.type==='overtime');
+    const pendSched=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime');
+    const pendOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime');
     const approvedOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime');
     const myTasks=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===d));
     const mgmtOccs=(cache[d]||[]).filter(o=>(o.analysts||[]).includes(currentUser.id));
@@ -2898,14 +3003,14 @@ function renderMySchedWeek(a, def){
       grid+=myTasks.slice(0,2).map(t=>'<div style="font-size:9px;padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#d4ede0;border-left:2px solid #1e5c35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:#1e5c35">'+escH(t.producto.split(' ')[0])+'</div>').join('');
       grid+=mgmtOccs.slice(0,1).map(o=>{const c=getMgmtCat(o.category);return'<div style="font-size:9px;padding:2px 5px;border-radius:3px;margin-bottom:2px;background:'+c.color+';border-left:2px solid '+c.text+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:'+c.text+'">'+escH(c.label)+'</div>';}).join('');
       // Buttons
-      if(!pendReq&&!pendOT){
-        grid+='<div style="display:flex;gap:4px;margin-top:6px">'
-          +'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--blue);border-color:var(--blue)" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+d+'\')">📅 Cambio</button>'
-          +'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--green);border-color:var(--green)" onclick="requestOvertime(\''+d+'\')">⭐ Horas extra</button>'
-          +'</div>';
-      } else {
-        grid+='<div style="background:var(--amber-bg);border-radius:5px;padding:3px 7px;font-size:9px;font-weight:700;color:var(--amber-text);text-align:center;margin-top:5px">\u23f3 Solicitud pendiente</div>';
-      }
+      grid+='<div style="display:flex;gap:4px;margin-top:6px">';
+      grid+=(!pendSched
+        ?'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--blue);border-color:var(--blue)" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+d+'\')">📅 Cambio</button>'
+        :'<div style="flex:1;background:var(--amber-bg);border-radius:5px;padding:3px 4px;font-size:9px;font-weight:700;color:var(--amber-text);text-align:center">⏳ Cambio pend.</div>');
+      grid+=(!pendOT
+        ?'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--green);border-color:var(--green)" onclick="requestOvertime(\''+d+'\')">⭐ Horas extra</button>'
+        :'<div style="flex:1;background:var(--amber-bg);border-radius:5px;padding:3px 4px;font-size:9px;font-weight:700;color:var(--amber-text);text-align:center">⏳ Extra pend.</div>');
+      grid+='</div>';
     } else if(absent){
       grid+='<div style="font-size:10px;color:'+absTyp.text+';text-align:center;padding:10px 0;font-weight:500">'+(absent.note||absTyp.label)+'</div>';
     } else {
@@ -2948,7 +3053,8 @@ function renderMySchedMonth(a, def){
       const h=calcHours(s);
       const absent=getAbsenceOnDate(currentUser.id,dateStr);
       const isWork=isWorkdayFor(currentUser.id,dateStr);
-      const pendReq=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending');
+      const pendSched=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime');
+      const pendOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime');
       const approvedOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='approved'&&r.proposed.type==='overtime');
       const myTasks=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===dateStr));
       const mgmtOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,dateStr,dateStr)).filter(o=>(o.analysts||[]).includes(currentUser.id));
@@ -2964,7 +3070,7 @@ function renderMySchedMonth(a, def){
       grid+='<div style="border-right:1px solid var(--border);min-height:110px;padding:4px;background:'+bg+';cursor:pointer" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+dateStr+'\')">';
       grid+='<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px">';
       grid+='<span style="font-size:13px;font-weight:'+(isToday?'800':'500')+';color:'+(isToday?'var(--blue)':isWE?'var(--amber)':'var(--text)')+';font-family:var(--mono)">'+dateStr.slice(8)+'</span>';
-      if(pendReq) grid+='<span style="font-size:8px;background:var(--amber-bg);color:var(--amber-text);padding:1px 3px;border-radius:3px;font-weight:700">\u23f3</span>';
+      if(pendSched||pendOT) grid+='<span style="font-size:8px;background:var(--amber-bg);color:var(--amber-text);padding:1px 3px;border-radius:3px;font-weight:700">⏳</span>';
       grid+='</div>';
       if(!absent&&isWork){
         grid+='<div style="font-size:10px;font-family:var(--mono);font-weight:600;color:'+(hasOv?'var(--blue)':'var(--text2)')+'">'+s.startTime+'\u2013'+s.endTime+'</div>';
@@ -3028,6 +3134,7 @@ function requestOvertime(dateStr){
       requestedBy:currentUser.id
     });
     saveLS();render();
+    saveNow().catch(function(e){console.error('saveNow overtime:',e);});
   };
 }
 function getMgmtCat(catId){
@@ -3136,9 +3243,9 @@ function renderMgmtModal(){
       <div class="frow"><label>Fecha inicio</label><input type="date" id="mg-start" value="${mt.startDate||today()}"></div>
       <div class="frow"><label>Fecha fin (si aplica)</label><input type="date" id="mg-end" value="${mt.endDate||''}"></div>
       <div class="frow"><label>Dedicación horaria (h)</label><input type="number" id="mg-dedicacion" value="${mt.dedicacion||''}" min="0.5" max="24" step="0.5" placeholder="ej. 2" style="width:120px"></div>
-      <div class="frow form-full"><label>Analistas asignados</label>
+      <div class="frow form-full"><label>Asignados</label>
         <div class="analysts-check">
-          ${[...ANALYSTS].sort((a,b)=>a.name.localeCompare(b.name,'es')).map(a=>`<div class="ana-check${selAna.has(a.id)?' selected':''}" id="mgac-${a.id}" onclick="this.classList.toggle('selected')">
+          ${[...CAL_USERS].sort((a,b)=>a.name.localeCompare(b.name,'es')).map(a=>`<div class="ana-check${selAna.has(a.id)?' selected':''}" id="mgac-${a.id}" onclick="this.classList.toggle('selected')">
             <div class="av ${a.av}">${escH(a.avInit)}</div>${escH(a.name)}
           </div>`).join('')}
         </div>
@@ -3161,7 +3268,7 @@ function selectMgmtCat(id){
 }
 function saveMgmt(){
   const catId=document.getElementById('mg-cat')?.value||mgmtCategories[0]?.id;
-  const analysts=ANALYSTS.filter(a=>document.getElementById('mgac-'+a.id)?.classList.contains('selected')).map(a=>a.id);
+  const analysts=CAL_USERS.filter(a=>document.getElementById('mgac-'+a.id)?.classList.contains('selected')).map(a=>a.id);
   const obj={
     id:editingMgmt!==null?editingMgmt:nextMgmtId++,
     category:catId,
@@ -3206,16 +3313,16 @@ function renderMgmtOccModal(){
       +(exc&&exc.note?'<div style="font-size:11px;font-weight:400;margin-top:4px">Nota: '+escH(exc.note)+'</div>':'')
       +'</div>';
   } else {
-    html+='<div class="frow"><label>Analistas para esta ocurrencia</label>'
+    html+='<div class="frow"><label>Asignados para esta ocurrencia</label>'
       +'<div class="analysts-check" style="margin-top:6px">'
-      +[...ANALYSTS].sort(function(a,b){return a.name.localeCompare(b.name,'es');}).map(function(a){
+      +[...CAL_USERS].sort(function(a,b){return a.name.localeCompare(b.name,'es');}).map(function(a){
         var sel=effAnalysts.includes(a.id);
         return'<div class="ana-check'+(sel?' selected':'')+'" id="mocc-'+a.id+'" onclick="toggleMoccAna(this)"><div class="av '+a.av+'">'+escH(a.avInit)+'</div>'+escH(a.name)+'</div>';
       }).join('')
       +'</div></div>';
     if(exc&&!isSkipped){
       html+='<div style="font-size:11px;color:var(--amber-text);background:var(--amber-bg);border-radius:var(--radius);padding:5px 10px;margin-bottom:8px">'
-        +'⚠ Esta ocurrencia ya tiene analistas personalizados</div>';
+        +'⚠ Esta ocurrencia ya tiene asignados personalizados</div>';
     }
   }
 
@@ -3230,7 +3337,7 @@ function renderMgmtOccModal(){
     +'<div class="frow" style="margin-bottom:0"><label>Desde</label><input type="date" id="mocc-range-start" value="'+mgmtOccDate+'"></div>'
     +'<div class="frow" style="margin-bottom:0"><label>Hasta</label><input type="date" id="mocc-range-end" value="'+mgmtOccDate+'"></div>'
     +'</div>'
-    +'<div class="frow" style="margin-bottom:8px"><label>Analista a remover (vacío = omitir todos)</label>'
+    +'<div class="frow" style="margin-bottom:8px"><label>Usuario a remover (vacío = omitir todos)</label>'
     +'<select id="mocc-range-analyst"><option value="">Todos (omitir día completo)</option>'
     +mt.analysts.map(function(id){var u=getU(id);return'<option value="'+id+'">'+escH(u.name)+'</option>';}).join('')
     +'</select></div>'
@@ -3241,7 +3348,7 @@ function renderMgmtOccModal(){
     +(exc?'<button class="btn" onclick="removeMgmtExc()">Restaurar original</button>':'')
     +'<button class="btn dan" onclick="skipMgmtOcc()">'+(isSkipped?'Ya omitido':'Omitir este día')+'</button>'
     +'<button class="btn" onclick="closeMgmtOccModal()">Cancelar</button>'
-    +(!isSkipped?'<button class="btn pri" onclick="saveMgmtOcc()">Guardar analistas</button>':'')
+    +(!isSkipped?'<button class="btn pri" onclick="saveMgmtOcc()">Guardar asignados</button>':'')
     +'</div>'
     +'</div></div>';
   return html;
@@ -3252,8 +3359,8 @@ function saveMgmtOcc(){
   var mt=mgmtTasks.find(function(m){return m.id===mgmtOccTaskId;});
   if(!mt)return;
   if(!mt.exceptions)mt.exceptions=[];
-  var analysts=ANALYSTS.filter(function(a){return document.getElementById('mocc-'+a.id)&&document.getElementById('mocc-'+a.id).classList.contains('selected');}).map(function(a){return a.id;});
-  if(!analysts.length){alert('Seleccioná al menos un analista, o usá "Omitir este día".');return;}
+  var analysts=CAL_USERS.filter(function(a){return document.getElementById('mocc-'+a.id)&&document.getElementById('mocc-'+a.id).classList.contains('selected');}).map(function(a){return a.id;});
+  if(!analysts.length){alert('Seleccioná al menos un usuario, o usá "Omitir este día".');return;}
   var note=document.getElementById('mocc-note')&&document.getElementById('mocc-note').value||'';
   var exc=mt.exceptions.find(function(e){return e.date===mgmtOccDate;});
   if(exc){exc.analysts=analysts;exc.note=note;}
@@ -3536,7 +3643,7 @@ function recalcLateStatus(){
     // Approved tasks: freeze _dueStatus at approval time
     if(t.status==='approved'){t._dueStatus=t._dueStatus||'ok';return;}
     // a-ingresar tasks: never mark late by due date; track expected arrival separately
-    if(t.status==='a-ingresar'){t._dueStatus='ok';return;}
+    if(t.status==='a-ingresar'||t.status==='muestra-ok'){t._dueStatus='ok';return;}
     if(!t.due){t._dueStatus='ok';return;}
     var dueMs=new Date(t.due+'T12:00:00').getTime();
     var daysLeft=Math.ceil((dueMs-todayMs)/(1000*60*60*24));
@@ -3569,7 +3676,7 @@ function render(){
       return;
     }
     const shell=renderShell();
-    const modal=showImportModal?renderImportModal():showModal?renderTaskModal():showChangePwd?renderChangePwdModal():showReplanModal?renderReplanModal():showExtraModal?renderExtraWorkdayModal():showMgmtModal?renderMgmtModal():showSchedModal?renderSchedModal():showMgmtOccModal?renderMgmtOccModal():showTimeLogModal?renderTimeLogModal():showReceiveModal?renderReceiveModal():'';
+    const modal=showImportModal?renderImportModal():showModal?renderTaskModal():showChangePwd?renderChangePwdModal():showReplanModal?renderReplanModal():showExtraModal?renderExtraWorkdayModal():showMgmtModal?renderMgmtModal():showSchedModal?renderSchedModal():showMgmtOccModal?renderMgmtOccModal():showTimeLogModal?renderTimeLogModal():showReceiveModal?renderReceiveModal():showSamplingModal?renderSamplingModal():'';
     const notif=renderNotifPanel();
     const spModal=showSpConfig?renderSpConfigModal():'';
   const ftModal=showFreeTaskModal?renderFreeTaskModal():'';
@@ -3588,47 +3695,123 @@ function render(){
 }
 
 // ── LOGIN ──
+async function hashPassword(plain){
+  const enc=new TextEncoder();
+  const buf=await crypto.subtle.digest('SHA-256',enc.encode(plain));
+  const hex=Array.from(new Uint8Array(buf)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+  return '$sha256$'+hex;
+}
+
 function renderLogin(){
-  const roleLabel=function(r){
-    return r==='supervisor'?'Supervisor':r==='reviewer'?'Revisor':r==='staff'?'Personal':'Analista';
+  const roleOrder=['supervisor','reviewer','analyst','sampler','staff'];
+  const roleLabel=function(r){return r==='supervisor'?'Supervisor':r==='reviewer'?'Revisor':r==='staff'?'Personal':r==='sampler'?'Muestreador':'Analista';};
+  // Role colors and icons
+  const roleColor=function(r){return r==='supervisor'?'#6366f1':r==='reviewer'?'#f59e0b':r==='analyst'?'#10b981':r==='sampler'?'#3b82f6':'#6b7280';};
+  const roleIcon=function(r){
+    if(r==='supervisor') return '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.8 3.6L14 5.3l-3 2.9.7 4.1L8 10.4l-3.7 1.9.7-4.1-3-2.9 4.2-.7z"/></svg>';
+    if(r==='reviewer')   return '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M10.5 0a5.5 5.5 0 014.2 9.1L16 10.4l-1.4 1.4-1.3-1.3A5.5 5.5 0 1110.5 0zm0 2a3.5 3.5 0 100 7 3.5 3.5 0 000-7zM2 12l3-3 1.4 1.4-3 3L2 12z"/></svg>';
+    if(r==='analyst')    return '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M6 0h4v6l3 5H3L6 6V0zm-1 13h6v1a1 1 0 01-1 1H6a1 1 0 01-1-1v-1z"/></svg>';
+    if(r==='sampler')    return '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7 0h2v8.5a3.5 3.5 0 11-2 0V0zm1 10a1.5 1.5 0 100 3 1.5 1.5 0 000-3z"/></svg>';
+    return '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6s-1 0-1-1 1-4 6-4 6 3 6 4-1 1-1 1H3z"/></svg>';
   };
-  const sorted=[...USERS].sort(function(a,b){return a.name.localeCompare(b.name,'es');});
+  // Initials: first letter of each word, max 2
+  const initials=function(name){var words=name.split(' ').filter(Boolean);if(words.length===1)return words[0].slice(0,3).toUpperCase();return words.map(function(w){return w[0];}).join('').slice(0,3).toUpperCase();};
   const logo='<div class="login-logo"><div class="icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="2" y="10" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="10" width="6" height="6" rx="1.5" fill="white"/></svg></div><span class="name">Lab<span>Track</span></span></div>';
-  const errHtml=loginError?'<div class="login-err">'+escH(loginError)+'</div>':'';  const opts=sorted.map(function(u){    const sel=selectedLoginUser&&selectedLoginUser.id===u.id?' selected':'';    return '<option value="'+u.id+'"'+sel+'>'+escH(u.name)+' — '+roleLabel(u.role)+'</option>';  }).join('');  return '<div class="login-wrap"><div class="login-card">'    +logo    +'<h2 style="font-size:15px;font-weight:500;margin-bottom:20px;color:var(--text)">Iniciar sesión</h2>'    +'<div class="frow" style="margin-bottom:14px;text-align:left">'    +'<label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2)">Usuario</label>'    +'<select id="login-user-select" onchange="loginSelectUser(this.value)"'    +' style="width:100%;padding:11px 12px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:15px;margin-top:5px;box-sizing:border-box;-webkit-appearance:none;appearance:none">'    +'<option value="">Seleccionar usuario…</option>'    +opts    +'</select>'    +'</div>'    +'<div class="frow" style="margin-bottom:14px;text-align:left">'    +'<label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2)">Contraseña</label>'    +'<input type="password" id="login-pwd" autocomplete="current-password" placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"'    +' onkeydown="if(event.key===\'Enter\')doLogin()"'    +' style="width:100%;padding:11px 12px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:15px;margin-top:5px;box-sizing:border-box">'    +'</div>'    +errHtml    +'<button class="btn pri" onclick="doLogin()" style="width:100%;margin-top:4px;padding:12px;font-size:15px;border-radius:var(--radius)">Ingresar</button>'    +'</div></div>';}
-function loginSelectUser(uid){
-  selectedLoginUser = uid ? USERS.find(function(u){return u.id===uid;}) : null;
-  loginError='';
-}
-
-function loginGoStep2(){
-  if(!selectedLoginUser){
-    // Try reading the select value in case onchange didn't fire
-    var sel=document.getElementById('login-user-select');
-    if(sel&&sel.value) loginSelectUser(sel.value);
+  const errHtml=loginError?'<div class="login-err">'+escH(loginError)+'</div>':'';
+  if(loginStep===2&&selectedLoginUser){
+    const u=selectedLoginUser;
+    const av=initials(u.name);
+    const col=roleColor(u.role);
+    return '<div class="login-wrap"><div class="login-card">'
+      +logo
+      +'<div style="display:flex;flex-direction:column;align-items:center;margin-bottom:18px">'
+      +'<div style="width:56px;height:56px;border-radius:12px;background:'+col+';color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;letter-spacing:.03em;margin-bottom:8px">'+escH(av)+'</div>'
+      +'<div style="font-weight:600;font-size:15px;color:var(--text)">'+escH(u.name)+'</div>'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:2px;display:flex;align-items:center;gap:4px"><span style="color:'+col+'">'+roleIcon(u.role)+'</span>'+escH(roleLabel(u.role))+'</div>'
+      +'</div>'
+      +'<div class="frow" style="margin-bottom:14px;text-align:left">'
+      +'<label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2)">Contraseña</label>'
+      +'<input type="password" id="login-pwd" autocomplete="current-password" placeholder="••••••••"'
+      +' onkeydown="if(event.key===\'Enter\')doLogin()"'
+      +' style="width:100%;padding:11px 12px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:15px;margin-top:5px;box-sizing:border-box">'
+      +'</div>'
+      +errHtml
+      +'<button class="btn pri" onclick="doLogin()" style="width:100%;margin-top:4px;padding:12px;font-size:15px;border-radius:var(--radius)">Ingresar</button>'
+      +'<button class="btn" onclick="backStep()" style="width:100%;margin-top:8px;padding:8px;font-size:13px;border-radius:var(--radius);background:transparent;color:var(--text2);border:none">← Elegir otro usuario</button>'
+      +'</div></div>';
   }
-  if(!selectedLoginUser){loginError='Seleccioná un usuario primero.';render();return;}
-  loginStep=2;loginError='';render();
+  const groups=roleOrder.map(function(r){return {role:r,users:USERS.filter(function(u){return u.role===r;}).sort(function(a,b){return a.name.localeCompare(b.name,'es');})};}).filter(function(g){return g.users.length>0;});
+  let grid='<div style="width:100%">';
+  groups.forEach(function(g){
+    const col=roleColor(g.role);
+    grid+='<div style="display:flex;align-items:center;gap:5px;margin:10px 0 5px">'
+      +'<span style="color:'+col+'">'+roleIcon(g.role)+'</span>'
+      +'<span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text2)">'+escH(roleLabel(g.role))+'</span>'
+      +'</div>';
+    grid+='<div style="display:flex;flex-wrap:wrap;gap:5px">';
+    g.users.forEach(function(u){
+      const av=initials(u.name);
+      const firstName=u.name.split(' ')[0];
+      grid+='<button onclick="loginPickUser(\''+u.id+'\')" title="'+escH(u.name)+'" '
+        +'style="display:flex;flex-direction:column;align-items:center;gap:3px;padding:7px 8px;border:1px solid var(--border2);border-radius:8px;background:var(--surface);cursor:pointer;width:62px;transition:border-color .15s,background .15s" '
+        +'onmouseover="this.style.borderColor=\''+col+'\';this.style.background=\'var(--hover)\'" '
+        +'onmouseout="this.style.borderColor=\'var(--border2)\';this.style.background=\'var(--surface)\'">'+
+        '<div style="width:32px;height:32px;border-radius:8px;background:'+col+';color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;letter-spacing:.03em">'+escH(av)+'</div>'+
+        '<span style="font-size:10px;color:var(--text);text-align:center;width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+escH(firstName)+'</span>'+
+        '</button>';
+    });
+    grid+='</div>';
+  });
+  grid+='</div>';
+  const guideLink=workdayConfig.guideUrl
+    ?'<div style="text-align:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--border2)">'
+      +'<a href="'+escH(workdayConfig.guideUrl)+'" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);text-decoration:none;opacity:.7" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.7">📖 Guía de usuario ↗</a>'
+      +'</div>'
+    :'';
+  return '<div class="login-wrap"><div class="login-card" style="max-width:380px">'
+    +logo
+    +'<h2 style="font-size:14px;font-weight:500;margin-bottom:2px;color:var(--text)">Seleccioná tu usuario</h2>'
+    +grid
+    +errHtml
+    +guideLink
+    +'</div></div>';
 }
 
-function attachLogin(){setTimeout(function(){var i=document.getElementById('login-user-select');if(i)i.focus();},60);}
-function selUser(id){selectedLoginUser=id;loginError='';render();}
-function backStep(){loginStep=1;loginError='';render();}
+function loginPickUser(uid){
+  selectedLoginUser=USERS.find(function(u){return u.id===uid;})||null;
+  loginError='';loginStep=2;
+  render();
+  setTimeout(function(){var p=document.getElementById('login-pwd');if(p)p.focus();},60);
+}
+
+function loginSelectUser(uid){selectedLoginUser=uid?USERS.find(function(u){return u.id===uid;}):null;loginError='';}
+function loginGoStep2(){if(!selectedLoginUser){loginError='Seleccioná un usuario primero.';render();return;}loginStep=2;loginError='';render();}
+function attachLogin(){setTimeout(function(){var p=document.getElementById('login-pwd');if(p)p.focus();},60);}
+function selUser(id){selectedLoginUser=USERS.find(function(u){return u.id===id;})||null;loginError='';render();}
+function backStep(){loginStep=1;selectedLoginUser=null;loginError='';render();}
 function goStep2(){if(!selectedLoginUser){loginError='Seleccioná un usuario para continuar.';render();return;}loginStep=2;loginError='';render();}
-function doLogin(){
-  // Single-screen: always sync the select value before validating
-  var _sel=document.getElementById('login-user-select');
-  if(_sel&&_sel.value&&!selectedLoginUser) loginSelectUser(_sel.value);
+async function doLogin(){
   if(!selectedLoginUser){loginError='Seleccioná un usuario.';render();return;}
   const v=(document.getElementById('login-pwd')||{}).value||'';
   const uid=selectedLoginUser.id||selectedLoginUser;
-  if(v===passwords[uid]){
+  const stored=passwords[uid]||'';
+  let ok=false;
+  if(stored.startsWith('$sha256$')){
+    ok=(await hashPassword(v))===stored;
+  } else {
+    ok=(v===stored);
+    if(ok){
+      hashPassword(v).then(function(h){
+        passwords[uid]=h;
+        saveLS();saveNow().catch(function(e){console.error('pwd-upgrade:',e);});
+      });
+    }
+  }
+  if(ok){
     currentUser=uMap[uid];
-    loginStep=1;loginError='';
-    // Route to first allowed view for this role — never inherit another user's view
+    loginStep=1;loginError='';selectedLoginUser=null;
     currentView=firstViewForRole(currentUser);
     recordLoginSuccess(uid);
-    // LOGIN no se registra en audit trail (Punto 6)
-    // Persist session so page refresh stays logged in
     try{localStorage.setItem('lt9-session',JSON.stringify({uid:uid,ts:Date.now()}));}catch(e){}
     render();
   } else {
@@ -4554,8 +4737,15 @@ function renderShell(){
     {id:'pendientes',label:'Pendientes',icon:'📋'},
     {id:'week',label:'Calendario equipo',icon:'▦'},
     {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
+  ]:isSamplerRole()?[
+    {id:'dashboard',label:'Mi día',icon:'▪'},
+    {id:'sampler',label:'A ingresar',icon:'📦',badge:(()=>{const myS=tasks.filter(t=>(t.status==='a-ingresar'||t.status==='muestra-ok')&&(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&!s.done));return myS.length>0?myS.length:'';})(),bc:'w'},
+    {id:'freeTasks',label:'Tareas libres',icon:'✏'},
+    {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ]:isStaffRole()?[
     {id:'dashboard',label:'Mi día',icon:'▪'},
+    {id:'freeTasks',label:'Tareas libres',icon:'✏'},
+    {id:'mgmt',label:'Actividades gestión',icon:'📋'},
     {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending');return p.length>0?p.length:'';})()},
   ]:[
     {id:'dashboard',label:'Mi día',icon:'▪'},
@@ -4563,20 +4753,20 @@ function renderShell(){
     {id:'pendientes',label:'Pendientes',icon:'📋'},
     {id:'cronograma',label:'Mi cronograma',icon:'▦',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ];
-  const titles={dashboard:sup?'Panel general':'Mi día',tasks:sup?'Análisis por lote':'Mis análisis',pendientes:'Ensayos pendientes',review:'Revisión de análisis',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',audittrail:'Audit Trail',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración',historial:'Historial de notificaciones'};
-  const content=({dashboard:renderDashboard,aprobados:renderAprobados,tasks:renderTasks,pending:renderPending,pendientes:renderPendientesList,week:renderWeek,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderReview,informes:renderInformes,notificaciones:renderNotificaciones,historial:renderHistorialNotif,admin:renderAdmin,audittrail:renderAuditTrail}[currentView]||renderDashboard)();
+  const titles={dashboard:sup?'Panel general':'Mi día',tasks:sup?'Análisis por lote':'Mis análisis',pendientes:'Ensayos pendientes',review:'Revisión de análisis',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',audittrail:'Audit Trail',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración',historial:'Historial de notificaciones',sampler:'A ingresar — Muestreo',freeTasks:'Mis tareas libres'};
+  const content=({dashboard:renderDashboard,aprobados:renderAprobados,tasks:renderTasks,pending:renderPending,pendientes:renderPendientesList,week:renderWeek,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderReview,informes:renderInformes,notificaciones:renderNotificaciones,historial:renderHistorialNotif,admin:renderAdmin,audittrail:renderAuditTrail,sampler:renderSamplerView,freeTasks:renderStaffFreeTasks}[currentView]||renderDashboard)();
   return`<div class="shell">
     <div class="sidebar">
       <div class="sb-header">
         <div class="sb-logo-icon"><svg width="16" height="16" viewBox="0 0 18 18" fill="none"><rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="2" y="10" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="10" width="6" height="6" rx="1.5" fill="white"/></svg></div>
         <span class="sb-logo-text">Lab<span>Track</span></span>
-        <span class="sb-role-badge ${currentUser.role==='supervisor'?'sup':currentUser.role==='staff'?'stf':'ana'}">${currentUser.role==='supervisor'?'Sup.':currentUser.role==='reviewer'?'Rev.':currentUser.role==='staff'?'Pers.':'Ana.'}</span>
+        <span class="sb-role-badge ${currentUser.role==='supervisor'?'sup':currentUser.role==='staff'?'stf':'ana'}">${currentUser.role==='supervisor'?'Sup.':currentUser.role==='reviewer'?'Rev.':currentUser.role==='staff'?'Pers.':currentUser.role==='sampler'?'Muest.':'Ana.'}</span>
       </div>
       ${navs.map(n=>`<div class="nav-item${currentView===n.id?' active':''}" onclick="setView('${n.id}')"><span class="ni">${n.icon}</span>${n.label}${n.badge?`<span class="nbadge ${n.bc||''}">${n.badge}</span>`:''}</div>`).join('')}
       <div class="sb-user">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
           <div class="av av-lg ${currentUser.av}">${escH(currentUser.avInit)}</div>
-          <div><div class="sb-user-name">${escH(currentUser.name)}</div><div style="font-size:11px;color:var(--text3)">${currentUser.role==='supervisor'?'Supervisor':currentUser.role==='reviewer'?'Revisor':currentUser.role==='staff'?'Personal':'Analista'}</div></div>
+          <div><div class="sb-user-name">${escH(currentUser.name)}</div><div style="font-size:11px;color:var(--text3)">${currentUser.role==='supervisor'?'Supervisor':currentUser.role==='reviewer'?'Revisor':currentUser.role==='staff'?'Personal':currentUser.role==='sampler'?'Muestreador':'Analista'}</div></div>
         </div>
         <div style="display:flex;gap:8px;margin-top:4px">
           <span class="sb-link" onclick="openChangePwd()">Cambiar clave</span>
@@ -4610,16 +4800,107 @@ function renderStaffFreeTasksWidget(){
     return html+'<div class="empty" style="margin-bottom:12px">Sin tareas libres registradas</div>';
   }
   html+=myFT.map(function(ft){
-    var stC=ft.status==='confirmed'?'var(--green)':'var(--amber)';
-    var stL=ft.status==='confirmed'?'✓ Confirmada':'Pend. confirmación';
-    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;margin-bottom:5px;display:flex;gap:8px;align-items:center">'
+    var isAssignedBySup=ft.assignedBy&&ft.assignedBy!==currentUser.id;
+    var stC=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'||ft.status==='declined'?'var(--red)':ft.status==='pending'?'var(--blue)':'var(--amber)';
+    var stL=ft.status==='confirmed'?'✓ Confirmada':ft.status==='rejected'?'✗ Rechazada':ft.status==='declined'?'✗ Declinada':ft.status==='pending'?(isAssignedBySup?'Asignada — pendiente':'Pendiente'):'Pend. confirmación';
+    var notifForFt=replanNotifs.find(function(n){return n.type==='free_task_assigned'&&n.freeTaskId===ft.id&&n.status==='pending';});
+    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;margin-bottom:5px">'
+      +'<div style="display:flex;gap:8px;align-items:center">'
       +'<div style="flex:1"><b>'+escH(ft.description)+'</b>'
       +'<span style="font-size:11px;color:var(--text2);margin-left:6px">'+fmtDF(ft.date)+' · '+(ft.realHours||ft.suggestedHours||ft.hours||0)+'h</span>'
       +(ft.completionComment?'<span style="font-size:10px;color:var(--text3);margin-left:4px">· '+escH(ft.completionComment)+'</span>':'')+'</div>'
       +'<span style="font-size:10px;font-weight:700;color:'+stC+'">'+stL+'</span>'
+      +'</div>'
+      +(ft.status==='pending'&&isAssignedBySup
+        ?'<div style="display:flex;gap:4px;margin-top:6px">'
+        +'<button class="btn sm suc" style="flex:1;font-size:11px" onclick="confirmFreeTaskAsAnalyst('+ft.id+','+(notifForFt?notifForFt.id:0)+')">✓ Confirmar realizada</button>'
+        +'<button class="btn sm dan" style="font-size:11px" onclick="declineFreeTask('+(notifForFt?notifForFt.id:0)+')">✗ No puedo realizarla</button>'
+        +'</div>'
+        :'')
       +'</div>';
   }).join('');
   return html+'<div style="margin-bottom:12px"></div>';
+}
+
+// ── Vista de tareas libres completa para staff/sampler ──
+function renderStaffFreeTasks(){
+  var myFT=freeTasks.filter(function(ft){return ft.analystId===currentUser.id;})
+    .sort(function(a,b){return(b.date||'').localeCompare(a.date||'');});
+  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
+    +'<div class="sec" style="margin-bottom:0">Mis tareas libres</div>'
+    +'<button class="btn pri" onclick="openFreeTaskModal(null)">+ Agregar tarea</button>'
+    +'</div>';
+  if(myFT.length===0)return html+'<div class="empty" style="padding:32px">Sin tareas libres registradas.</div>';
+  return html+'<div>'+myFT.map(function(ft){
+    var isAssignedBySup=ft.assignedBy&&ft.assignedBy!==currentUser.id;
+    var stC=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'||ft.status==='declined'?'var(--red)':ft.status==='pending'?'var(--blue)':'var(--amber)';
+    var stLbl=ft.status==='confirmed'?'✓ Confirmada':ft.status==='rejected'?'✗ Rechazada por sup.':ft.status==='declined'?'✗ Declinada por mí':ft.status==='pending-confirm'?'Completada — pend. conf.':isAssignedBySup?'Asignada — pendiente':'Pendiente';
+    var notifForFt=replanNotifs.find(function(n){return n.type==='free_task_assigned'&&n.freeTaskId===ft.id&&n.status==='pending';});
+    return'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:6px">'
+      +'<div style="display:flex;align-items:center;gap:10px">'
+      +'<div style="flex:1;min-width:0">'
+      +'<b style="font-size:12px">'+escH(ft.description||'')+'</b>'
+      +'<span style="font-size:11px;color:var(--text2);margin-left:6px;font-family:var(--mono)">'+(ft.date?fmtDDMMYY(ft.date):'—')+'</span>'
+      +'<span style="font-size:11px;color:var(--text2);margin-left:6px">'+(ft.realHours||ft.suggestedHours||ft.hours||0)+'h</span>'
+      +(ft.completionComment?'<div style="font-size:10px;color:var(--text3);margin-top:2px">💬 '+escH(ft.completionComment)+'</div>':'')
+      +'</div>'
+      +'<span style="font-size:10px;font-weight:700;white-space:nowrap;color:'+stC+'">'+stLbl+'</span>'
+      +(ft.status!=='pending'?'<button class="btn sm" style="font-size:10px" onclick="openFreeTaskModal('+ft.id+')">✎</button>':'')
+      +'</div>'
+      +(ft.status==='pending'&&isAssignedBySup
+        ?'<div style="display:flex;gap:4px;margin-top:8px">'
+        +'<button class="btn suc" style="flex:1;font-size:12px" onclick="confirmFreeTaskAsAnalyst('+ft.id+','+(notifForFt?notifForFt.id:0)+')">✓ Confirmar realizada</button>'
+        +'<button class="btn dan sm" style="font-size:11px" onclick="declineFreeTask('+(notifForFt?notifForFt.id:0)+')">✗ No puedo realizarla</button>'
+        +'</div>'
+        :'')
+      +'</div>';
+  }).join('')+'</div>';
+}
+
+// ── Vista principal del muestreador ──
+function renderSamplerView(){
+  var all=tasks.filter(function(t){return t.status==='a-ingresar'||t.status==='muestra-ok';});
+  var myAssigned=all.filter(function(t){return(t.samplerAssignments||[]).some(function(s){return s.sampler===currentUser.id;});});
+  var others=all.filter(function(t){return!(t.samplerAssignments||[]).some(function(s){return s.sampler===currentUser.id;});});
+
+  function taskCard(t,isMine){
+    var sa=isMine?(t.samplerAssignments||[]).find(function(s){return s.sampler===currentUser.id;}):null;
+    var isDone=sa&&sa.done;
+    var isOk=t.status==='muestra-ok';
+    return'<div class="sampler-card" style="'+(isDone?'opacity:.75':'')+';">'
+      +'<div style="display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap">'
+      +'<div style="flex:1;min-width:180px">'
+      +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
+      +'<span class="pill '+(isOk?'muestra-ok':'a-ingresar')+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
+      +(t.priority&&t.priority!=='Normal'?'<span class="pill '+t.priority.toLowerCase()+'" style="font-size:10px">'+t.priority+'</span>':'')
+      +'</div>'
+      +'<div style="font-weight:600;font-size:13px">'+escH(t.producto)+'</div>'
+      +'<div style="font-size:11px;color:var(--text3);font-family:var(--mono)">'+escH(t.lote)+'</div>'
+      +(t.expectedArrival?'<div style="font-size:11px;color:var(--text2);margin-top:3px">Llegada esperada: <b style="font-family:var(--mono)">'+fmtDDMMYY(t.expectedArrival)+'</b>'+(t.expectedArrival<today()?'<span style="color:var(--red);font-weight:700;margin-left:4px">⚠ vencida</span>':'')+'</div>':'')
+      +(t.arrivalNotes?'<div style="font-size:11px;color:var(--text2);margin-top:2px">📝 '+escH(t.arrivalNotes)+'</div>':'')
+      +'</div>'
+      +'<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;min-width:120px">'
+      +(isMine&&sa&&sa.assignedNote?'<div style="font-size:11px;color:var(--text2);text-align:right">'+escH(sa.assignedNote)+'</div>':'')
+      +(isDone?'<div class="sampling-info">✓ Muestreo realizado<br><b>'+fmtDDMMYY(sa.realArrivalDate)+'</b>'+(sa.lotNotes?'<br>'+escH(sa.lotNotes):'')+(sa.hours?'<br>'+sa.hours.toFixed(1)+'h':'')+'</div>':
+        (isMine||t.status==='a-ingresar')?'<button class="btn sm pri" style="background:#059669;border-color:#059669;white-space:nowrap" onclick="openSamplingModal('+t.id+')">✓ Registrar muestreo</button>'
+        :'<span class="sampling-info">✓ Muestra OK — pendiente supervisor</span>')
+      +'</div>'
+      +'</div>'
+      +(isOk&&sa&&sa.done?'<div class="sampling-info" style="margin-top:8px">⏳ Pendiente de aprobación por supervisor</div>':'')
+      +'</div>';
+  }
+
+  var html='';
+  if(myAssigned.length){
+    html+='<div class="sec" style="margin-bottom:8px">📦 Mis asignaciones de muestreo</div>'
+      +myAssigned.map(function(t){return taskCard(t,true);}).join('');
+  }
+  if(others.length){
+    html+='<div class="sec" style="margin-top:16px;margin-bottom:8px;color:var(--text3)">Otros productos a ingresar (sin asignación propia)</div>'
+      +others.map(function(t){return taskCard(t,false);}).join('');
+  }
+  if(!all.length)html='<div class="empty" style="padding:40px">No hay productos "A ingresar" en este momento ✓</div>';
+  return html;
 }
 
 function renderDashboard(){
@@ -4667,8 +4948,39 @@ function renderDashboard(){
         ${filtered.length===0?'<div class="empty">Sin resultados para este filtro</div>':filtered.map(t=>tRowSupLote(t)).join('')}
       </div>`;
   }
-  // Analyst/Reviewer view — exclude a-ingresar (supervisor-only pre-pending state)
-  const myTasks=tasks.filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id));
+  // Sampler dashboard
+  if(isSamplerRole()){
+    const myPending=tasks.filter(t=>(t.status==='a-ingresar'||t.status==='muestra-ok')&&(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&!s.done));
+    const myDoneS=tasks.filter(t=>(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&s.done));
+    const myFT=freeTasks.filter(ft=>ft.analystId===currentUser.id&&ft.status!=='done').slice(0,5);
+    return`<div class="dash-grid" style="margin-bottom:16px">
+      <div class="stat-card"><div class="stat-n" style="color:var(--amber)">${myPending.length}</div><div class="stat-l">Pendientes muestreo</div></div>
+      <div class="stat-card"><div class="stat-n" style="color:var(--green)">${myDoneS.length}</div><div class="stat-l">Muestreos realizados</div></div>
+    </div>
+    ${myPending.length?`<div class="sec" style="margin-bottom:8px">📦 Mis muestreos pendientes</div>
+    <div style="margin-bottom:16px">${myPending.map(t=>{
+      const sa=(t.samplerAssignments||[]).find(s=>s.sampler===currentUser.id&&!s.done);
+      const isOk=t.status==='muestra-ok';
+      return'<div class="sampler-card">'
+        +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+        +'<span class="pill '+(isOk?'muestra-ok':'a-ingresar')+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
+        +'<b style="font-size:13px">'+escH(t.producto)+'</b>'
+        +'<span style="font-family:var(--mono);font-size:11px;color:var(--text3)">'+escH(t.lote)+'</span>'
+        +(t.expectedArrival?'<span style="font-size:11px;color:var(--text3)">Esperado: <b>'+fmtDDMMYY(t.expectedArrival)+'</b></span>':'')
+        +'</div>'
+        +(sa&&sa.assignedNote?'<div style="font-size:11px;color:var(--text2);margin-top:4px">📝 '+escH(sa.assignedNote)+'</div>':'')
+        +(!isOk?'<div style="margin-top:8px"><button class="btn sm pri" style="background:#059669;border-color:#059669" onclick="openSamplingModal('+t.id+')">✓ Registrar muestreo</button></div>':'<div style="margin-top:6px;font-size:11px;color:#065f46;background:#d1fae5;padding:4px 10px;border-radius:var(--radius);display:inline-block">✓ Muestreo registrado — pendiente aprobación supervisor</div>')
+        +'</div>';
+    }).join('')}</div>`:''}
+    ${myFT.length?`<div class="sec" style="margin-bottom:6px">Tareas libres pendientes</div>
+    <div class="tbl">${myFT.map(ft=>`<div class="trow" onclick="openFreeTaskModal(${ft.id})">`
+      +`<div style="font-size:12px">${escH(ft.description||'')}</div>`
+      +`<div style="font-family:var(--mono);font-size:11px">${ft.date?fmtDDMMYY(ft.date):'—'}</div>`
+      +`<div><span class="pill ${ft.status||'pending'}" style="font-size:10px">${statusLabel(ft.status||'pending')}</span></div>`
+      +`</div>`).join('')}</div>`:''}`;
+  }
+  // Analyst/Reviewer view — exclude a-ingresar and muestra-ok (supervisor-only pre-pending states)
+  const myTasks=tasks.filter(t=>t.status!=='a-ingresar'&&t.status!=='muestra-ok'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id));
   const todayD=new Date(today()+'T12:00:00');
   const minWin=_relDate(-3);const maxWin=_relDate(1);
   // "Mi día": tareas que requieren acción — asignaciones dentro de la ventana, o ya en progreso/observadas
@@ -4920,7 +5232,7 @@ function renderTasks(){
     +'<div>Acciones</div>'
     +'</div>';
   let rows='';
-  let f=sup?sortTasks([...tasks],taskSort,taskSortDir):sortTasks(tasks.filter(function(t){return isMyTask(t)&&t.status!=='a-ingresar';}),taskSort,taskSortDir);
+  let f=sup?sortTasks([...tasks],taskSort,taskSortDir):sortTasks(tasks.filter(function(t){return isMyTask(t)&&t.status!=='a-ingresar'&&t.status!=='muestra-ok';}),taskSort,taskSortDir);
   if(filterAnalyst)f=f.filter(function(t){return getAssignees(t).includes(filterAnalyst);});
   if(filterStatus)f=f.filter(function(t){return filterStatus==='late'?t._dueStatus==='late':t.status===filterStatus;});
   if(filterSearch){var fs2=filterSearch.toLowerCase();f=f.filter(function(t){return t.producto.toLowerCase().includes(fs2)||t.lote.toLowerCase().includes(fs2);});}
@@ -4934,8 +5246,8 @@ function renderTasks(){
       +'</div>'
       +(myFT.length===0?'<div class="empty" style="margin-bottom:0">Sin tareas libres registradas</div>'
       :myFT.map(function(ft){
-          var stColor=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'?'var(--red)':ft.status==='pending'?'var(--blue)':'var(--amber)';
-          var stLabel=ft.status==='confirmed'?'✓ Confirmada':ft.status==='rejected'?'✗ Rechazada':ft.status==='pending'?'Asignada — pendiente':'Completada (conf. pendiente)';
+          var stColor=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'||ft.status==='declined'?'var(--red)':ft.status==='pending'?'var(--blue)':'var(--amber)';
+          var stLabel=ft.status==='confirmed'?'✓ Confirmada':ft.status==='rejected'?'✗ Rechazada':ft.status==='declined'?'✗ Declinada':ft.status==='pending'?'Asignada — pendiente':'Completada (conf. pendiente)';
           var fromSup=ft.assignedBy&&ft.assignedBy!==currentUser.id;
           var notifForFt=replanNotifs.find(function(n){return n.type==='free_task_assigned'&&n.freeTaskId===ft.id&&n.status==='pending';});
           return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:6px;display:flex;align-items:center;gap:10px">'
@@ -5242,10 +5554,10 @@ function renderPendingContent(){
   function mQ2(t){return !pq2||t.producto.toLowerCase().includes(pq2)||t.lote.toLowerCase().includes(pq2);}
   var psf=window.pendingStatusFilter||'all';
 
-  // Unified task list — all active + pending-confirm (+ a-ingresar for supervisor only)
+  // Unified task list — all active + pending-confirm (+ a-ingresar/muestra-ok for supervisor only)
   var allT=sortTasks(tasks.filter(function(t){
     var visibleStatuses=['pending','scheduled','progress','pending-confirm','done','observed'];
-    if(isSupRole())visibleStatuses.unshift('a-ingresar');
+    if(isSupRole()){visibleStatuses.unshift('a-ingresar');visibleStatuses.unshift('muestra-ok');}
     return visibleStatuses.indexOf(t.status)>=0&&mQ2(t);
   }),taskSort,taskSortDir);
 
@@ -5278,6 +5590,7 @@ function renderPendingContent(){
   var chips='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">'
     +chip('all','Todos','var(--navy,#1a4f8a)')
     +(isSupRole()?chip('a-ingresar','📦 A ingresar','#5b21b6'):'')
+    +(isSupRole()?chip('muestra-ok','🧪 Muestra OK','#059669'):'')
     +chip('pending','📥 Ingresado','#64748b')
     +chip('scheduled','📅 Programado','var(--blue)')
     +chip('progress','🔬 En análisis','var(--green)')
@@ -5304,29 +5617,38 @@ function renderPendingContent(){
     var anaAv=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':''}).join('');
     var obsHtml=t.observations&&t.observations.length
       ?'<span style="cursor:help;font-size:10px;font-weight:700;color:var(--amber-text);margin-left:4px" title="'+escH(t.observations.map(function(o,i){return '#'+(i+1)+' '+(o.byName||'')+': '+(o.comment||'');}).join('\n'))+'">⚑ ('+t.observations.length+')</span>':'';
-    // Arrival date badge for a-ingresar
+    // Badge para a-ingresar y muestra-ok
     var arrivalHtml='';
-    if(t.status==='a-ingresar'){
+    if(t.status==='a-ingresar'||t.status==='muestra-ok'){
       var todayStr2=today();
-      var isOverdue=t.expectedArrival&&t.expectedArrival<todayStr2;
+      var isOverdue=t.expectedArrival&&t.expectedArrival<todayStr2&&t.status==='a-ingresar';
       var arrTooltip='Llegada esperada: '+(t.expectedArrival?fmtDDMMYY(t.expectedArrival):'no definida')+(t.arrivalNotes?'\n'+t.arrivalNotes:'');
+      if(t.status==='muestra-ok'){
+        var sa=(t.samplerAssignments||[]).find(function(s){return s.done;});
+        if(sa)arrTooltip='Muestreo realizado: '+fmtDDMMYY(sa.realArrivalDate)+(sa.lotNotes?'\n'+sa.lotNotes:'');
+      }
       arrivalHtml='<span title="'+escH(arrTooltip)+'" style="cursor:help;margin-left:4px;font-size:11px">'
-        +(isOverdue
-          ?'<span style="color:var(--red-text);font-weight:700">⚠ '+fmtDDMMYY(t.expectedArrival)+'</span>'
+        +(t.status==='muestra-ok'?'<span style="color:#059669;font-weight:700">🧪 OK</span>'
+          :isOverdue?'<span style="color:var(--red-text);font-weight:700">⚠ '+fmtDDMMYY(t.expectedArrival)+'</span>'
           :(t.expectedArrival?'📦 '+fmtDDMMYY(t.expectedArrival):'📦 —'))
         +'</span>';
     }
+    // Muestreadores asignados
+    var samplerAv=(t.samplerAssignments||[]).map(function(sa){var u=getU(sa.sampler);return u?'<div class="av '+u.av+'" title="'+escH(u.name+(sa.done?' ✓':''))+'" style="width:20px;height:20px;font-size:8px;'+(sa.done?'border:2px solid #059669':'opacity:.6')+'">'+escH(u.avInit)+'</div>':''}).join('');
     return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
       +'<div><div class="cell-trunc" style="font-weight:500;font-size:12px">'+escH(t.producto)+'</div>'
       +'<div class="cell-sub cell-trunc" style="font-size:10px">'+escH(t.lote)+'</div></div>'
-      +'<div style="display:flex;align-items:center;gap:2px;flex-wrap:wrap">'+(anaAv||'<span style="color:var(--text3);font-size:11px">Sin asignar</span>')+'</div>'
+      +'<div style="display:flex;align-items:center;gap:2px;flex-wrap:wrap">'
+      +(anaAv||'<span style="color:var(--text3);font-size:11px">—</span>')
+      +(samplerAv?'<span style="color:var(--text3);font-size:9px;margin:0 2px">|</span>'+samplerAv:'')
+      +'</div>'
       +'<div style="font-family:var(--mono);font-size:11px;color:var(--text2)">'+(t.created?fmtDDMMYY(t.created):'—')+'</div>'
       +'<div style="font-family:var(--mono);font-size:11px">'+(firstDate?fmtDDMMYY(firstDate):'—')+'</div>'
       +'<div style="font-size:11px">'+(t.due?dueBadge(t):'—')+'</div>'
       +'<div><span class="pill '+(t.priority||'Normal').toLowerCase()+'" style="font-size:10px">'+(t.priority||'Normal')+'</span></div>'
       +'<div><span class="pill '+(taskDisplayStatus(t)==='partial'?'partial':t.status)+'" style="font-size:10px">'+statusLabel(taskDisplayStatus(t))+'</span>'+obsHtml+arrivalHtml+'</div>'
       +'<div onclick="event.stopPropagation()" style="display:flex;gap:3px">'
-      +(isSupRole()&&t.status==='a-ingresar'?'<button class="btn sm suc" onclick="event.stopPropagation();markSampleReceived('+t.id+')" style="font-size:10px;background:#5b21b6;border-color:#5b21b6;color:#fff">✓ Recibida</button>':'')
+      +(isSupRole()&&(t.status==='a-ingresar'||t.status==='muestra-ok')?'<button class="btn sm suc" onclick="event.stopPropagation();markSampleReceived('+t.id+')" style="font-size:10px;background:#5b21b6;border-color:#5b21b6;color:#fff">✓ Recibir</button>':'')
       +(isSupRole()&&t.status==='pending-confirm'?'<button class="btn sm suc" onclick="event.stopPropagation();confirmDone('+t.id+')" style="font-size:10px">✓ Conf.</button>':'')
       +(isSupRole()?'<button class="btn sm" onclick="event.stopPropagation();deleteTask('+t.id+')" style="color:var(--text3);padding:2px 4px" title="Eliminar">🗑</button>':'')
       +'</div>'
@@ -5358,25 +5680,35 @@ function getMonthDates(off){
     label:['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'][d.getMonth()]+' '+d.getFullYear()};
 }
 
-function renderCalRoleFilter(){
+function _renderRoleFilterChips(filterVar,setExpr){
   var roles=[
     {id:'all',label:'Todos'},
     {id:'analyst',label:'Analistas'},
-    {id:'reviewer',label:'Revisores'},
+    {id:'sampler',label:'Muestreadores'},
     {id:'staff',label:'Personal'},
+    {id:'reviewer',label:'Revisores'},
   ];
   var html='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">';
   roles.forEach(function(r){
-    var count=r.id==='all'?ANALYSTS.length:ANALYSTS.filter(function(a){return a.role===r.id;}).length;
+    var count=r.id==='all'?CAL_USERS.length:CAL_USERS.filter(function(a){return a.role===r.id;}).length;
     if(count===0&&r.id!=='all')return;
-    var active=calRoleFilter===r.id;
-    html+='<button class="btn sm" onclick="calRoleFilter=\''+r.id+'\';render()" style="'+(active?'background:var(--blue);color:#fff;border-color:var(--blue)':'')+'">'+r.label+(r.id!=='all'?' ('+count+')':'')+'</button>';
+    var active=filterVar===r.id;
+    html+='<button class="btn sm" onclick="'+setExpr.replace('__ID__',r.id)+'" style="'+(active?'background:var(--blue);color:#fff;border-color:var(--blue)':'')+'">'+r.label+(r.id!=='all'?' ('+count+')':'')+'</button>';
   });
   html+='</div>';
   return html;
 }
+function renderCalRoleFilter(){
+  return _renderRoleFilterChips(calRoleFilter,"calRoleFilter='__ID__';render()");
+}
+function renderRrhhRoleFilter(){
+  return _renderRoleFilterChips(rrhhRoleFilter,"rrhhRoleFilter='__ID__';render()");
+}
+function renderMgmtRoleFilter(){
+  return _renderRoleFilterChips(mgmtRoleFilter,"mgmtRoleFilter='__ID__';render()");
+}
 function getCalRows(sup){
-  var base=sup?ANALYSTS:[ANALYSTS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
+  var base=sup?CAL_USERS:[CAL_USERS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
   if(!sup||calRoleFilter==='all')return base;
   return base.filter(function(a){return a.role===calRoleFilter;});
 }
@@ -5397,10 +5729,10 @@ function renderCalWeek(sup){
   </div>
   <div class="week-grid" style="overflow-x:auto">
     <div style="min-width:700px">
-      <div class="whead" style="${cols}"><div>Analista</div>${dayLbls.map((d,i)=>`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
+      <div class="whead" style="${cols}"><div>Usuario</div>${dayLbls.map((d,i)=>`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
       ${rows.map(a=>`<div class="wrow" style="${cols}">
         <div class="wcell-name"><div class="av ${a.av}" style="flex-shrink:0">${escH(a.avInit)}</div>${escH(a.name.split(' ')[0])}</div>
-        ${wd.map(d=>{const dt=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>`<div class="chip ${hasConflict?'':''+a.chip}" onclick="openEdit(${t.id})" style="cursor:pointer;margin-bottom:2px;${hasConflict?'border:1px solid var(--red);background:var(--red-bg);':''}">${hasConflict?'⚠ ':''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>`<div style="padding:1px 3px;font-size:9px;background:var(--surface);border:1px dashed var(--border2);border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2)" title="${escH(ft.description)}">✎ ${escH(ft.description.slice(0,14))} ${ft.hours}h</div>`).join('')}</div>`;}).join('')}
+        ${wd.map(d=>{const dt=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'));const dst=tasks.filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>`<div class="chip ${hasConflict?'':''+a.chip}" onclick="openEdit(${t.id})" style="cursor:pointer;margin-bottom:2px;${hasConflict?'border:1px solid var(--red);background:var(--red-bg);':''}">${hasConflict?'⚠ ':''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>`<div style="padding:1px 3px;font-size:9px;background:var(--surface);border:1px dashed var(--border2);border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2)" title="${escH(ft.description)}">✎ ${escH(ft.description.slice(0,14))} ${ft.hours}h</div>`).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
       </div>`).join('')}
     </div>
   </div>
@@ -5546,6 +5878,21 @@ function renderCalMonth(sup){
           +'</div></div>';
       });
 
+      // Muestreos realizados en este día
+      tasks.forEach(function(t){
+        (t.samplerAssignments||[]).filter(function(sa){
+          return sa.done&&sa.realArrivalDate===dateStr&&rows.some(function(r){return r.id===sa.sampler;});
+        }).forEach(function(sa){
+          var su=getU(sa.sampler);
+          gridHtml+='<div style="padding:1px 4px;border-radius:3px;margin-bottom:2px;background:#ede9fe;border:1px solid #7c3aed44;border-left:2px solid #7c3aed">'
+            +'<div style="display:flex;align-items:center;gap:2px;">'
+            +(sup&&!selA&&su?'<span class="av '+su.av+'" style="width:12px;height:12px;font-size:6px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0">'+escH(su.avInit)+'</span>':'')
+            +'<span style="font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6">🧪 '+escH(t.producto.slice(0,16))+'</span>'
+            +(sa.hours?'<span style="font-size:8px;color:#7c3aed;margin-left:2px;flex-shrink:0">'+sa.hours+'h</span>':'')
+            +'</div></div>';
+        });
+      });
+
       gridHtml+='</div>';
     });
     gridHtml+='</div>';
@@ -5556,6 +5903,7 @@ function renderCalMonth(sup){
   const legendHtml='<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text2)">'
     +(selA?'<span style="font-size:11px;color:var(--blue);font-weight:500">Mostrando: '+escH(allRows.find(function(a){return a.id===selA;})?.name||'')+'</span>':'')
     +'<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#e8eff8;border-left:2px solid #1a4f8a;border-radius:2px;display:inline-block"></span>Gestión</span>'
+    +'<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#ede9fe;border-left:2px solid #7c3aed;border-radius:2px;display:inline-block"></span>Muestreo</span>'
     +'<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:var(--bg2);border:1px solid var(--border);border-radius:2px;display:inline-block"></span>No laborable</span>'
     +'</div>';
 
@@ -5612,13 +5960,15 @@ function renderAnalysts(){
 
 function renderHistorialNotif(){
   var typeConf={
-    'observation': {icon:'⚑',label:'Observación',   color:'var(--amber)',  bg:'var(--amber-bg)'},
-    'resubmit':    {icon:'↩',label:'Re-envío',       color:'var(--blue)',   bg:'var(--blue-bg)'},
-    'completion':  {icon:'💬',label:'Comentario',    color:'var(--green)',  bg:'var(--green-bg,#e8f5e9)'},
-    'done':        {icon:'✓', label:'Completado',    color:'var(--green)',  bg:'var(--green-bg,#e8f5e9)'},
-    'reviewed':    {icon:'📋',label:'Revisado',      color:'var(--blue)',   bg:'var(--blue-bg)'},
-    'approved':    {icon:'✅',label:'Aprobado',      color:'var(--green)',  bg:'var(--green-bg,#e8f5e9)'},
-    'replan':      {icon:'↺', label:'Replanificación',color:'var(--text2)', bg:'var(--bg2)'},
+    'observation':   {icon:'⚑', label:'Observación',      color:'var(--amber)',  bg:'var(--amber-bg)'},
+    'resubmit':      {icon:'↩', label:'Re-envío',          color:'var(--blue)',   bg:'var(--blue-bg)'},
+    'completion':    {icon:'💬',label:'Comentario',        color:'var(--green)',  bg:'var(--green-bg,#e8f5e9)'},
+    'done':          {icon:'✓', label:'Completado',        color:'var(--green)',  bg:'var(--green-bg,#e8f5e9)'},
+    'reviewed':      {icon:'📋',label:'Revisado',          color:'var(--blue)',   bg:'var(--blue-bg)'},
+    'approved':      {icon:'✅',label:'Aprobado',          color:'var(--green)',  bg:'var(--green-bg,#e8f5e9)'},
+    'replan':        {icon:'↺', label:'Replanificación',   color:'var(--text2)', bg:'var(--bg2)'},
+    'sampling_done': {icon:'🧪',label:'Muestreo realizado',color:'#059669',      bg:'#d1fae5'},
+    'received':      {icon:'📦',label:'Muestra recibida',  color:'#5b21b6',      bg:'#ede9fe'},
   };
 
   // Collect events from all tasks
@@ -5648,6 +5998,21 @@ function renderHistorialNotif(){
     var task=tasks.find(function(t){return t.id===n.taskId;});
     if(task){
       events.push({ts:n.ts||0,type:'replan',task:task,by:getU(n.analystId||'').name,comment:n.message||n.reason||''});
+    }
+  });
+  // Muestreos realizados
+  replanNotifs.filter(function(n){return n.type==='sampling_done';}).forEach(function(n){
+    var task=tasks.find(function(t){return t.id===n.taskId;});
+    if(task){
+      events.push({ts:n.ts||0,type:'sampling_done',task:task,by:n.samplerName||'',
+        comment:'Fecha llegada: '+fmtDDMMYY(n.realArrivalDate)+(n.lotNotes?' | '+n.lotNotes:'')+(n.hours?' | '+n.hours.toFixed(1)+'h':'')});
+    }
+  });
+  // Recepciones aprobadas por supervisor
+  tasks.forEach(function(t){
+    if(t.arrivedTs){
+      events.push({ts:t.arrivedTs,type:'received',task:t,by:t.arrivedBy?getU(t.arrivedBy).name:'',
+        comment:'Recibido: '+fmtDDMMYY(t.arrivedDate||'')});
     }
   });
 
@@ -5704,11 +6069,13 @@ function renderAdmin(){
     {id:'supervisor',label:'Supervisor'},
     {id:'reviewer',  label:'Revisor'},
     {id:'analyst',   label:'Analista'},
+    {id:'sampler',   label:'Muestreador'},
     {id:'staff',     label:'Personal'},
   ];
   const roleBadgeStyle=function(r){
     return r==='supervisor'?'background:var(--blue-bg);color:var(--blue)'
           :r==='reviewer'  ?'background:var(--green-bg);color:var(--green-text)'
+          :r==='sampler'   ?'background:#d1fae5;color:#065f46'
           :r==='staff'     ?'background:var(--amber-bg);color:var(--amber-text)'
                            :'background:var(--bg2);color:var(--text2)';
   };
@@ -5794,6 +6161,18 @@ function renderAdmin(){
     +'</div>'
     +'</div>'
 
+    +'<div style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px">'
+    +'<div style="font-weight:700;margin-bottom:4px">📖 Guía de usuario</div>'
+    +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">URL que aparece como enlace en la pantalla de login. Puede ser una ruta local o una URL web.</div>'
+    +'<div style="display:flex;gap:8px;align-items:center">'
+    +'<input type="url" id="guide-url-input" value="'+escH(workdayConfig.guideUrl||'')+'" placeholder="Ej: labtrack_guia.html o https://…"'
+    +' style="flex:1;font-size:13px;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
+    +'<button class="btn pri sm" onclick="saveGuideUrl()">Guardar</button>'
+    +(workdayConfig.guideUrl?'<a href="'+escH(workdayConfig.guideUrl)+'" target="_blank" class="btn sm">Abrir ↗</a>':'')
+    +'</div>'
+    +'<div id="guide-url-msg" style="font-size:11px;min-height:14px;margin-top:5px;color:var(--green)"></div>'
+    +'</div>'
+
     +'<div style="margin-top:16px;background:var(--red-bg);border:1px solid var(--red);border-radius:var(--radius-lg);padding:14px">'
     +'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">'
     +'<div>'
@@ -5844,6 +6223,15 @@ function saveUserPwd(uid){
   if(msg){msg.style.color='var(--green)';msg.textContent='Contraseña actualizada.';setTimeout(function(){if(msg)msg.textContent='';},2000);}
 }
 
+
+function saveGuideUrl(){
+  const v=(document.getElementById('guide-url-input')||{}).value||'';
+  workdayConfig.guideUrl=v.trim();
+  saveLS();saveNow().catch(function(e){console.error('saveGuideUrl:',e);});
+  const msg=document.getElementById('guide-url-msg');
+  if(msg){msg.textContent=v.trim()?'URL guardada.':'URL eliminada.';setTimeout(function(){if(msg)msg.textContent='';},2000);}
+  render();
+}
 
 function deleteUser(uid){
   const u=uMap[uid];if(!u)return;
@@ -6128,6 +6516,23 @@ function renderTaskModal(){
     +'<div class="frow form-full"><label>Analistas asignados</label>'
     +'<div class="analysts-check">'+analChecks+'</div>'
     +'</div>'
+    +(isEdit&&isSupRole()&&SAMPLERS.length?'<div class="frow form-full"><label>Muestreador asignado <span style="font-size:11px;color:var(--text3)">(opcional — para productos "A ingresar")</span></label>'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
+    +(()=>{
+      var curSamplers=(t.samplerAssignments||[]).filter(function(s){return !s.removed;}).map(function(s){return s.sampler;});
+      return'<button class="btn sm'+(curSamplers.length===0?' active':'')+'" onclick="setSamplerAssign('+t.id+',null)" style="'+(curSamplers.length===0?'background:var(--bg2);font-weight:600':'')+'">— Sin muestreador</button>'
+      +SAMPLERS.map(function(u){
+        var isSel=curSamplers.includes(u.id);
+        var sa=isSel?(t.samplerAssignments||[]).find(function(s){return s.sampler===u.id;}):null;
+        return'<button class="btn sm" onclick="setSamplerAssign('+t.id+',\''+u.id+'\')" style="'+(isSel?'background:#d1fae5;border-color:#059669;color:#065f46;font-weight:600':'')+'"><div class="av '+u.av+'" style="width:16px;height:16px;font-size:7px;display:inline-flex;align-items:center;justify-content:center;margin-right:3px">'+escH(u.avInit)+'</div>'+escH(u.name)+(sa&&sa.done?' ✓':'')+'</button>';
+      }).join('');
+    })()
+    +'</div>'
+    +(t.samplerAssignments&&t.samplerAssignments.some(function(s){return !s.removed;})
+      ?'<div class="frow" style="margin-top:6px"><label style="font-size:11px">Instrucciones de muestreo (opcional)</label>'
+      +'<input type="text" id="f-sampler-note" value="'+escH((t.samplerAssignments&&t.samplerAssignments.find(function(s){return !s.removed;})||{}).assignedNote||'')+'" placeholder="Ej: Verificar temperatura de transporte…"></div>'
+      :'')
+    +'</div>':'')
     +'<div class="frow form-full"><label>Fecha por analista</label>'
     +'<div id="date-assigns"></div>'
     +(realTotal>0?'<div style="font-size:11px;color:var(--text2);margin-top:4px;font-family:var(--mono)">Real acumulado: <b style="color:var(--green)">'+realTotal.toFixed(1)+'h</b></div>':'')
@@ -6151,12 +6556,23 @@ function renderTaskComments(t){
   (t.completionComments||[]).forEach(function(c){
     events.push({ts:c.ts||0,type:'completion',by:c.byName||c.by,comment:c.comment||''});
   });
+  // Muestreo: una entrada por cada asignación completada
+  (t.samplerAssignments||[]).filter(function(s){return s.done;}).forEach(function(s){
+    var u=getU(s.sampler);
+    var commentParts=[];
+    if(s.realArrivalDate)commentParts.push('Fecha real de llegada: '+fmtDDMMYY(s.realArrivalDate));
+    if(s.lotNotes)commentParts.push(s.lotNotes);
+    if(s.hours&&s.hours>0)commentParts.push('Tiempo dedicado: '+s.hours.toFixed(1)+'h');
+    if(!s.assignedBy)commentParts.push('(muestreo sin asignación previa)');
+    events.push({ts:s.doneAt||0,type:'sampling',by:u?u.name:(s.samplerName||'Muestreador'),comment:commentParts.join('\n')});
+  });
   events.sort(function(a,b){return (a.ts||0)-(b.ts||0);});
   if(!events.length)return'';
   var typeConf={
     observation:{icon:'⚑',label:'Observación',color:'var(--amber)',bg:'var(--amber-bg)'},
     resubmit:   {icon:'↩',label:'Re-envío',   color:'var(--blue)', bg:'var(--blue-bg)'},
-    completion: {icon:'💬',label:'Comentario del analista',color:'var(--green)',bg:'var(--green-bg,#e8f5e9)'}
+    completion: {icon:'💬',label:'Comentario del analista',color:'var(--green)',bg:'var(--green-bg,#e8f5e9)'},
+    sampling:   {icon:'🧪',label:'Muestreo registrado',color:'#7c3aed',bg:'#ede9fe'}
   };
   var rows=events.map(function(ev){
     var c=typeConf[ev.type]||typeConf.completion;
@@ -6716,7 +7132,7 @@ function copyFreeTasks(btn){
   var HDR='Fecha\tAnalista\tDescripción\tH. Sugeridas\tH. Reales\tComentario\tEstado\tConfirmado por';
   var rows=list.map(function(ft){
     var u=getU(ft.analystId);
-    var stL=ft.status==='confirmed'?'Confirmada':ft.status==='rejected'?'Rechazada':'Pend. confirmación';
+    var stL=ft.status==='confirmed'?'Confirmada':ft.status==='rejected'?'Rechazada':ft.status==='declined'?'Declinada':'Pend. confirmación';
     return[ft.date,u.name,ft.description,ft.suggestedHours||'',ft.realHours||ft.hours||'',ft.completionComment||ft.notes||'',stL,ft.confirmedBy?getU(ft.confirmedBy).name:''].join('\t');
   });
   _clipCopy(HDR+'\n'+rows.join('\n'),btn,'📋 Copiar');
@@ -6727,7 +7143,7 @@ function exportFreeTasksXLSX(){
     var list=freeTasks.filter(function(ft){return(!fa||ft.analystId===fa)&&(!fm||ft.date.slice(0,7)===fm);});
     var data=list.map(function(ft){
       var u=getU(ft.analystId);
-      var stL=ft.status==='confirmed'?'Confirmada':ft.status==='rejected'?'Rechazada':'Pend. confirmación';
+      var stL=ft.status==='confirmed'?'Confirmada':ft.status==='rejected'?'Rechazada':ft.status==='declined'?'Declinada':'Pend. confirmación';
       return{'Fecha':ft.date,'Analista':u.name,'Descripción':ft.description,'H. Sugeridas':ft.suggestedHours||null,'H. Reales':ft.realHours||ft.hours||null,'Comentario':ft.completionComment||ft.notes||'','Estado':stL,'Confirmado por':ft.confirmedBy?getU(ft.confirmedBy).name:''};
     });
     var ws=XLSX.utils.json_to_sheet(data);
@@ -6887,9 +7303,12 @@ function markDone(id,assignDate){
         description:'Re-envío tras observación: '+t.producto+' '+t.lote,
         comment:resubComment.trim()
       },'Re-envío: '+resubComment.trim());
-      // Marcar notificación de observación como leída
+      // Marcar notificación de observación como leída (por el analista que re-envía)
       replanNotifs.forEach(function(n){
-        if(n.type==='observation'&&n.taskId===id&&n.analystId===currentUser.id)n.status='read';
+        if(n.type==='observation'&&n.taskId===id&&n.analystId===currentUser.id){
+          if(!n.readBy)n.readBy=[];
+          if(!n.readBy.includes(currentUser.id))n.readBy.push(currentUser.id);
+        }
       });
       // Notificar al Supervisor
       var reviewerUsers=USERS.filter(function(u){return u.role==='supervisor'||u.role==='reviewer';});
@@ -7165,12 +7584,7 @@ function confirmAssignment(taskId, analystId, assignDate){
     t.status='done';
     t.confirmedBy=currentUser.id;
     t.confirmedTs=Date.now();
-    // Resolve all pending notifications for this task
-    replanNotifs.filter(function(n){
-      return n.status==='pending'
-        && (n.taskId===Number(taskId)||n.tid===Number(taskId))
-        && ['completed','planification_request'].includes(n.type);
-    }).forEach(function(n){n.status='resolved';});
+    resolveAllCopies({type:'completed',taskId:Number(taskId)},'accepted');
     auditLog('CONFIRM','TASK',Number(taskId),{field:'status',oldVal:'pending-confirm',newVal:'done',
       description:'Confirmación completado: '+t.producto+' '+t.lote},'');
   } else {
@@ -7185,15 +7599,8 @@ function confirmAssignment(taskId, analystId, assignDate){
         t.status='progress';
       }
     }
-    // Clear completedBy so next analyst's completion triggers a fresh notification
     delete t.completedBy;
-    // Resolve 'completed' and 'planification_request' notifications for this task/analyst
-    replanNotifs.filter(function(n){
-      return n.status==='pending'
-        && (n.taskId===Number(taskId)||n.tid===Number(taskId))
-        && (n.type==='completed'||n.type==='planification_request')
-        && (n.analystId===analystId||!n.analystId);
-    }).forEach(function(n){n.status='resolved';});
+    resolveAllCopies({type:'completed',taskId:Number(taskId),analystId:analystId},'accepted');
     var u=getU(analystId);
     auditLog('CONFIRM_PARTIAL','TASK',Number(taskId),{analystId:analystId,
       description:'Confirmación de '+( u?u.name:'?')+': '+t.producto+' '+t.lote},'');
@@ -7206,12 +7613,11 @@ function markAllNotifsRead(){
   var uid=currentUser.id;
   var isSup2=isSupRole();
   replanNotifs.forEach(function(n){
-    if(n.status!=='pending') return;
+    if(n.status==='resolved') return;
     var mine=n.forUserId===uid||n.analystId===uid||n.fromUser===uid;
     if(!mine) return;
-    // confirmPend (type='completed') solo se resuelve confirmando explícitamente
     if(isSup2 && n.type==='completed') return;
-    n.status='read';
+    if(!(n.readBy||[]).includes(uid)){if(!n.readBy)n.readBy=[];n.readBy.push(uid);}
   });
   // Solicitudes de horario: marcar como vistas para suprimir badge sin bloquear acción
   if(isSup2){
@@ -7229,8 +7635,40 @@ function markAllNotifsRead(){
 
 function markNotifRead(notifId){
   var n=replanNotifs.find(function(x){return x.id===notifId;});
-  if(n)n.status='read';
+  if(n){if(!n.readBy)n.readBy=[];if(!n.readBy.includes(currentUser.id))n.readBy.push(currentUser.id);}
   saveLS();saveNow().catch(function(e){console.error(e);});
+}
+
+// Resuelve TODAS las copias del mismo evento (para que un supervisor resuelva para todos)
+function resolveAllCopies(opts, how){
+  var now=Date.now();
+  replanNotifs.forEach(function(n){
+    if(n.status==='resolved') return;
+    if(n.type!==opts.type) return;
+    if(opts.taskId!=null && n.taskId!==opts.taskId) return;
+    if(opts.freeTaskId!=null && n.freeTaskId!==opts.freeTaskId) return;
+    if(opts.analystId!=null && n.analystId!==opts.analystId) return;
+    n.status='resolved';
+    n.resolvedHow=how;
+    n.resolvedBy=currentUser.id;
+    n.resolvedByName=currentUser.name;
+    n.resolvedTs=now;
+  });
+}
+
+function getNotifEventLabel(n){
+  var labels={
+    'resubmit':'Re-envío tras observación','replan':'Solicitud de replanificación',
+    'planification_request':'Solicitud de planificación','sampling_done':'Muestreo completado',
+    'free_task_completed':'Actividad libre completada','free_task_assigned':'Actividad libre asignada',
+    'observation':'Observación','completed':'Tarea completada',
+    'replan_rejected':'Replanificación rechazada','planification_accepted':'Planificación aceptada',
+    'planification_rejected':'Planificación rechazada','hours_rejected':'Horas rechazadas',
+    'free_task_declined':'Tarea libre declinada',
+    'free_task_rejected':'Tarea libre rechazada','sampling_rejected':'Muestreo rechazado',
+    'schedule_rejected':'Horario rechazado',
+  };
+  return labels[n.type]||n.type;
 }
 
 function confirmDone(id){
@@ -7253,7 +7691,7 @@ function confirmDone(id){
 }
 function markSampleReceived(id){
   var t=tasks.find(function(x){return x.id===id;});
-  if(!t||t.status!=='a-ingresar')return;
+  if(!t||(t.status!=='a-ingresar'&&t.status!=='muestra-ok'))return;
   receiveTaskId=id;
   showReceiveModal=true;
   render();
@@ -7261,16 +7699,23 @@ function markSampleReceived(id){
 function renderReceiveModal(){
   var t=tasks.find(function(x){return x.id===receiveTaskId;});
   if(!t)return'';
+  var sa=(t.samplerAssignments||[]).find(function(s){return s.done;});
+  var isMuestraOk=t.status==='muestra-ok';
   return'<div class="modal-overlay" onclick="if(event.target===this){showReceiveModal=false;receiveTaskId=null;render();}">'
-    +'<div class="modal" style="max-width:380px">'
-    +'<h3 style="margin-bottom:4px">✓ Muestra recibida</h3>'
-    +'<div style="font-size:12px;color:var(--text3);margin-bottom:16px">'+escH(t.producto)+' — '+escH(t.lote)+'</div>'
+    +'<div class="modal" style="max-width:420px">'
+    +'<h3 style="margin-bottom:4px">✓ Confirmar recepción de muestra</h3>'
+    +'<div style="font-size:12px;color:var(--text3);margin-bottom:14px">'+escH(t.producto)+' — '+escH(t.lote)+'</div>'
+    +(isMuestraOk&&sa?'<div class="sampling-info" style="margin-bottom:12px;font-size:12px">'
+      +'<div style="font-weight:600;color:#065f46;margin-bottom:4px">🧪 Muestreo registrado por '+escH(getU(sa.sampler).name||'')+'</div>'
+      +'<div>Fecha real de llegada: <b style="font-family:var(--mono)">'+fmtDDMMYY(sa.realArrivalDate)+'</b></div>'
+      +(sa.lotNotes?'<div style="margin-top:4px;color:var(--text2)">Datos de lote: '+escH(sa.lotNotes)+'</div>':'')
+      +'</div>':'')
     +(t.expectedArrival?'<div style="font-size:12px;margin-bottom:10px;padding:7px 10px;background:var(--bg);border-radius:var(--radius);border:1px solid var(--border)">'
       +'<span style="color:var(--text3)">Llegada esperada: </span><b style="font-family:var(--mono)">'+fmtDDMMYY(t.expectedArrival)+'</b></div>':'')
     +(t.arrivalNotes?'<div style="font-size:11px;color:var(--text2);margin-bottom:12px;padding:6px 10px;background:var(--bg);border-radius:var(--radius)">'+escH(t.arrivalNotes)+'</div>':'')
     +'<div class="frow" style="margin-bottom:0">'
     +'<label>Fecha de recepción <span style="color:var(--red)">*</span></label>'
-    +'<input type="date" id="f-received-date" value="'+today()+'" style="font-weight:600">'
+    +'<input type="date" id="f-received-date" value="'+(isMuestraOk&&sa?sa.realArrivalDate:today())+'" style="font-weight:600">'
     +'<div style="font-size:11px;color:var(--text3);margin-top:4px">Esta fecha reemplazará la fecha de ingreso de la muestra.</div>'
     +'</div>'
     +'<div class="modal-btns" style="margin-top:16px">'
@@ -7284,19 +7729,113 @@ function confirmSampleReceived(){
   if(!t)return;
   var receivedDate=document.getElementById('f-received-date').value;
   if(!receivedDate){alert('Ingresá la fecha de recepción.');return;}
+  var oldStatus=t.status;
   var oldCreated=t.created;
-  t.status='pending';
-  t.created=receivedDate;       // reemplaza la fecha de ingreso
+  var newStatus=(t.assignments||[]).filter(function(a){return !a._removed;}).length>0?'scheduled':'pending';
+  t.status=newStatus;
+  t.created=receivedDate;
   t.arrivedDate=receivedDate;
   t.arrivedBy=currentUser.id;
   t.arrivedTs=Date.now();
-  auditLog('RECEIVE','TASK',receiveTaskId,{field:'status',oldVal:'a-ingresar',newVal:'pending',
+  t._ts=Date.now();
+  resolveAllCopies({type:'sampling_done',taskId:t.id},'accepted');
+  auditLog('RECEIVE','TASK',receiveTaskId,{field:'status',oldVal:oldStatus,newVal:newStatus,
     description:'Muestra recibida: '+t.producto+' '+t.lote,
     expectedArrival:t.expectedArrival||'',
     oldCreated:oldCreated,arrivedDate:receivedDate},'Muestra recibida en laboratorio');
   showReceiveModal=false;receiveTaskId=null;
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow confirmSampleReceived:',e);});
+}
+
+// Muestreador registra el muestreo
+function openSamplingModal(taskId){
+  samplingTaskId=taskId;showSamplingModal=true;render();
+}
+function renderSamplingModal(){
+  var t=tasks.find(function(x){return x.id===samplingTaskId;});
+  if(!t)return'';
+  return'<div class="modal-overlay" onclick="if(event.target===this){showSamplingModal=false;samplingTaskId=null;render();}">'
+    +'<div class="modal" style="max-width:400px">'
+    +'<h3 style="margin-bottom:4px">🧪 Registrar muestreo</h3>'
+    +'<div style="font-size:12px;color:var(--text3);margin-bottom:14px">'+escH(t.producto)+' — '+escH(t.lote)+'</div>'
+    +(t.expectedArrival?'<div style="font-size:12px;margin-bottom:10px;padding:7px 10px;background:var(--bg);border-radius:var(--radius);border:1px solid var(--border)">'
+      +'<span style="color:var(--text3)">Llegada esperada: </span><b style="font-family:var(--mono)">'+fmtDDMMYY(t.expectedArrival)+'</b></div>':'')
+    +(t.arrivalNotes?'<div style="font-size:11px;color:var(--text2);margin-bottom:10px;padding:6px 10px;background:var(--bg);border-radius:var(--radius)">📝 '+escH(t.arrivalNotes)+'</div>':'')
+    +'<div class="form-grid">'
+    +'<div class="frow"><label>Fecha real de llegada <span style="color:var(--red)">*</span></label>'
+    +'<input type="date" id="f-sampling-date" value="'+today()+'" style="font-weight:600"></div>'
+    +'<div class="frow"><label>Horas dedicadas <span style="color:var(--red)">*</span></label>'
+    +'<input type="number" id="f-sampling-hours" min="0.5" max="24" step="0.5" placeholder="ej. 1.5" style="width:130px"></div>'
+    +'<div class="frow form-full"><label>Datos de lote / Comentarios</label>'
+    +'<textarea id="f-sampling-notes" style="min-height:70px" placeholder="N° serie, condición, cantidad, observaciones…"></textarea></div>'
+    +'</div>'
+    +'<div class="modal-btns" style="margin-top:4px">'
+    +'<button class="btn" onclick="showSamplingModal=false;samplingTaskId=null;render()">Cancelar</button>'
+    +'<button class="btn pri" style="background:#059669;border-color:#059669" onclick="confirmSampling()">✓ Confirmar muestreo</button>'
+    +'</div>'
+    +'</div></div>';
+}
+function confirmSampling(){
+  var t=tasks.find(function(x){return x.id===samplingTaskId;});
+  if(!t)return;
+  var samplingDate=document.getElementById('f-sampling-date').value;
+  var lotNotes=(document.getElementById('f-sampling-notes').value||'').trim();
+  var samplingHours=parseFloat(document.getElementById('f-sampling-hours')?.value)||0;
+  if(!samplingDate){alert('Ingresá la fecha real de llegada.');return;}
+  if(!samplingHours||samplingHours<=0){alert('Ingresá las horas dedicadas al muestreo.');return;}
+  if(!t.samplerAssignments)t.samplerAssignments=[];
+  // Buscar asignación activa; si no existe, crear una (muestreo sin asignación previa)
+  var sa=t.samplerAssignments.find(function(s){return s.sampler===currentUser.id&&!s.done;});
+  if(!sa){
+    sa={
+      id:Date.now(),
+      sampler:currentUser.id,
+      samplerName:currentUser.name,
+      assignedBy:null,
+      assignedTs:Date.now(),
+      done:false,
+      _ts:Date.now()
+    };
+    t.samplerAssignments.push(sa);
+  }
+  sa.done=true;
+  sa.doneAt=Date.now();
+  sa.realArrivalDate=samplingDate;
+  sa.lotNotes=lotNotes;
+  if(samplingHours>0)sa.hours=samplingHours;
+  sa._ts=Date.now();
+  t.status='muestra-ok';
+  t._ts=Date.now();
+  // Crear notificación al supervisor
+  var supUser=USERS.find(function(u){return u.role==='supervisor';});
+  replanNotifs.push({
+    id:nextNotifId++,
+    type:'sampling_done',
+    taskId:t.id,
+    samplerId:currentUser.id,
+    samplerName:currentUser.name,
+    realArrivalDate:samplingDate,
+    lotNotes:lotNotes,
+    hours:samplingHours||null,
+    forUserId:supUser?supUser.id:'',
+    status:'pending',
+    ts:Date.now(),
+    producto:t.producto,
+    lote:t.lote
+  });
+  auditLog('SAMPLING','TASK',samplingTaskId,{
+    field:'status',oldVal:'a-ingresar',newVal:'muestra-ok',
+    sampler:currentUser.id,
+    realArrivalDate:samplingDate,
+    lotNotes:lotNotes||undefined,
+    hours:samplingHours||undefined,
+    selfAssigned:!sa.assignedBy||undefined,
+    description:'Muestreo registrado: '+t.producto+' '+t.lote+(samplingHours?' ('+samplingHours+'h)':'')
+  },'Muestreo realizado por '+currentUser.name);
+  showSamplingModal=false;samplingTaskId=null;
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow confirmSampling:',e);});
 }
 function requestScheduleChange(analystId,dateStr){
   schedModalAnalyst=analystId;schedModalDate=dateStr||null;showSchedModal=true;render();
@@ -7343,9 +7882,15 @@ function approveSchedule(reqId){
 function rejectSchedule(reqId){
   if(!isSupRole()){alert('Solo el Supervisor puede rechazar solicitudes de horario.');return;}
   const req=scheduleRequests.find(r=>r.id===reqId);if(!req)return;
-  req.status='rejected';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();
-  saveLS();render();
-  saveNow().catch(e=>console.error('saveNow reject:',e));
+  var reason=prompt('Motivo del rechazo (opcional):','');
+  if(reason===null)return;
+  req.status='rejected';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();req.rejectionReason=reason||'';
+  replanNotifs.push({id:nextNotifId++,type:'schedule_rejected',
+    analystId:req.analystId,forUserId:req.analystId,
+    reason:reason||'',rejectedByName:currentUser.name,rejectedById:currentUser.id,
+    dateStr:req.dateStr||'',proposed:req.proposed,
+    status:'pending',ts:Date.now()});
+  saveLS();render();saveNow().catch(e=>console.error('saveNow reject:',e));
 }
 function setAnalystScheduleDirect(analystId){
   schedModalAnalyst=analystId;schedModalDate=null;showSchedModal=true;render();
@@ -7473,17 +8018,20 @@ function submitReplan(isSup){
     const aIdx=(t.assignments||[]).findIndex(a=>a.analyst===replanAnalystId);
     if(aIdx>=0)t.assignments[aIdx].date=newDate;
     else t.assignments.push({analyst:replanAnalystId,date:newDate});
+    _recalcStatusAfterAssignment(t, true);
     // Log as approved
     replanNotifs.push({
-      id:nextNotifId++,taskId:replanTaskId,analystId:replanAnalystId,
+      id:nextNotifId++,type:'replan',taskId:replanTaskId,analystId:replanAnalystId,
       oldDate:t.assignments.find(a=>a.analyst===replanAnalystId)?.date||'',
       newDate,reason,requestedBy:'SUP',status:'approved',
       ts:Date.now()
     });
   } else {
     // Analista: crear solicitud pendiente
+    var _replanSup=USERS.find(function(u){return u.role==='supervisor';});
     replanNotifs.push({
-      id:nextNotifId++,taskId:replanTaskId,analystId:replanAnalystId,
+      id:nextNotifId++,type:'replan',taskId:replanTaskId,analystId:replanAnalystId,
+      forUserId:_replanSup?_replanSup.id:'',
       oldDate:(t.assignments||[]).find(a=>a.analyst===replanAnalystId)?.date||t.due,
       newDate,reason,requestedBy:currentUser.id,status:'pending',
       ts:Date.now()
@@ -7496,18 +8044,135 @@ function resolveReplan(notifId, approved){
   if(approved) approveReplan(notifId); else rejectReplan(notifId);
 }
 function approveReplan(notifId){
-  const n=replanNotifs.find(x=>x.id===notifId);if(!n)return;
+  const n=replanNotifs.find(x=>x.id===Number(notifId)||x.id===notifId);if(!n)return;
   const t=tasks.find(x=>x.id===n.taskId);if(!t)return;
   const aIdx=(t.assignments||[]).findIndex(a=>a.analyst===n.analystId);
   if(aIdx>=0)t.assignments[aIdx].date=n.newDate;
   else t.assignments.push({analyst:n.analystId,date:n.newDate});
-  n.status='approved';n.reviewedBy=currentUser.id;n.reviewedTs=Date.now();
-  saveLS();render();
+  _recalcStatusAfterAssignment(t, true);
+  resolveAllCopies({type:'replan',taskId:n.taskId,analystId:n.analystId},'accepted');
+  auditLog('APPROVE','REPLAN',notifId,{analystId:n.analystId,newDate:n.newDate,description:'Replanificación aprobada: '+t.producto+' '+t.lote},'');
+  saveLS();render();saveNow().catch(function(e){console.error(e);});
 }
 function rejectReplan(notifId){
-  const n=replanNotifs.find(x=>x.id===notifId);if(!n)return;
-  n.status='rejected';n.reviewedBy=currentUser.id;n.reviewedTs=Date.now();
-  saveLS();render();
+  const n=replanNotifs.find(x=>x.id===Number(notifId)||x.id===notifId);if(!n)return;
+  var reason=prompt('Motivo del rechazo (opcional):','');
+  if(reason===null)return;
+  const t=tasks.find(x=>x.id===n.taskId);
+  resolveAllCopies({type:'replan',taskId:n.taskId,analystId:n.analystId},'rejected');
+  replanNotifs.push({id:nextNotifId++,type:'replan_rejected',
+    taskId:n.taskId,analystId:n.analystId,forUserId:n.analystId,
+    reason:reason||'',rejectedByName:currentUser.name,
+    producto:t?t.producto:'',lote:t?t.lote:'',
+    status:'pending',ts:Date.now()});
+  auditLog('REJECT','REPLAN',notifId,{reason:reason||'sin motivo',analystId:n.analystId},'');
+  saveLS();render();saveNow().catch(function(e){console.error(e);});
+}
+
+function rejectResubmit(taskId, notifId){
+  var reason=prompt('Motivo del rechazo (obligatorio):','');
+  if(reason===null)return;
+  if(!reason.trim()){alert('El motivo es obligatorio.');return;}
+  var t=tasks.find(function(x){return x.id===Number(taskId)||x.id===taskId;});
+  if(!t)return;
+  var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
+  if(!t.observations)t.observations=[];
+  t.observations.push({ts:Date.now(),comment:reason,by:currentUser.id,byName:currentUser.name});
+  t.status='observed';t._ts=Date.now();
+  var analystId=(n&&n.fromUser)||null;
+  if(!analystId){var _a=(t.assignments||[]).find(function(a){return !a._removed;});if(_a)analystId=_a.analyst;}
+  resolveAllCopies({type:'resubmit',taskId:Number(taskId)},'rejected');
+  if(analystId){
+    replanNotifs.push({id:nextNotifId++,type:'observation',
+      taskId:t.id,analystId:analystId,forUserId:analystId,
+      comment:reason,fromName:currentUser.name,
+      status:'pending',ts:Date.now(),producto:t.producto,lote:t.lote});
+  }
+  auditLog('REJECT_RESUBMIT','TASK',t.id,{field:'status',oldVal:'done',newVal:'observed',reason:reason,description:'Re-envío rechazado: '+t.producto+' '+t.lote},reason);
+  saveLS();render();saveNow().catch(function(e){console.error(e);});
+}
+
+// ── Rechazar muestreo: vuelve a a-ingresar, avisa al muestreador ──
+function rejectSamplingDone(notifId){
+  var reason=prompt('Motivo del rechazo (opcional):','');
+  if(reason===null)return;
+  var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
+  if(!n)return;
+  var t=tasks.find(function(x){return x.id===n.taskId;});
+  if(!t)return;
+  (t.samplerAssignments||[]).forEach(function(sa){
+    if(sa.sampler===n.samplerId&&sa.done){
+      sa.done=false;sa.doneAt=null;sa.realArrivalDate=null;sa.lotNotes=null;sa.hours=null;sa._ts=Date.now();
+    }
+  });
+  t.status='a-ingresar';t._ts=Date.now();
+  resolveAllCopies({type:'sampling_done',taskId:t.id},'rejected');
+  replanNotifs.push({id:nextNotifId++,type:'sampling_rejected',
+    taskId:t.id,samplerId:n.samplerId,forUserId:n.samplerId,
+    reason:reason||'',rejectedByName:currentUser.name,
+    status:'pending',ts:Date.now(),producto:t.producto,lote:t.lote});
+  auditLog('REJECT_SAMPLING','TASK',t.id,{field:'status',oldVal:'muestra-ok',newVal:'a-ingresar',reason:reason||'sin motivo',description:'Muestreo rechazado: '+t.producto+' '+t.lote},'Rechazado por supervisor');
+  saveLS();render();saveNow().catch(function(e){console.error(e);});
+}
+
+// ── Aceptar solicitud de planificación: asignar analista directamente ──
+function acceptPlanifRequest(notifId){
+  var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
+  if(!n)return;
+  var t=tasks.find(function(x){return x.id===(n.taskId||n.tid);});
+  if(!t){alert('Análisis no encontrado.');return;}
+  var dateStr=prompt('Fecha de asignación (AAAA-MM-DD):',t.due||today());
+  if(!dateStr)return;
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)){alert('Formato inválido. Usá AAAA-MM-DD.');return;}
+  if(!t.assignments)t.assignments=[];
+  t.assignments.push({analyst:n.analystId,date:dateStr,_ts:Date.now()});
+  if(t.status==='pending')t.status='scheduled';
+  _recalcStatusAfterAssignment(t, false);
+  t._ts=Date.now();
+  resolveAllCopies({type:'planification_request',taskId:n.taskId||n.tid,analystId:n.analystId},'accepted');
+  replanNotifs.push({id:nextNotifId++,type:'planification_accepted',
+    taskId:t.id,analystId:n.analystId,forUserId:n.analystId,
+    producto:t.producto,lote:t.lote,date:dateStr,
+    status:'pending',ts:Date.now()});
+  auditLog('ASSIGN','TASK',t.id,{analystId:n.analystId,date:dateStr,description:'Asignado vía solicitud de planificación: '+t.producto+' '+t.lote},'');
+  saveLS();render();saveNow().catch(function(e){console.error(e);});
+}
+function rejectPlanifRequest(notifId){
+  var reason=prompt('Motivo del rechazo (opcional):','');
+  if(reason===null)return;
+  var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
+  if(!n)return;
+  resolveAllCopies({type:'planification_request',taskId:n.taskId||n.tid,analystId:n.analystId},'rejected');
+  replanNotifs.push({id:nextNotifId++,type:'planification_rejected',
+    taskId:n.taskId||n.tid,analystId:n.analystId,forUserId:n.analystId,
+    reason:reason||'',rejectedByName:currentUser.name,
+    producto:n.producto,lote:n.lote,status:'pending',ts:Date.now()});
+  saveLS();render();saveNow().catch(function(e){console.error(e);});
+}
+
+// ── Declinar tarea libre: avisa al supervisor, desaparece del panel del analista ──
+function declineFreeTask(notifId){
+  var reason=prompt('Motivo por el que no podés realizar esta tarea (opcional):','');
+  if(reason===null)return;
+  var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
+  if(!n)return;
+  var ft=freeTasks.find(function(x){return x.id===n.freeTaskId;});
+  if(ft){ft.status='declined';ft.declinedBy=currentUser.id;ft.declinedTs=Date.now();ft.declineReason=reason||'';}
+  resolveAllCopies({type:'free_task_assigned',freeTaskId:n.freeTaskId,analystId:currentUser.id},'rejected');
+  var supUser=USERS.find(function(u){return u.role==='supervisor';});
+  replanNotifs.push({id:nextNotifId++,type:'free_task_declined',
+    freeTaskId:n.freeTaskId,analystId:currentUser.id,analystName:currentUser.name,
+    forUserId:supUser?supUser.id:'',
+    description:ft?ft.description:(n.description||''),
+    reason:reason||'',status:'pending',ts:Date.now()});
+  saveLS();render();saveNow().catch(function(e){console.error(e);});
+}
+
+// ── Marcar notificación de respuesta como leída ──
+function markResponseNotifRead(notifId){
+  var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
+  if(n){n.status='resolved';n.readTs=Date.now();}
+  saveLS();render();saveNow().catch(function(e){console.error(e);});
 }
 
 function autoResolveNotifs(){
@@ -7535,16 +8200,48 @@ function autoResolveNotifs(){
         stale = !task || task.status!=='observed';
         break;
       case 'resubmit':
-        // Stale when supervisor acted: re-observed, reviewed, or approved
+        // Stale when supervisor acted (rejectResubmit→observed, or task advanced further)
+        // NOT 'done' — task is 'done' while waiting for supervisor review
         stale = !task || ['observed','reviewed','approved'].includes(task.status);
         break;
       case 'free_task_assigned':
-        // Stale if analyst already acted (pending-confirm, confirmed, rejected)
-        stale = !ft || ['pending-confirm','confirmed','rejected'].includes(ft.status);
+        // Stale if analyst already acted (pending-confirm, confirmed, rejected, declined)
+        stale = !ft || ['pending-confirm','confirmed','rejected','declined'].includes(ft.status);
         break;
       case 'free_task_completed':
-        // Stale if free task is already confirmed
-        stale = !ft || ft.status==='confirmed';
+        // Stale if free task is confirmed or rejected
+        stale = !ft || ft.status==='confirmed' || ft.status==='rejected';
+        break;
+      case 'sampling_done':
+        // Stale if task was received (status no longer a-ingresar or muestra-ok)
+        stale = !task || (task.status!=='a-ingresar'&&task.status!=='muestra-ok');
+        break;
+      case 'sampling_rejected':
+        // Stale if task is no longer a-ingresar (sampler re-registered)
+        stale = !task || task.status!=='a-ingresar';
+        break;
+      case 'replan_rejected':
+        stale = n.status==='read'||(n.readBy||[]).includes(n.forUserId||'');
+        break;
+      case 'planification_accepted':
+        // Stale if task already has analyst assigned beyond scheduled
+        stale = !task || ['progress','pending-confirm','done','reviewed','approved'].includes(task.status);
+        break;
+      case 'planification_rejected':
+        stale = n.status==='read'||(n.readBy||[]).includes(n.forUserId||'');
+        break;
+      case 'hours_rejected':
+        // Stale if task moved back beyond progress (analyst re-completed)
+        stale = !task || ['pending-confirm','done','reviewed','approved'].includes(task.status);
+        break;
+      case 'free_task_declined':
+        stale = n.status==='read'||(n.readBy||[]).includes(n.forUserId||'');
+        break;
+      case 'free_task_rejected':
+        stale = n.status==='read'||(n.readBy||[]).includes(n.forUserId||'');
+        break;
+      case 'schedule_rejected':
+        stale = n.status==='read'||(n.readBy||[]).includes(n.forUserId||'');
         break;
     }
     if(stale) n.status='resolved';
@@ -7554,31 +8251,28 @@ function autoResolveNotifs(){
 function renderNotifPanel(){
   autoResolveNotifs(); // Re-evaluate stale notifications
   const isSup=currentUser.role==='supervisor';
+  const uid=currentUser.id;
+  function isUnread(n){return !(n.readBy||[]).includes(uid);}
   const myObsNotifs=replanNotifs.filter(function(n){
-    return n.type==='observation'&&(n.forUserId===currentUser.id||n.analystId===currentUser.id);
+    return n.type==='observation'&&n.status!=='resolved'
+      &&(n.forUserId===uid||n.analystId===uid);
   }).sort(function(a,b){return b.ts-a.ts;});
   const pendReplan=replanNotifs.filter(function(n){
-    return n.type==='replan'&&n.status==='pending'&&(isSup||(n.analystId===currentUser.id));
+    return n.type==='replan'&&n.status!=='resolved'&&(isSup||(n.analystId===uid));
   }).sort(function(a,b){return b.ts-a.ts;});
   const schedPend=isSup
     ?scheduleRequests.filter(function(r){return r.status==='pending';})
-    :scheduleRequests.filter(function(r){return r.analystId===currentUser.id&&r.status==='pending';});
-  const schedApproved=!isSup
-    ?scheduleRequests.filter(function(r){return r.analystId===currentUser.id&&r.status==='approved'&&!r._seenByAnalyst;})
     :[];
-  // confirmPend: one entry per analyst assignment pending confirmation
-  // confirmPend: tasks waiting for supervisor confirmation
-  // Strict: only tasks with status=pending-confirm that have at least one
-  // assignment with _pendingConfirm=true (explicitly set by analyst completing)
+  const schedApproved=!isSup
+    ?scheduleRequests.filter(function(r){return r.analystId===uid&&r.status==='approved'&&!r._seenByAnalyst;})
+    :[];
   var confirmPend=[];
   if(isSup){
     tasks.forEach(function(t){
       if(t.status!=='pending-confirm') return;
-      // Find assignments explicitly awaiting confirmation
       var pending=(t.assignments||[]).filter(function(a){
         return !a._removed && a._pendingConfirm===true && !a._supervisorConfirmed;
       });
-      // Fallback: if no flag but task is pending-confirm and has unconfirmed hours
       if(pending.length===0){
         pending=(t.assignments||[]).filter(function(a){
           return !a._removed && !a._supervisorConfirmed
@@ -7592,34 +8286,41 @@ function renderNotifPanel(){
   }
   const isReviewer=currentUser.role==='reviewer';
   const resubmitBadge=(isSup||isReviewer)
-    ?replanNotifs.filter(function(n){return n.type==='resubmit'&&n.forUserId===currentUser.id&&n.status==='pending';}).length
+    ?replanNotifs.filter(function(n){return n.type==='resubmit'&&n.forUserId===uid&&n.status!=='resolved'&&isUnread(n);}).length
     :0;
-  // ftAssignedNotifs and planReqNotifs defined here so totalBadge can count them
+  // Supervisor: direct scan for pending-confirm free tasks (no notification dependency)
+  var ftPendConfirm=isSup
+    ?freeTasks.filter(function(ft){return ft.status==='pending-confirm';}).sort(function(a,b){return (b._ts||0)-(a._ts||0);})
+    :[];
+  // ftAssignedNotifs: non-supervisor assigned tasks
   var ftAssignedNotifs=replanNotifs.filter(function(n){
     if(n.status==='resolved') return false;
-    if(isSup){
-      // Supervisor: only free_task_completed (NOT 'completed' — that's in confirmPend)
-      return n.type==='free_task_completed'
-        &&n.forUserId===currentUser.id&&n.status==='pending';
-    } else {
-      // Analyst: see assigned tasks (pending or read — until marked done)
-      var ft=freeTasks.find(function(x){return x.id===n.freeTaskId;});
-      // Show while task is pending OR pending-confirm (waiting sup confirmation)
-      return n.type==='free_task_assigned'&&n.forUserId===currentUser.id
-        &&(n.status==='pending'||n.status==='read')
-        &&ft&&(ft.status==='pending'||ft.status==='pending-confirm');
-    }
+    if(isSup) return false; // supervisor uses ftPendConfirm instead
+    var ft=freeTasks.find(function(x){return x.id===n.freeTaskId;});
+    return n.type==='free_task_assigned'&&n.forUserId===uid
+      &&n.status!=='resolved'
+      &&ft&&(ft.status==='pending'||ft.status==='pending-confirm');
   });
   var planReqNotifs=isSup
-    ?replanNotifs.filter(function(n){return n.type==='planification_request'&&n.status==='pending';})
+    ?replanNotifs.filter(function(n){return n.type==='planification_request'&&n.status!=='resolved';})
     :[];
-  const totalBadge=myObsNotifs.filter(function(n){return n.status==='pending';}).length
-    +pendReplan.length+schedPend.length+schedApproved.length+confirmPend.length
+  var responseNotifBadge=replanNotifs.filter(function(n){
+    if(n.status!=='pending'||n.forUserId!==uid) return false;
+    return ['sampling_rejected','replan_rejected','planification_accepted',
+            'planification_rejected','hours_rejected','free_task_declined',
+            'free_task_rejected','schedule_rejected'].indexOf(n.type)>=0;
+  }).length;
+  var samplingDoneBadge=isSup
+    ?replanNotifs.filter(function(n){return n.type==='sampling_done'&&n.status!=='resolved'&&isUnread(n);}).length
+    :0;
+  // totalBadge: solo no-leídas (badge de la campana)
+  const totalBadge=myObsNotifs.filter(isUnread).length
+    +pendReplan.filter(isUnread).length+schedPend.length+schedApproved.length+confirmPend.length
     +resubmitBadge
-    +(isSup?ftAssignedNotifs.length:replanNotifs.filter(function(n){
-      return n.type==='free_task_assigned'&&n.forUserId===currentUser.id&&n.status==='pending';
+    +(isSup?ftPendConfirm.length:replanNotifs.filter(function(n){
+      return n.type==='free_task_assigned'&&n.forUserId===uid&&n.status!=='resolved'&&isUnread(n);
     }).length)
-    +planReqNotifs.length;
+    +planReqNotifs.filter(isUnread).length+responseNotifBadge+samplingDoneBadge;
 
   if(!showNotifPanel){
     return'<div style="position:relative;display:inline-block">'
@@ -7633,18 +8334,123 @@ function renderNotifPanel(){
     +'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);width:360px;max-height:calc(100vh - 16px);overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
     +'<div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;position:sticky;top:0;background:var(--surface);z-index:1">'
     +'<span style="font-size:14px;font-weight:600">Notificaciones</span>'
+    +(totalBadge>0?'<span style="background:var(--red);color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;font-weight:700">'+totalBadge+'</span>':'')
     +'<button class="btn sm" onclick="showNotifPanel=false;render()" style="margin-left:auto">✕</button>'
+    +'</div>'
+    +'<div style="display:flex;border-bottom:2px solid var(--border);position:sticky;top:45px;background:var(--surface);z-index:1">'
+    +'<button onclick="notifTab=\'active\';render()" style="flex:1;padding:7px;font-size:12px;font-weight:600;border:none;cursor:pointer;background:none;border-bottom:2px solid '+(notifTab==='active'?'var(--blue)':'transparent')+';color:'+(notifTab==='active'?'var(--blue)':'var(--text3)')+';margin-bottom:-2px">Activas'+(totalBadge>0?' ('+totalBadge+')':'')+'</button>'
+    +'<button onclick="notifTab=\'history\';render()" style="flex:1;padding:7px;font-size:12px;font-weight:600;border:none;cursor:pointer;background:none;border-bottom:2px solid '+(notifTab==='history'?'var(--blue)':'transparent')+';color:'+(notifTab==='history'?'var(--blue)':'var(--text3)')+';margin-bottom:-2px">Historial (10d)</button>'
     +'</div>';
 
-  // ── Tareas libres / Análisis completados ──
+  // ── Historial (10 días) ──
+  if(notifTab==='history'){
+    var tenDaysAgo=Date.now()-10*24*60*60*1000;
+    var histNotifs=replanNotifs.filter(function(n){
+      if(n.status!=='resolved') return false;
+      var ts=n.resolvedTs||n.ts||0;
+      if(ts<tenDaysAgo) return false;
+      if(isSup) return true;
+      return n.forUserId===uid||n.analystId===uid||n.fromUser===uid;
+    }).sort(function(a,b){return (b.resolvedTs||b.ts)-(a.resolvedTs||a.ts);});
+    if(histNotifs.length===0){
+      html+='<div class="empty" style="padding:32px 16px;text-align:center;color:var(--text3)">Sin historial en los últimos 10 días</div>';
+    } else {
+      html+='<div style="padding:10px 14px">';
+      histNotifs.forEach(function(n){
+        var how=n.resolvedHow||'resolved';
+        var howColor=how==='accepted'?'var(--green)':how==='rejected'?'var(--red)':'var(--border2)';
+        var howLabel=how==='accepted'?'✓ Aceptado':how==='rejected'?'✗ Rechazado':'Resuelto';
+        var howBg=how==='accepted'?'var(--green-bg)':how==='rejected'?'var(--red-bg)':'var(--bg)';
+        var eventLabel=getNotifEventLabel(n);
+        var byName=n.resolvedByName||'';
+        var ts=n.resolvedTs||n.ts;
+        var taskLabel='';
+        if(n.taskId){var ht=tasks.find(function(x){return x.id===n.taskId;});if(ht)taskLabel=escH(ht.producto)+(ht.lote?' — '+escH(ht.lote):'');}
+        else if(n.producto)taskLabel=escH(n.producto)+(n.lote?' — '+escH(n.lote):'');
+        var analystName='';
+        if(n.analystId){var hu=getU(n.analystId);analystName=hu?hu.name:'';}
+        html+='<div style="background:'+howBg+';border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid '+howColor+'">'
+          +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">'
+          +'<span style="font-size:11px;font-weight:600;color:var(--text2)">'+eventLabel+'</span>'
+          +'<span style="font-size:10px;font-weight:600;color:'+howColor+'">'+howLabel+'</span>'
+          +'</div>'
+          +(taskLabel?'<div style="font-size:12px;font-weight:600;margin-bottom:2px">'+taskLabel+'</div>':'')
+          +(analystName?'<div style="font-size:11px;color:var(--text2)">Analista: '+escH(analystName)+'</div>':'')
+          +(n.reason?'<div style="font-size:11px;color:var(--text2);margin-top:2px">Motivo: '+escH(n.reason)+'</div>':'')
+          +'<div style="font-size:10px;color:var(--text3);margin-top:4px">'
+          +(byName?'Por '+escH(byName)+' · ':'')
+          +new Date(ts).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})
+          +'</div>'
+          +'</div>';
+      });
+      html+='</div>';
+    }
+    html+='</div></div>';
+    return html;
+  }
+
+  // ── Muestreos completados (supervisor) ──
+  if(isSup){
+    var samplingNotifs=replanNotifs.filter(function(n){return n.type==='sampling_done'&&n.status!=='resolved';}).sort(function(a,b){return b.ts-a.ts;});
+    if(samplingNotifs.length>0){
+      var _sNew=samplingNotifs.filter(isUnread).length;
+      html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:#f0fdf4">'
+        +'<div style="font-size:12px;font-weight:600;color:#065f46;margin-bottom:8px">🧪 Muestreos para aprobar ('+samplingNotifs.length+(_sNew<samplingNotifs.length?' <span style="font-weight:400;color:var(--text3)">· '+_sNew+' nuevos</span>':'')+')</div>';
+      samplingNotifs.forEach(function(n){
+        var isRead=!isUnread(n);
+        var t=tasks.find(function(x){return x.id===n.taskId;});
+        html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid #059669'+(isRead?';opacity:0.6':'')+'">'
+          +(isRead?'<div style="font-size:10px;color:var(--text3);text-align:right;margin-bottom:2px">✓ leída</div>':'')
+          +'<div style="font-size:12px;font-weight:600">'+escH(n.producto||'')+(n.lote?' — '+escH(n.lote):'')+'</div>'
+          +'<div style="font-size:11px;color:var(--text2);margin:3px 0">Muestreador: <b>'+escH(n.samplerName||'')+'</b></div>'
+          +'<div style="font-size:11px;color:var(--text2)">Fecha real: <b style="font-family:var(--mono)">'+fmtDDMMYY(n.realArrivalDate)+'</b>'+(n.hours?' · <b style="font-family:var(--mono);color:#059669">'+n.hours.toFixed(1)+'h</b>':'')+'</div>'
+          +(n.lotNotes?'<div style="font-size:11px;color:var(--text2);margin-top:3px;background:var(--bg);padding:4px 8px;border-radius:4px">'+escH(n.lotNotes)+'</div>':'')
+          +'<div style="font-size:10px;color:var(--text3);margin-top:3px">'+new Date(n.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div>'
+          +'<div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap">'
+          +(t?'<button class="btn sm" onclick="showNotifPanel=false;markSampleReceived('+t.id+')" style="font-size:10px;background:#5b21b6;border-color:#5b21b6;color:#fff">✓ Aprobar recepción</button>':'')
+          +'<button class="btn sm dan" onclick="rejectSamplingDone('+n.id+')" style="font-size:10px">✗ Rechazar</button>'
+          +'</div>'
+          +'</div>';
+      });
+      html+='</div>';
+    }
+  }
+
+  // ── Actividades libres para confirmar (supervisor — direct scan) ──
+  if(isSup&&ftPendConfirm.length>0){
+    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--blue-bg)">'
+      +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">✅ Actividades libres para confirmar ('+ftPendConfirm.length+')</div>';
+    ftPendConfirm.forEach(function(ft){
+      var uFt=getU(ft.analystId||ft.createdBy);
+      var displayDate=ft.completedAt?new Date(ft.completedAt).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):fmtDDMMYY(ft.date||ft._ts);
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--blue)">'
+        +'<div style="font-size:12px;font-weight:600">'+escH(ft.description||'Actividad libre')+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin:3px 0;display:flex;align-items:center;gap:4px">'
+        +(uFt?'<span class="av '+uFt.av+'" style="width:16px;height:16px;font-size:8px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center">'+escH(uFt.avInit)+'</span><b>'+escH(uFt.name)+'</b>':'<b>Usuario desconocido</b>')
+        +(ft.realHours!=null?' · <b style="font-family:var(--mono);color:#059669">'+ft.realHours+'h reales</b>':ft.hours?' · <b style="font-family:var(--mono)">'+ft.hours+'h</b>':'')
+        +'</div>'
+        +(ft.completionComment?'<div style="font-size:11px;color:var(--text);background:var(--bg2);border-radius:4px;padding:4px 8px;margin:4px 0">💬 '+escH(ft.completionComment)+'</div>':'')
+        +'<div style="font-size:10px;color:var(--text3);margin-bottom:5px">'+displayDate+'</div>'
+        +'<div style="display:flex;gap:4px;flex-wrap:wrap">'
+        +'<button class="btn sm suc" onclick="confirmFreeTask('+ft.id+');showNotifPanel=false" style="font-size:10px">✓ Confirmar</button>'
+        +'<button class="btn sm dan" onclick="rejectFreeTask('+ft.id+');showNotifPanel=false" style="font-size:10px">✗ Rechazar</button>'
+        +'</div>'
+        +'</div>';
+    });
+    html+='</div>';
+  }
+
+  // ── Tareas libres / Actividades asignadas (no-supervisor) ──
   var ftForMe=ftAssignedNotifs.filter(function(n){
     return isSup?(n.type==='completed'||n.type==='free_task_completed'):(n.type==='free_task_assigned');
   });
   if(ftForMe.length>0){
     var ftHeader=isSup?'✅ Completados / Actividades libres':'📌 Actividades asignadas';
+    var _ftNew=ftForMe.filter(isUnread).length;
     html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--blue-bg)">'
-      +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">'+ftHeader+'</div>';
+      +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">'+ftHeader+' ('+ftForMe.length+(_ftNew<ftForMe.length?' <span style="font-weight:400;color:var(--text3)">· '+_ftNew+' nuevas</span>':'')+')</div>';
     ftForMe.forEach(function(n){
+    var _ftRead=!isUnread(n);
     var u2=getU(n.analystId||n.fromUser);
     var task2=n.taskId?tasks.find(function(x){return x.id===n.taskId;}):null;
     var ft2=n.freeTaskId?freeTasks.find(function(x){return x.id===n.freeTaskId;}):null;
@@ -7655,7 +8461,8 @@ function renderNotifPanel(){
       :isFtDone?(escH(n.description||'Actividad libre'))
       :(ft2?escH(ft2.description):escH(n.description||'Actividad libre'));
     var icon=isComplete?'✅':isFtDone?'✅':'📌';
-    html+='<div style="background:var(--surface);border-radius:var(--radius);padding:7px 9px;margin-bottom:5px;font-size:12px">'
+    html+='<div style="background:var(--surface);border-radius:var(--radius);padding:7px 9px;margin-bottom:5px;font-size:12px'+(_ftRead?';opacity:0.6':'')+'">'
+      +(_ftRead?'<div style="font-size:10px;color:var(--text3);text-align:right;margin-bottom:2px">✓ leída</div>':'')
       +'<div style="font-weight:600">'+icon+' '+title+'</div>'
       +'<div style="font-size:11px;color:var(--text2);margin:2px 0">'
       +(u2?'<span class="av '+u2.av+'" style="width:16px;height:16px;font-size:8px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-right:4px">'+escH(u2.avInit)+'</span>'+escH(u2.name):'')
@@ -7663,14 +8470,18 @@ function renderNotifPanel(){
       +'</div>'
       +(isFtDone&&n.comment?'<div style="font-size:11px;color:var(--text);background:var(--bg2);border-radius:4px;padding:4px 8px;margin:4px 0">💬 '+escH(n.comment)+'</div>':'')
       +((isComplete||isFtDone)
-        ?'<div style="display:flex;gap:4px;margin-top:5px">'
-        +'<button class="btn sm suc" onclick="markNotifRead('+n.id+');showNotifPanel=false;render()" style="font-size:10px">✓ Visto</button>'
-        +(task2?'<button class="btn sm" onclick="openEdit('+task2.id+');showNotifPanel=false">🔍 Ver análisis</button>':'')
+        ?'<div style="display:flex;gap:4px;margin-top:5px;flex-wrap:wrap">'
+        +(isFtDone&&ft2
+          ?'<button class="btn sm suc" onclick="confirmFreeTask('+ft2.id+');showNotifPanel=false" style="font-size:10px">✓ Confirmar</button>'
+            +'<button class="btn sm dan" onclick="rejectFreeTask('+ft2.id+');showNotifPanel=false" style="font-size:10px">✗ Rechazar</button>'
+          :'<button class="btn sm suc" onclick="markNotifRead('+n.id+');showNotifPanel=false;render()" style="font-size:10px">✓ Visto</button>')
+        +(task2?'<button class="btn sm" onclick="showNotifPanel=false;openEdit('+task2.id+')" style="font-size:10px">🔍 Ver</button>':'')
         +'</div>'
         :'<div style="font-size:11px;color:var(--text2);margin-top:4px">'
         +(n.date?fmtDDMMYY(n.date):'—')+' · '+(n.suggestedHours?n.suggestedHours+'h sugeridas':'sin horas sugeridas')+'</div>'
-        +'<div style="display:flex;gap:4px;margin-top:6px">'
-        +'<button class="btn sm suc" onclick="showNotifPanel=false;confirmFreeTaskAsAnalyst('+(ft2?ft2.id:0)+','+n.id+')" style="font-size:11px">✓ Confirmar realizada</button>'
+        +'<div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap">'
+        +'<button class="btn sm suc" onclick="showNotifPanel=false;confirmFreeTaskAsAnalyst('+(ft2?ft2.id:0)+','+n.id+')" style="font-size:10px">✓ Confirmar realizada</button>'
+        +'<button class="btn sm dan" onclick="declineFreeTask('+n.id+')" style="font-size:10px">✗ No puedo realizarla</button>'
         +'<button class="btn sm" onclick="markFtNotifRead('+n.id+');render()" style="font-size:10px;color:var(--text3)" title="Marcar como leída">✓ Leída</button>'
         +'</div>')
       +'</div>';
@@ -7680,22 +8491,25 @@ function renderNotifPanel(){
 
   // ── Observaciones para analista ──
   if(myObsNotifs.length>0){
+    var _obsNew=myObsNotifs.filter(isUnread).length;
     html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--amber-bg)">'
-      +'<div style="font-size:12px;font-weight:600;color:var(--amber-text);margin-bottom:8px">⚑ Observaciones ('+myObsNotifs.length+')</div>';
+      +'<div style="font-size:12px;font-weight:600;color:var(--amber-text);margin-bottom:8px">⚑ Observaciones ('+myObsNotifs.length+(_obsNew<myObsNotifs.length?' <span style="font-weight:400;color:var(--text3)">· '+_obsNew+' nuevas</span>':'')+')</div>';
     myObsNotifs.forEach(function(n){
+      var _obsRead=!isUnread(n);
       var obsTask=tasks.find(function(x){return x.id===n.taskId;});
       var isObservedNow=obsTask&&obsTask.status==='observed';
-      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--amber)">'
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--amber)'+(_obsRead?';opacity:0.6':'')+'">'
+        +(_obsRead?'<div style="font-size:10px;color:var(--text3);text-align:right;margin-bottom:2px">✓ leída</div>':'')
         +'<div style="font-size:12px;font-weight:600">'+escH(n.producto||'')+(n.lote?' — '+escH(n.lote):'')+'</div>'
         +'<div style="font-size:11px;color:var(--amber-text);font-weight:500;margin:3px 0">Observación: '+escH(n.comment||'')+'</div>'
         +'<div style="font-size:10px;color:var(--text3)">Por '+escH(n.fromName||'')+(n.ts?' · '+new Date(n.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit'}):'')+'</div>'
-        +'<div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap">'  
+        +'<div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap">'
         +(isObservedNow
-          ?'<button class="btn pri sm" style="flex:1;font-size:10px" onclick="showNotifPanel=false;currentView=\'tasks\';filterSearch=\''+escH(n.lote||'')+'\';;render()">↩ Ir al análisis y re-enviar</button>'
+          ?'<button class="btn pri sm" style="flex:1;font-size:10px" onclick="showNotifPanel=false;markDone('+n.taskId+')">↩ Re-enviar</button>'
           :'')
-        +(n.status==='pending'
+        +(!_obsRead
           ?'<button class="btn sm" style="font-size:10px" onclick="markObsNotifRead('+n.id+')">✓ Leído</button>'
-          :'<span style="font-size:10px;color:var(--green)">✓ Leída</span>')
+          :'')
         +'</div></div>';
     });
     html+='</div>';
@@ -7703,19 +8517,23 @@ function renderNotifPanel(){
 
   // ── Solicitudes de planificación (supervisor) ──
   if(planReqNotifs.length>0){
+    var _planNew=planReqNotifs.filter(isUnread).length;
     html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--blue-bg)">'
-      +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">📋 Solicitudes de planificación ('+planReqNotifs.length+')</div>';
+      +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">📋 Solicitudes de planificación ('+planReqNotifs.length+(_planNew<planReqNotifs.length?' <span style="font-weight:400;color:var(--text3)">· '+_planNew+' nuevas</span>':'')+')</div>';
     planReqNotifs.forEach(function(n){
-      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--blue)">'
+      var _planRead=!isUnread(n);
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--blue)'+(_planRead?';opacity:0.6':'')+'">'
+        +(_planRead?'<div style="font-size:10px;color:var(--text3);text-align:right;margin-bottom:2px">✓ leída</div>':'')
         +'<div style="font-size:12px;font-weight:600">'+escH(n.producto||'')+(n.lote?' — '+escH(n.lote):'')+'</div>'
         +(function(){
           var nt=tasks.find(function(x){return x.id===(n.taskId||n.tid);});
           var hasOthers=nt&&(nt.assignments||[]).some(function(a){return !a._removed;});
           return '<div style="font-size:11px;color:var(--text2);margin:2px 0">'+(hasOthers?'Solicitud de PARTICIPAR en análisis ya asignado a otros. ':'Solicitud de planificación. ')+'De: '+escH(n.fromName||'')+(n.comment?' — '+escH(n.comment):'')+'</div>';
         })()
-        +'<div style="display:flex;gap:4px;margin-top:5px">'
-        +'<button class="btn sm pri" style="flex:1" onclick="showNotifPanel=false;markObsNotifRead('+n.id+');openEdit('+(n.taskId||n.tid)+');">🔍 Ir a la actividad</button>'
-        +'<button class="btn sm" onclick="markObsNotifRead('+n.id+')">Descartar</button>'
+        +'<div style="display:flex;gap:4px;margin-top:5px;flex-wrap:wrap">'
+        +'<button class="btn sm suc" style="flex:1" onclick="acceptPlanifRequest('+n.id+')">✓ Asignar</button>'
+        +'<button class="btn sm dan" onclick="rejectPlanifRequest('+n.id+')">✗ Rechazar</button>'
+        +'<button class="btn sm" onclick="showNotifPanel=false;openEdit('+(n.taskId||n.tid)+')">🔍 Ver</button>'
         +'</div></div>';
     });
     html+='</div>';
@@ -7723,21 +8541,26 @@ function renderNotifPanel(){
 
   // ── Re-envíos tras observación (supervisor) ──
   var resubmitNotifs=(isSup||isReviewer)
-    ?replanNotifs.filter(function(n){return n.type==='resubmit'&&n.forUserId===currentUser.id&&n.status==='pending';})
+    ?replanNotifs.filter(function(n){return n.type==='resubmit'&&n.forUserId===uid&&n.status!=='resolved';})
     :[];
   if(resubmitNotifs.length>0){
+    var _resubNew=resubmitNotifs.filter(isUnread).length;
     html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--blue-bg)">'
-      +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">↩ Re-enviados tras observación ('+resubmitNotifs.length+')</div>';
+      +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">↩ Re-enviados tras observación ('+resubmitNotifs.length+(_resubNew<resubmitNotifs.length?' <span style="font-weight:400;color:var(--text3)">· '+_resubNew+' nuevos</span>':'')+')</div>';
     resubmitNotifs.forEach(function(n){
+      var _resubRead=!isUnread(n);
       var t=tasks.find(function(x){return x.id===n.taskId;});
-      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--blue)">'
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--blue)'+(_resubRead?';opacity:0.6':'')+'">'
+        +(_resubRead?'<div style="font-size:10px;color:var(--text3);text-align:right;margin-bottom:2px">✓ leída</div>':'')
         +'<div style="font-size:12px;font-weight:600">'+escH(n.producto||'')+(n.lote?' — '+escH(n.lote):'')+'</div>'
         +'<div style="font-size:11px;color:var(--text2);margin:2px 0">Re-enviado por '+escH(n.fromName||'')+'</div>'
         +(n.comment?'<div style="font-size:11px;color:var(--text);background:var(--blue-bg);border-radius:4px;padding:5px 8px;margin:5px 0;border-left:2px solid var(--blue)">↩ '+escH(n.comment)+'</div>':'')
-        +'<div style="display:flex;gap:4px;margin-top:5px">'
-        +(t?'<button class="btn sm suc" onclick="acceptResubmit('+n.taskId+','+n.id+')" style="flex:1">✓ Aceptar re-envío</button>'
-        +'<button class="btn sm" onclick="openEdit('+n.taskId+');markObsNotifRead('+n.id+')">🔍 Ver</button>'
-        :'')+'<button class="btn sm" onclick="markObsNotifRead('+n.id+')">Marcar leída</button>'
+        +'<div style="display:flex;gap:4px;margin-top:5px;flex-wrap:wrap">'
+        +(t?'<button class="btn sm suc" style="flex:1" onclick="acceptResubmit('+n.taskId+','+n.id+')">✓ Aceptar</button>'
+        +'<button class="btn sm dan" onclick="rejectResubmit('+n.taskId+','+n.id+')">✗ Rechazar</button>'
+        +'<button class="btn sm" onclick="showNotifPanel=false;openEdit('+n.taskId+')">🔍 Ver</button>'
+        :'')
+        +(!_resubRead?'<button class="btn sm" style="font-size:10px;color:var(--text3)" onclick="markObsNotifRead('+n.id+')">✓ Leída</button>':'')
         +'</div></div>';
     });
     html+='</div>';
@@ -7759,9 +8582,9 @@ function renderNotifPanel(){
         +(a.date?' · <span style="font-family:var(--mono);color:var(--text3)">'+fmtDDMMYY(a.date)+'</span>':'')
         +'</div>'
         +(lastCmt?'<div style="font-size:11px;color:var(--text2);background:var(--bg);border-radius:4px;padding:4px 7px;margin:4px 0;border-left:2px solid var(--border2)">💬 '+escH(lastCmt.comment)+'</div>':'')
-        +'<div style="display:flex;gap:4px;margin-top:5px">'
-        +'<button class="btn sm suc" onclick="confirmAssignment(\''+t.id+'\',\''+a.analyst+'\',\''+( a.date||'')+'\');showNotifPanel=false;render()">✓ Confirmar</button>'
-        +'<button class="btn sm" onclick="openEdit('+t.id+');showNotifPanel=false">🔍 Ver</button>'
+        +'<div style="display:flex;gap:4px;margin-top:5px;flex-wrap:wrap">'
+        +'<button class="btn sm suc" onclick="confirmAssignment(\''+t.id+'\',\''+a.analyst+'\',\''+(a.date||'')+'\');showNotifPanel=false;render()">✓ Confirmar</button>'
+        +'<button class="btn sm" onclick="showNotifPanel=false;openEdit('+t.id+')">🔍 Ver</button>'
         +'</div></div>';
     });
     html+='</div>';
@@ -7804,37 +8627,203 @@ function renderNotifPanel(){
 
   // ── Replanificaciones ──
   if(pendReplan.length>0){
+    var _replanNew=pendReplan.filter(isUnread).length;
     html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border)">'
-      +'<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">📅 Replanificaciones pendientes ('+pendReplan.length+')</div>';
+      +'<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">📅 Replanificaciones pendientes ('+pendReplan.length+(_replanNew<pendReplan.length?' <span style="font-weight:400;color:var(--text3)">· '+_replanNew+' nuevas</span>':'')+')</div>';
     pendReplan.forEach(function(n){
+      var _replanRead=!isUnread(n);
       const t=tasks.find(function(x){return x.id===n.taskId;});
       const u=getU(n.analystId);
-      html+='<div style="background:var(--bg);border-radius:var(--radius);padding:7px 9px;margin-bottom:5px;font-size:12px">'
+      html+='<div style="background:var(--bg);border-radius:var(--radius);padding:7px 9px;margin-bottom:5px;font-size:12px'+(_replanRead?';opacity:0.6':'')+'">'
+        +(_replanRead?'<div style="font-size:10px;color:var(--text3);text-align:right;margin-bottom:2px">✓ leída</div>':'')
         +(t?'<div style="font-weight:600">'+escH(t.producto)+' — '+escH(t.lote)+'</div>':'')
         +'<div style="color:var(--text3)">'+escH(u.name)+' · '+(n.reason?escH(n.reason.slice(0,50)):'')+'</div>'
         +(isSup?'<div style="display:flex;gap:4px;margin-top:4px">'
           +'<button class="btn sm suc" onclick="resolveReplan('+n.id+',true)">✓ Aprobar</button>'
           +'<button class="btn sm dan" onclick="resolveReplan('+n.id+',false)">✗ Rechazar</button>'
+          +(!_replanRead?'<button class="btn sm" style="font-size:10px;color:var(--text3)" onclick="markObsNotifRead('+n.id+')">✓ Leída</button>':'')
           +'</div>':'')
         +'</div>';
     });
     html+='</div>';
   }
 
-  // Add 'mark all read' button when there are pending items
+  // ── Respuestas de rechazo / aceptación (para el destinatario) ──
+  var responseNotifs=replanNotifs.filter(function(n){
+    if(n.status!=='pending'||n.forUserId!==uid) return false;
+    return ['sampling_rejected','replan_rejected','planification_accepted',
+            'planification_rejected','hours_rejected','free_task_declined',
+            'free_task_rejected','schedule_rejected'].indexOf(n.type)>=0;
+  }).sort(function(a,b){return b.ts-a.ts;});
+
+  if(responseNotifs.length>0){
+    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border)">'
+      +'<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">📬 Respuestas ('+responseNotifs.length+')</div>';
+
+    responseNotifs.forEach(function(n){
+      var cardColor='var(--bg)';
+      var borderColor='var(--border2)';
+      var icon='ℹ️';
+      var title='';
+      var detail='';
+      var goBtn='';
+
+      if(n.type==='sampling_rejected'){
+        icon='🧪'; title='Muestreo rechazado';
+        cardColor='var(--red-bg)'; borderColor='var(--red)';
+        detail=(n.reason?'Motivo: '+escH(n.reason):'Sin motivo especificado');
+        detail+=' — Por: '+escH(n.rejectedByName||'');
+        var rt=tasks.find(function(x){return x.id===n.taskId;});
+        var rtLabel=rt?(escH(rt.producto)+(rt.lote?' — '+escH(rt.lote):'')):'';
+        if(rtLabel)title+=': '+rtLabel;
+
+      } else if(n.type==='replan_rejected'){
+        icon='📅'; title='Replanificación rechazada';
+        cardColor='var(--red-bg)'; borderColor='var(--red)';
+        detail=(n.reason?'Motivo: '+escH(n.reason):'Sin motivo especificado');
+        detail+=' — Por: '+escH(n.rejectedByName||'');
+        var rt2=tasks.find(function(x){return x.id===n.taskId;});
+        if(rt2)title+=': '+escH(rt2.producto)+(rt2.lote?' — '+escH(rt2.lote):'');
+
+      } else if(n.type==='planification_accepted'){
+        icon='✅'; title='Solicitud aceptada';
+        cardColor='var(--green-bg)'; borderColor='var(--green)';
+        detail='Asignado para <b>'+fmtDDMMYY(n.date||'')+'</b>';
+        if(n.producto)title+=': '+escH(n.producto)+(n.lote?' — '+escH(n.lote):'');
+        var rt3=tasks.find(function(x){return x.id===n.taskId;});
+        if(rt3)goBtn='<button class="btn sm" onclick="showNotifPanel=false;openEdit('+rt3.id+')" style="font-size:10px;margin-top:4px">🔍 Ver actividad</button>';
+
+      } else if(n.type==='planification_rejected'){
+        icon='❌'; title='Solicitud rechazada';
+        cardColor='var(--red-bg)'; borderColor='var(--red)';
+        detail=(n.reason?'Motivo: '+escH(n.reason):'Sin motivo especificado');
+        detail+=' — Por: '+escH(n.rejectedByName||'');
+        if(n.producto)title+=': '+escH(n.producto)+(n.lote?' — '+escH(n.lote):'');
+
+      } else if(n.type==='hours_rejected'){
+        icon='⚠️'; title='Horas rechazadas';
+        cardColor='var(--amber-bg)'; borderColor='var(--amber)';
+        detail='Motivo: '+(n.reason?escH(n.reason):'Sin motivo especificado');
+        detail+=' — Por: '+escH(n.rejectedByName||'');
+        if(n.producto)title+=': '+escH(n.producto)+(n.lote?' — '+escH(n.lote):'');
+        var rt4=tasks.find(function(x){return x.id===n.taskId;});
+        if(rt4)goBtn='<button class="btn sm" onclick="showNotifPanel=false;openEdit('+rt4.id+')" style="font-size:10px;margin-top:4px">🔍 Ir al análisis</button>';
+
+      } else if(n.type==='free_task_rejected'){
+        icon='❌'; title='Actividad libre rechazada';
+        cardColor='var(--red-bg)'; borderColor='var(--red)';
+        detail=(n.description?escH(n.description.slice(0,50)):'');
+        if(n.reason)detail+=(detail?'<br>':'')+'Motivo: '+escH(n.reason);
+        detail+=(detail?'<br>':'')+'Por: '+escH(n.rejectedByName||'');
+
+      } else if(n.type==='free_task_declined'){
+        icon='❌'; title='Tarea libre declinada';
+        cardColor='var(--red-bg)'; borderColor='var(--red)';
+        detail='Por: <b>'+escH(n.analystName||'')+'</b>'
+          +(n.description?' — '+escH(n.description.slice(0,40)):'')
+          +(n.reason?'<br>Motivo: '+escH(n.reason):'');
+        if(n.freeTaskId)goBtn='<button class="btn sm pri" onclick="showNotifPanel=false;duplicateFreeTask('+n.freeTaskId+')" style="font-size:10px;margin-top:4px">↩ Duplicar y reasignar</button>';
+
+      } else if(n.type==='schedule_rejected'){
+        icon='🕐'; title='Solicitud de horario rechazada';
+        cardColor='var(--red-bg)'; borderColor='var(--red)';
+        detail=(n.reason?'Motivo: <b>'+escH(n.reason)+'</b>':'<span style="color:var(--text3)">Sin motivo especificado</span>');
+        detail+=' — Por: '+escH(n.rejectedByName||'');
+        if(n.dateStr)detail+='<br>Fecha: '+fmtDDMMYY(n.dateStr);
+        if(n.proposed&&n.proposed.startTime)detail+=' · '+n.proposed.startTime+' – '+n.proposed.endTime;
+        if(n.proposed&&n.proposed.type==='overtime')detail+=' · Horas extra: '+(n.proposed.extraHours||'?')+'h';
+      }
+
+      html+='<div style="background:'+cardColor+';border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid '+borderColor+'">'
+        +'<div style="font-size:12px;font-weight:600">'+icon+' '+title+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin:4px 0">'+detail+'</div>'
+        +'<div style="font-size:10px;color:var(--text3);margin-bottom:5px">'+new Date(n.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div>'
+        +'<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">'
+        +(goBtn?goBtn:'')
+        +'<button class="btn sm" onclick="markResponseNotifRead('+n.id+')" style="font-size:10px;color:var(--text3)">✓ Entendido</button>'
+        +'</div>'
+        +'</div>';
+    });
+
+    html+='</div>';
+  }
+
+  // Barra inferior: marcar todas / estado vacío
+  var _anyVisible=replanNotifs.some(function(n){
+    if(n.status==='resolved') return false;
+    return n.forUserId===uid||n.analystId===uid||n.fromUser===uid;
+  })||confirmPend.length>0||schedPend.length>0||schedApproved.length>0;
   if(totalBadge>0){
     html+='<div style="padding:6px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:flex-end">'
       +'<button class="btn sm" onclick="markAllNotifsRead();render()" style="font-size:10px;color:var(--text3)">✓ Marcar todas como leídas</button>'
       +'</div>';
   }
-  if(totalBadge===0){
-    html+='<div class="empty" style="padding:24px">Sin notificaciones pendientes ✓</div>';
+  if(!_anyVisible){
+    html+='<div class="empty" style="padding:24px">Sin notificaciones ✓</div>';
+  } else if(totalBadge===0){
+    html+='<div style="padding:10px 14px;text-align:center;font-size:12px;color:var(--text3)">✓ No hay notificaciones sin leer</div>';
   }
 
   html+='</div></div>';
   return html;
 }
 
+function setSamplerAssign(taskId, samplerId){
+  // Toggle sampler assignment in the task modal (UI only — persisted on saveTask)
+  var t=tasks.find(function(x){return x.id===taskId;});
+  if(!t)return;
+
+  // Preserve unsaved form values so render() doesn't reset them
+  var _snap={
+    producto: (document.getElementById('f-prod')||{}).value,
+    lote:     (document.getElementById('f-lote')||{}).value,
+    status:   (document.getElementById('f-status')||{}).value,
+    notes:    (document.getElementById('f-notes')||{}).value,
+    due:      (document.getElementById('f-due')||{}).value,
+    created:  (document.getElementById('f-created')||{}).value,
+    priority: (document.getElementById('f-prio')||{}).value,
+    expectedArrival: (document.getElementById('f-expected-arrival')||{}).value,
+    arrivalNotes:    (document.getElementById('f-arrival-notes')||{}).value,
+    samplerNote:     (document.getElementById('f-sampler-note')||{}).value,
+  };
+  if(_snap.producto!=null) t.producto=_snap.producto;
+  if(_snap.lote!=null)     t.lote=_snap.lote;
+  if(_snap.status!=null)   t.status=_snap.status;
+  if(_snap.notes!=null)    t.notes=_snap.notes;
+  if(_snap.due!=null)      t.due=_snap.due;
+  if(_snap.created!=null)  t.created=_snap.created;
+  if(_snap.priority!=null) t.priority=_snap.priority;
+  if(_snap.expectedArrival!=null) t.expectedArrival=_snap.expectedArrival;
+  if(_snap.arrivalNotes!=null)    t.arrivalNotes=_snap.arrivalNotes;
+  // Actualizar assignedNote de la asignación activa si había texto
+  if(_snap.samplerNote!=null&&t.samplerAssignments){
+    var _activeSA=t.samplerAssignments.find(function(s){return !s.done&&!s.removed;});
+    if(_activeSA)_activeSA.assignedNote=_snap.samplerNote;
+  }
+
+  if(!t.samplerAssignments)t.samplerAssignments=[];
+  if(samplerId===null){
+    // Remove all sampler assignments that aren't done
+    t.samplerAssignments=t.samplerAssignments.filter(function(s){return s.done;});
+  } else {
+    var existing=t.samplerAssignments.find(function(s){return s.sampler===samplerId&&!s.done&&!s.removed;});
+    if(existing){
+      // Toggle off: remove undone assignment
+      existing.removed=true;
+    } else {
+      // Remove other non-done assignments and add this one
+      t.samplerAssignments=t.samplerAssignments.filter(function(s){return s.done;});
+      t.samplerAssignments.push({
+        id:nextNotifId++,sampler:samplerId,
+        assignedBy:currentUser.id,assignedTs:Date.now(),
+        done:false,doneAt:null,realArrivalDate:null,lotNotes:null,
+        assignedNote:'',_ts:Date.now()
+      });
+    }
+  }
+  t._ts=Date.now();
+  render();
+}
 function saveTask(){
   const prod=document.getElementById('f-prod').value.trim();
   const lote=document.getElementById('f-lote').value.trim();
@@ -7929,15 +8918,23 @@ function saveTask(){
       t.priority=priority;t.notes=notes;
       t.assignments=finalAssignments;
       // Arrival fields for a-ingresar
-      if(_autoStatus==='a-ingresar'||t.status==='a-ingresar'){
+      if(_autoStatus==='a-ingresar'||t.status==='a-ingresar'||t.status==='muestra-ok'){
         t.expectedArrival=expectedArrival||t.expectedArrival||'';
         t.arrivalNotes=arrivalNotes||t.arrivalNotes||'';
       }
-      // Estado: solo retroceder si aún no inició (pending/scheduled/a-ingresar)
-      if(t.status==='pending'||t.status==='scheduled'||t.status==='a-ingresar')t.status=_autoStatus;
+      // Save sampler note if present
+      var _samplerNoteEl=document.getElementById('f-sampler-note');
+      if(_samplerNoteEl&&t.samplerAssignments){
+        var _sNote=_samplerNoteEl.value.trim();
+        t.samplerAssignments.forEach(function(s){if(!s.removed)s.assignedNote=_sNote;});
+      }
+      // Estado: solo retroceder si aún no inició (pending/scheduled/a-ingresar/muestra-ok)
+      if(t.status==='pending'||t.status==='scheduled'||t.status==='a-ingresar'||t.status==='muestra-ok')t.status=_autoStatus;
+      // Si se agregó una nueva actividad a un producto ya completo, revertir estado
+      _recalcStatusAfterAssignment(t, false);
     }
   }
-  else{var _newT={id:nextId++,producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes};if(_autoStatus==='a-ingresar'){if(expectedArrival)_newT.expectedArrival=expectedArrival;if(arrivalNotes)_newT.arrivalNotes=arrivalNotes;}tasks.push(_newT);}
+  else{var _newT={id:nextId++,producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes,samplerAssignments:[]};if(_autoStatus==='a-ingresar'){if(expectedArrival)_newT.expectedArrival=expectedArrival;if(arrivalNotes)_newT.arrivalNotes=arrivalNotes;}tasks.push(_newT);}
   const _eid2=editingTask;
   showModal=false;editingTask=null;
   auditLog(_eid2?'EDIT':'CREATE','TASK',_eid2||nextId-1,{description:(_eid2?'Edicion':'Nuevo analisis')+': '+prod+' '+lote},'');
@@ -7948,7 +8945,6 @@ function saveTask(){
 function acceptResubmit(taskId, notifId){
   var t=tasks.find(function(x){return x.id===taskId;});
   if(!t)return;
-  // Restore task to 'done' (Completado para revisar) — ready for review
   var prevStatus=t.status;
   t.status='done';
   t._acceptedResubmit=Date.now();
@@ -7957,18 +8953,18 @@ function acceptResubmit(taskId, notifId){
     field:'status',oldVal:prevStatus,newVal:'done',
     description:'Re-envío aceptado: '+t.producto+' '+t.lote
   },'Aceptado para revisión');
-  markObsNotifRead(notifId);
+  resolveAllCopies({type:'resubmit',taskId:Number(taskId)},'accepted');
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow acceptResubmit:',e);});
 }
 function markObsNotifRead(notifId){
-  // Coerce a número porque el onclick pasa el id como string desde el HTML
   var nid=Number(notifId);
   const n=replanNotifs.find(function(x){return x.id===nid||x.id===notifId;});
   if(n){
-    n.status='read';
+    if(!n.readBy)n.readBy=[];
+    if(!n.readBy.includes(currentUser.id))n.readBy.push(currentUser.id);
     n.readTs=Date.now();
-    auditLog('READ','NOTIFICATION',nid,{type:'observation',producto:n.producto,lote:n.lote},'');
+    auditLog('READ','NOTIFICATION',nid,{type:n.type,producto:n.producto,lote:n.lote},'');
     saveLS();
     saveNow().catch(function(e){console.error('saveNow notifRead:',e);});
     render();
@@ -7988,36 +8984,48 @@ function openFreeTaskModal(ftId){
   showFreeTaskModal=true;
   render();
 }
-function closeFreeTaskModal(){showFreeTaskModal=false;editingFreeTask=null;render();}
+function closeFreeTaskModal(){showFreeTaskModal=false;editingFreeTask=null;window._ftPrefill=null;render();}
+function duplicateFreeTask(ftId){
+  var ft=freeTasks.find(function(x){return x.id===ftId;});
+  if(!ft)return;
+  window._ftPrefill={originalFtId:ft.id,description:ft.description,date:ft.date,suggestedHours:ft.suggestedHours||ft.hours||1,notes:ft.notes||'',analystId:ft.analystId};
+  editingFreeTask=null;
+  showFreeTaskModal=true;
+  render();
+}
 
 function renderFreeTaskModal(){
   const ft=editingFreeTask?freeTasks.find(function(x){return x.id===editingFreeTask;}):null;
   const isSup=isSupRole();
   // Supervisor can assign to any analyst/staff; others assign to themselves
   const targetOptions=isSup
-    ?USERS.filter(function(u){return u.role==='analyst'||u.role==='staff'||u.role==='reviewer';})
+    ?USERS.filter(function(u){return['analyst','staff','reviewer','sampler'].includes(u.role);})
       .sort(function(a,b){return a.name.localeCompare(b.name,'es');})
     :[];
-  const currentTarget=ft?ft.analystId:currentUser.id;
+  const roleDisplayName=function(r){return r==='analyst'?'Analista':r==='staff'?'Personal':r==='sampler'?'Muestreador':'Revisor';};
+  const pre=(!ft&&window._ftPrefill)||null;
+  const currentTarget=ft?ft.analystId:pre?pre.analystId:currentUser.id;
+  const isDuplicate=!!pre;
   return'<div class="modal-overlay" onclick="if(event.target===this)closeFreeTaskModal()">'
     +'<div class="modal" style="width:420px">'
-    +'<h3>'+(ft?'Editar tarea libre':'+ Registrar tarea libre')+'</h3>'
+    +'<h3>'+(ft?'Editar tarea libre':isDuplicate?'↩ Duplicar y reasignar tarea':'+ Registrar tarea libre')+'</h3>'
+    +(isDuplicate?'<div style="background:var(--blue-bg);border-radius:var(--radius);padding:7px 10px;font-size:11px;color:var(--blue-text);margin-bottom:12px">Duplicando tarea declinada — podés cambiar el asignado, la fecha o las horas.</div>':'')
     +(isSup
       ?'<div class="frow"><label>Asignar a *</label>'
         +'<select id="ft-analyst" style="width:100%">'
-        +targetOptions.map(function(u){return'<option value="'+u.id+'"'+(u.id===currentTarget?' selected':'')+'>'+escH(u.name)+' ('+escH(u.role==='analyst'?'Analista':u.role==='staff'?'Personal':'Revisor')+')</option>';}).join('')
+        +targetOptions.map(function(u){return'<option value="'+u.id+'"'+(u.id===currentTarget?' selected':'')+'>'+escH(u.name)+' ('+roleDisplayName(u.role)+')</option>';}).join('')
         +'</select></div>'
       :'')
     +'<div class="frow"><label>Descripción de la tarea *</label>'
-    +'<input id="ft-desc" type="text" placeholder="Ej: Colaboración con sector producción, capacitación, etc." value="'+escH(ft?ft.description:'')+'"></div>'
+    +'<input id="ft-desc" type="text" placeholder="Ej: Colaboración con sector producción, capacitación, etc." value="'+escH(ft?ft.description:pre?pre.description:'')+'"></div>'
     +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
     +'<div class="frow"><label>Fecha *</label>'
-    +'<input id="ft-date" type="date" value="'+(ft?ft.date:today())+'"></div>'
-    +'<div class="frow"><label>Horas dedicadas *</label>'
-    +'<input id="ft-hours" type="number" min="0.5" max="24" step="0.5" value="'+(ft?ft.hours:1)+'"></div>'
+    +'<input id="ft-date" type="date" value="'+(ft?ft.date:pre?pre.date:today())+'"></div>'
+    +'<div class="frow"><label>Horas sugeridas *</label>'
+    +'<input id="ft-hours" type="number" min="0.5" max="24" step="0.5" value="'+(ft?ft.hours:pre?pre.suggestedHours:1)+'"></div>'
     +'</div>'
     +'<div class="frow"><label>Comentario</label>'
-    +'<input id="ft-notes" type="text" placeholder="Opcional — detalle adicional" value="'+escH(ft?ft.notes||'':'')+'"></div>'
+    +'<input id="ft-notes" type="text" placeholder="Opcional — detalle adicional" value="'+escH(ft?ft.notes||'':pre?pre.notes:'')+'"></div>'
     +(isSup
       ?'<div style="background:var(--green-bg);border-radius:var(--radius);padding:8px 10px;font-size:11px;color:var(--green-text);margin-bottom:12px">✓ El supervisor puede crear y confirmar tareas directamente.</div>'
       :'<div style="background:var(--amber-bg);border-radius:var(--radius);padding:8px 10px;font-size:11px;color:var(--amber-text);margin-bottom:12px">⚠ La tarea quedará pendiente de confirmación por el Supervisor.</div>')
@@ -8099,6 +9107,10 @@ function saveFreeTask(){
       }
     }
     auditLog('CREATE','FREE_TASK',ft.id,{description:ft.description,suggestedHours:ft.suggestedHours||ft.hours,date:ft.date,analystId:ft.analystId},'');
+    // If duplicating a declined task, resolve the original free_task_declined notification
+    if(window._ftPrefill&&window._ftPrefill.originalFtId){
+      resolveAllCopies({type:'free_task_declined',freeTaskId:window._ftPrefill.originalFtId},'accepted');
+    }
   }
   closeFreeTaskModal();
   saveLS();
@@ -8111,11 +9123,8 @@ function confirmFreeTask(ftId){
   ft.status='confirmed';
   ft.confirmedBy=currentUser.id;
   ft.confirmedTs=Date.now();
-  // Mark all related notifications as resolved
-  replanNotifs.filter(function(n){
-    return (n.type==='free_task_completed'||n.type==='free_task_assigned')
-      &&n.freeTaskId===ft.id&&n.status!=='resolved';
-  }).forEach(function(n){n.status='resolved';});
+  resolveAllCopies({type:'free_task_completed',freeTaskId:ft.id},'accepted');
+  resolveAllCopies({type:'free_task_assigned',freeTaskId:ft.id},'accepted');
   auditLog('CONFIRM','FREE_TASK',ftId,{description:ft.description,hours:ft.hours,analystId:ft.analystId},'');
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow confirmFT:',e);});
@@ -8123,13 +9132,22 @@ function confirmFreeTask(ftId){
 
 function rejectFreeTask(ftId){
   if(!isSupRole()){return;}
-  if(!confirm('¿Rechazar esta tarea libre?'))return;
+  var reason=prompt('Motivo del rechazo (opcional):','');
+  if(reason===null)return;
   const ft=freeTasks.find(function(x){return x.id===ftId;});if(!ft)return;
   ft.status='rejected';
   ft.rejectedBy=currentUser.id;
   ft.rejectedTs=Date.now();
-  auditLog('REJECT','FREE_TASK',ftId,{description:ft.description},'');
-  saveLS();render();
+  ft.rejectionReason=reason||'';
+  resolveAllCopies({type:'free_task_completed',freeTaskId:ft.id},'rejected');
+  resolveAllCopies({type:'free_task_assigned',freeTaskId:ft.id},'rejected');
+  replanNotifs.push({id:nextNotifId++,type:'free_task_rejected',
+    freeTaskId:ft.id,forUserId:ft.analystId,
+    description:ft.description,reason:reason||'',
+    rejectedByName:currentUser.name,status:'pending',ts:Date.now()});
+  auditLog('REJECT','FREE_TASK',ftId,{description:ft.description,reason:reason||''},'');
+  showNotifPanel=false;
+  saveLS();render();saveNow().catch(function(e){console.error(e);});
 }
 
 function deleteFreeTask(ftId){
@@ -8154,7 +9172,7 @@ function deleteFreeTask(ftId){
 
 function markFtNotifRead(notifId){
   var n=replanNotifs.find(function(x){return x.id===notifId;});
-  if(n)n.status='read';
+  if(n){if(!n.readBy)n.readBy=[];if(!n.readBy.includes(currentUser.id))n.readBy.push(currentUser.id);}
   saveLS();render();
 }
 function confirmFreeTaskAsAnalyst(ftId, notifId){
@@ -8227,11 +9245,13 @@ function requestPlanification(taskId){
     var comment=(document.getElementById('rplan-mot')||{}).value||'';
     document.body.removeChild(motDiv);
     if(comment===null)return;
+  var _planSup=USERS.find(function(u){return u.role==='supervisor';});
   replanNotifs.push({
     id:nextNotifId++,
     type:'planification_request',
     taskId:tid,
     analystId:currentUser.id,
+    forUserId:_planSup?_planSup.id:'',
     status:'pending',
     ts:Date.now(),
     fromUser:currentUser.id,
@@ -8294,8 +9314,8 @@ function openOvertimeForSup(analystId, dateStr){
     ts:Date.now(),requestedBy:currentUser.id,
     reviewedBy:currentUser.id,reviewedTs:Date.now()
   });
-  showSchedModal=false;saveLS('counters');
-  render();
+  showSchedModal=false;saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow supOvertime:',e);});
 }
 
 </script>
