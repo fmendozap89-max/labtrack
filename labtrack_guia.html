@@ -884,6 +884,66 @@ section{margin-bottom:64px;scroll-margin-top:20px}
   </div>
 </div>
 
+<div class="note note-y" style="margin-bottom:20px">
+  <span>⚠</span>
+  <span><strong>Alertas por atraso:</strong> si una tarea programada lleva <strong>2 días sin completarse</strong>, aparece un banner naranja al inicio de "Mi día" y cada fila afectada muestra un borde naranja con la advertencia. A los <strong>3 días</strong> el supervisor recibe una notificación automática — actuá antes de llegar a ese punto.</span>
+</div>
+
+<div class="mock-wrap">
+  <div class="mock-label">Mi día — banner de atraso + tarea con alerta</div>
+  <div class="mock">
+    <div class="mock-bar"><span class="mock-bar-title">LabTrack — Mi día · Carla S.</span></div>
+    <div class="ms">
+      <div class="ms-sb">
+        <div class="ms-sb-logo"><div class="ms-sb-icon"><svg width="10" height="10" viewBox="0 0 18 18" fill="none"><rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="2" y="10" width="6" height="6" rx="1.5" fill="white"/><rect x="10" y="10" width="6" height="6" rx="1.5" fill="white"/></svg></div><span class="ms-sb-name">Lab<span>Track</span></span></div>
+        <div class="ms-nav act">▪ Mi día</div>
+        <div class="ms-nav">≡ Mis análisis</div>
+      </div>
+      <div class="ms-content">
+        <!-- Banner de atraso -->
+        <div style="background:#fffbeb;border:1px solid var(--amber);border-radius:6px;padding:9px 12px;margin-bottom:10px;font-size:10px;color:#78350f">
+          <div style="font-weight:700;margin-bottom:3px">⚠ 1 análisis atrasado — acción urgente requerida</div>
+          <div>· <b>Paracetamol 500mg</b> (LOT-045) — 2 días de atraso</div>
+        </div>
+        <!-- Fila de tarea con atraso -->
+        <div style="border-left:3px solid var(--amber);border:1px solid var(--bdr);border-radius:var(--r);overflow:hidden;margin-bottom:6px">
+          <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;font-size:10px">
+            <span class="pill p-prog" style="font-size:9px">En análisis</span>
+            <b>Paracetamol 500mg</b>
+            <span style="color:var(--txt3)">LOT-045</span>
+            <div class="mb suc" style="font-size:9px;margin-left:auto">✓ Completar ahora</div>
+            <div class="mb" style="font-size:9px">📅 Replanificar</div>
+          </div>
+          <div style="background:#fffbeb;border-top:1px solid var(--bdr);padding:6px 10px;font-size:9px;color:#78350f;display:flex;align-items:center;gap:7px">
+            <span style="font-weight:700">⚠ Atrasado 2 días.</span>
+            <span>Te queda 1 día — completá el análisis o solicitá replanificación antes de que el supervisor sea notificado.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="steps" style="margin-bottom:0">
+  <div class="step">
+    <div class="sn" style="background:var(--amber)">!</div>
+    <div class="sb">
+      <h4>Día 2 de atraso — aviso al analista</h4>
+      <p>Si la fecha programada de una tarea pasó hace 2 días y no hay horas registradas, el sistema muestra un <strong>banner naranja</strong> al inicio de "Mi día" y un borde naranja en la fila de la tarea. La banda de aviso indica exactamente qué hacer.</p>
+      <div class="tip warn">⚠ Tenés 1 día de margen antes de que el supervisor reciba una alerta automática. Completá el análisis o solicitá replanificación.</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="sn" style="background:var(--red)">!</div>
+    <div class="sb">
+      <h4>Día 3 de atraso — supervisor notificado</h4>
+      <p>A los 3 días de atraso el supervisor ve la alerta en su 🔔 de notificaciones. Puede <strong>completar la tarea por vos</strong> (ingresando las horas reales), <strong>replanificar</strong> la fecha o <strong>eliminar</strong> la tarea. Actuá antes si es posible para registrar el trabajo vos mismo.</p>
+    </div>
+  </div>
+</div>
+
+<div style="margin-bottom:20px"></div>
+
 <div class="st">2 · Registrar trabajo — Mis análisis</div>
 <div class="steps">
   <div class="step">
