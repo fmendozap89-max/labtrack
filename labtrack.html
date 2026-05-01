@@ -2216,7 +2216,20 @@ function getNotifBadge(){
             'planification_rejected','hours_rejected','free_task_declined',
             'free_task_rejected','schedule_rejected'].indexOf(n.type)>=0;
   }).length;
-  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC+samplingC+responseC;
+  var overdueC=0;
+  if(isSup){
+    var _oTMs=new Date(today()+'T12:00:00').getTime();
+    tasks.forEach(function(t){
+      if(t.status!=='pending'&&t.status!=='scheduled'&&t.status!=='progress')return;
+      (t.assignments||[]).filter(function(a){return !a._removed;}).forEach(function(a){
+        if(!a.date)return;
+        var dL=Math.round((_oTMs-new Date(a.date+'T12:00:00').getTime())/86400000);
+        var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0);
+        if(dL>=3&&!done)overdueC++;
+      });
+    });
+  }
+  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC+samplingC+responseC+overdueC;
 }
 function renderNotifBtn(){
   var totalAlerts=getNotifBadge();
@@ -4383,13 +4396,17 @@ function requireSignature(action, label, callback) {
     + '</div></div>';
   document.body.appendChild(overlay);
   // Wire confirm button
-  document.getElementById('sig-confirm').onclick = function() {
+  document.getElementById('sig-confirm').onclick = async function() {
     const pwd = document.getElementById('sig-pwd').value;
     const reason = document.getElementById('sig-reason').value.trim();
     const errEl = document.getElementById('sig-err');
     if(!pwd) { errEl.textContent='Ingresá tu contraseña'; errEl.style.display='block'; return; }
     const uid = currentUser.id;
-    if(pwd !== passwords[uid]) { errEl.textContent='Contraseña incorrecta'; errEl.style.display='block'; return; }
+    const stored = passwords[uid]||'';
+    let ok = false;
+    if(stored.startsWith('$sha256')) { ok = (await hashPassword(pwd)) === stored; }
+    else { ok = (pwd === stored); }
+    if(!ok) { errEl.textContent='Contraseña incorrecta'; errEl.style.display='block'; return; }
     overlay.remove();
     callback(reason);
   };
@@ -4996,7 +5013,25 @@ function renderDashboard(){
   const myObs=myTasks.filter(t=>t.status==='observed');
   // Horas reales: suma de todas las asignaciones del analista
   const myHReal=myTasks.reduce((s,t)=>s+((t.assignments||[]).filter(a=>a.analyst===currentUser.id).reduce((s2,a)=>s2+(a.realHours||0),0)),0);
-  return`<div class="dash-grid" style="margin-bottom:16px">
+  const _aNow=new Date(today()+'T12:00:00').getTime();
+  const myOverdue=myTasks.filter(function(t){
+    if(t.status!=='pending'&&t.status!=='scheduled'&&t.status!=='progress')return false;
+    return(t.assignments||[]).some(function(a){
+      if(a.analyst!==currentUser.id||a._removed||!a.date)return false;
+      var dL=Math.round((_aNow-new Date(a.date+'T12:00:00').getTime())/86400000);
+      var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0);
+      return dL>=2&&!done;
+    });
+  });
+  const overdueBanner=myOverdue.length===0?'':('<div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:14px">'
+    +'<div style="font-weight:700;font-size:13px;color:var(--amber-text);margin-bottom:4px">⚠ '+myOverdue.length+' análisis atrasado'+(myOverdue.length>1?'s':'')+' — acción urgente requerida</div>'
+    +'<div style="font-size:12px;color:var(--amber-text)">'+myOverdue.map(function(t){
+      var a=(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed&&a.date;});
+      var dL=a?Math.round((_aNow-new Date(a.date+'T12:00:00').getTime())/86400000):0;
+      return'<span style="display:block">· <b>'+escH(t.producto)+'</b> ('+escH(t.lote)+') — '+dL+' día'+(dL!==1?'s':'')+' de atraso'+(dL>=3?' <span style="font-weight:700">— supervisor notificado</span>':'')+'</span>';
+    }).join('')+'</div>'
+    +'</div>');
+  return`${overdueBanner}<div class="dash-grid" style="margin-bottom:16px">
     <div class="stat-card"><div class="stat-n" style="color:var(--amber)">${myActionable.length}</div><div class="stat-l">Requieren acción</div></div>
     <div class="stat-card"><div class="stat-n" style="color:var(--blue)">${myTasks.filter(t=>t.status==='progress'||t.status==='pending-confirm').length}</div><div class="stat-l">En curso</div></div>
     <div class="stat-card"><div class="stat-n" style="color:var(--green)">${myDone.length}</div><div class="stat-l">Completados</div></div>
@@ -5172,8 +5207,11 @@ function tRowAna(t,maOverride){
 
   // canComplete: assignment not done and not pending-confirm, task active, date in window
   var canComplete=!iThisAssignDone&&!iThisAssignPendConf&&inActionWindow&&taskActive;
+  var daysLateAssign=ma&&ma.date?Math.round((new Date(todayStr+'T12:00:00').getTime()-new Date(ma.date+'T12:00:00').getTime())/86400000):0;
+  var showOverdueWarn=daysLateAssign>=2&&!iThisAssignDone&&!iThisAssignPendConf&&(t.status==='pending'||t.status==='scheduled'||t.status==='progress');
 
-  return'<div class="trow" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr">'
+  return'<div>'
+    +'<div class="trow" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr'+(showOverdueWarn?';border-left:3px solid var(--amber)':'')+'">'
     +'<div><div class="cell-trunc">'+escH(t.producto)+'</div><div class="cell-sub">'+escH(t.lote)+'</div></div>'
     +'<div style="font-family:var(--mono);font-size:12px">'+fmtD(md)+(replanLabel?'<br>'+replanLabel:'')+'</div>'
     +'<div>'+hoursCol+'</div>'
@@ -5191,6 +5229,17 @@ function tRowAna(t,maOverride){
     +(!pendingReplan&&!iThisAssignDone&&t.status!=='done'&&t.status!=='pending-confirm'?'<button class="btn sm" onclick="openReplan('+t.id+',\''+currentUser.id+'\')" title="Replanificar">📅</button>':'')
     +((t.observations&&t.observations.length)||(t.completionComments&&t.completionComments.length)||(t.resubmitHistory&&t.resubmitHistory.length)?'<button class="btn sm" onclick="openEdit('+t.id+')" title="Ver comentarios del proceso" style="color:var(--blue)">💬</button>':'')
     +'</div>'
+    +'</div>'
+    +(showOverdueWarn
+      ?'<div style="background:var(--amber-bg);border-left:3px solid var(--amber);border-bottom:1px solid var(--border);padding:7px 12px;font-size:11px;color:var(--amber-text);display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+        +'<span style="font-weight:700">⚠ Atrasado '+daysLateAssign+' día'+(daysLateAssign!==1?'s':'')+'.</span>'
+        +(daysLateAssign===2
+          ?'<span>Te queda 1 día — completá el análisis o solicitá replanificación antes de que el supervisor sea notificado.</span>'
+          :'<span>El supervisor fue notificado. Completá el análisis o solicitá replanificación urgente.</span>')
+        +(canComplete?'<button class="btn suc sm" onclick="markDone('+t.id+dateParam+')" style="font-size:10px;margin-left:auto">✓ Completar ahora</button>':'')
+        +(!pendingReplan&&!iThisAssignDone?'<button class="btn sm" onclick="openReplan('+t.id+',\''+currentUser.id+'\')" style="font-size:10px">📅 Replanificar</button>':'')
+        +'</div>'
+      :'')
     +'</div>';
 }
 function searchBarHtml(){
@@ -7938,6 +7987,63 @@ function markProg(id,assignDate){
     description:'Inicio de análisis: '+t.producto+' '+t.lote+(assignDate?' (asig. '+assignDate+')':'') },'');
   saveLS();render();
 }
+function completeTaskForAnalyst(taskId,analystId){
+  var t=tasks.find(function(x){return x.id===taskId;});
+  if(!t)return;
+  var u=getU(analystId);
+  var uName=u?u.name:'Analista';
+  // Show hours input overlay before signature
+  var overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML='<div style="background:var(--surface);border-radius:var(--radius-lg);padding:24px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.3)">'
+    +'<h3 style="margin:0 0 6px;font-size:15px">Completar análisis por analista</h3>'
+    +'<div style="background:var(--bg);border-radius:var(--radius);padding:9px 12px;margin-bottom:14px;font-size:12px">'
+    +'<div style="font-weight:600">'+escH(t.producto)+'</div>'
+    +'<div style="color:var(--text3);font-family:var(--mono)">'+escH(t.lote)+'</div>'
+    +'<div style="color:var(--text2);margin-top:4px">Analista: <b>'+escH(uName)+'</b></div>'
+    +'</div>'
+    +'<div style="margin-bottom:16px">'
+    +'<label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">Horas reales del análisis</label>'
+    +'<input type="number" id="ctfa-hours" min="0.25" max="24" step="0.25" placeholder="Ej: 4.5" style="width:100%;padding:8px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg2);color:var(--text);font-size:14px;box-sizing:border-box">'
+    +'<div id="ctfa-err" style="color:var(--red);font-size:11px;margin-top:4px;display:none"></div>'
+    +'</div>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end">'
+    +'<button id="ctfa-cancel" style="padding:8px 16px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px">Cancelar</button>'
+    +'<button id="ctfa-next" style="padding:8px 16px;border:none;border-radius:var(--radius);background:var(--blue);color:#fff;cursor:pointer;font-size:13px;font-weight:600">Continuar →</button>'
+    +'</div></div>';
+  document.body.appendChild(overlay);
+  document.getElementById('ctfa-cancel').onclick=function(){overlay.remove();};
+  document.getElementById('ctfa-next').onclick=function(){
+    var hVal=parseFloat(document.getElementById('ctfa-hours').value);
+    var errEl=document.getElementById('ctfa-err');
+    if(!hVal||hVal<=0){errEl.textContent='Ingresá las horas reales.';errEl.style.display='block';return;}
+    overlay.remove();
+    requireSignature('Completar análisis por analista','Completar: '+t.producto+' | Lote: '+t.lote+' | En nombre de: '+uName+' | Horas: '+hVal,function(reason){
+      var nowTs=Date.now();
+      var todayStr2=today();
+      var aIdx=(t.assignments||[]).findIndex(function(a){return a.analyst===analystId&&!a._removed;});
+      if(aIdx>=0){
+        t.assignments[aIdx].realHours=hVal;
+        t.assignments[aIdx].sessions=[{date:todayStr2,hours:hVal}];
+        t.assignments[aIdx]._pendingConfirm=true;
+        t.assignments[aIdx]._completedBySup=true;
+        t.assignments[aIdx]._completedBySupId=currentUser.id;
+        t.assignments[aIdx]._completedBySupTs=nowTs;
+      } else {
+        (t.assignments=t.assignments||[]).push({analyst:analystId,date:todayStr2,realHours:hVal,sessions:[{date:todayStr2,hours:hVal}],_pendingConfirm:true,_completedBySup:true,_completedBySupId:currentUser.id,_completedBySupTs:nowTs});
+      }
+      t.status='pending-confirm';
+      t._ts=nowTs;
+      auditLog('COMPLETE_BY_SUP','TASK',taskId,{
+        description:'Completado por supervisor en nombre de '+uName+' | '+t.producto+' | Lote: '+t.lote+' | Horas: '+hVal,
+        producto:t.producto,lote:t.lote,analystId:analystId,analystName:uName,realHours:hVal
+      },reason);
+      saveLS();saveNow().catch(function(e){console.error('completeTaskForAnalyst:',e);});
+      render();
+    });
+  };
+  document.getElementById('ctfa-hours').focus();
+}
 function deleteTask(id){
   const t=tasks.find(function(x){return x.id===id;});
   if(!t)return;
@@ -8313,6 +8419,19 @@ function renderNotifPanel(){
   var samplingDoneBadge=isSup
     ?replanNotifs.filter(function(n){return n.type==='sampling_done'&&n.status!=='resolved'&&isUnread(n);}).length
     :0;
+  var overdueAlerts=[];
+  if(isSup){
+    var _oTMs2=new Date(today()+'T12:00:00').getTime();
+    tasks.forEach(function(t){
+      if(t.status!=='pending'&&t.status!=='scheduled'&&t.status!=='progress')return;
+      (t.assignments||[]).filter(function(a){return !a._removed;}).forEach(function(a){
+        if(!a.date)return;
+        var dL=Math.round((_oTMs2-new Date(a.date+'T12:00:00').getTime())/86400000);
+        var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0);
+        if(dL>=3&&!done)overdueAlerts.push({task:t,assignment:a,analystId:a.analyst,daysLate:dL});
+      });
+    });
+  }
   // totalBadge: solo no-leídas (badge de la campana)
   const totalBadge=myObsNotifs.filter(isUnread).length
     +pendReplan.filter(isUnread).length+schedPend.length+schedApproved.length+confirmPend.length
@@ -8320,7 +8439,7 @@ function renderNotifPanel(){
     +(isSup?ftPendConfirm.length:replanNotifs.filter(function(n){
       return n.type==='free_task_assigned'&&n.forUserId===uid&&n.status!=='resolved'&&isUnread(n);
     }).length)
-    +planReqNotifs.filter(isUnread).length+responseNotifBadge+samplingDoneBadge;
+    +planReqNotifs.filter(isUnread).length+responseNotifBadge+samplingDoneBadge+overdueAlerts.length;
 
   if(!showNotifPanel){
     return'<div style="position:relative;display:inline-block">'
@@ -8389,6 +8508,27 @@ function renderNotifPanel(){
     return html;
   }
 
+  // ── Análisis atrasados 3+ días (supervisor) ──
+  if(overdueAlerts.length>0){
+    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:#fef3c7">'
+      +'<div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:8px">🚨 Análisis atrasados — acción requerida ('+overdueAlerts.length+')</div>';
+    overdueAlerts.forEach(function(oa){
+      var u2=getU(oa.analystId);
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--amber)">'
+        +'<div style="font-size:12px;font-weight:600">'+escH(oa.task.producto)+' — '+escH(oa.task.lote)+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin:3px 0;display:flex;align-items:center;gap:4px">'
+        +(u2?'<div class="av '+u2.av+'" style="width:16px;height:16px;font-size:8px">'+escH(u2.avInit)+'</div><b>'+escH(u2.name)+'</b>':'')
+        +'</div>'
+        +'<div style="font-size:11px;color:var(--amber-text);font-weight:600">⚠ '+oa.daysLate+' días de atraso · programado '+fmtDDMMYY(oa.assignment.date)+'</div>'
+        +'<div style="display:flex;gap:4px;margin-top:7px;flex-wrap:wrap">'
+        +'<button class="btn sm suc" onclick="showNotifPanel=false;completeTaskForAnalyst('+oa.task.id+',\''+oa.analystId+'\')" style="font-size:10px">✓ Completar por analista</button>'
+        +'<button class="btn sm" onclick="showNotifPanel=false;openReplanSuper('+oa.task.id+')" style="font-size:10px;background:var(--blue-bg);color:var(--blue-text);border-color:var(--blue)">↺ Replanificar</button>'
+        +'<button class="btn sm dan" onclick="showNotifPanel=false;deleteTask('+oa.task.id+')" style="font-size:10px">🗑 Eliminar</button>'
+        +'</div>'
+        +'</div>';
+    });
+    html+='</div>';
+  }
   // ── Muestreos completados (supervisor) ──
   if(isSup){
     var samplingNotifs=replanNotifs.filter(function(n){return n.type==='sampling_done'&&n.status!=='resolved';}).sort(function(a,b){return b.ts-a.ts;});
