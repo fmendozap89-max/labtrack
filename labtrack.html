@@ -355,6 +355,7 @@ function applySnapshot(json){
       workdayConfig.extra=d.workdayConfig.extra||[];
       workdayConfig.off=d.workdayConfig.off||[];
       workdayConfig.guideUrl=d.workdayConfig.guideUrl||'';
+      if(d.workdayConfig._ts)workdayConfig._ts=d.workdayConfig._ts;
     }
     USERS.forEach(u=>{if(!passwords[u.id])passwords[u.id]='labtrack123';});
     auditTrail=Array.isArray(d.auditTrail)?d.auditTrail:[];
@@ -1125,19 +1126,19 @@ function saveExtraWorkday(dateStr, analystIds, note){
   workdayConfig.extra=workdayConfig.extra.filter(e=>(e.date||e)!==dateStr);
   workdayConfig.extra.push({date:dateStr,analysts:analystIds,note:note||''});
   workdayConfig.extra.sort((a,b)=>(a.date||a).localeCompare(b.date||b));
-  saveLS();render();
+  workdayConfig._ts=Date.now();saveLS();render();
 }
 function saveOffDay(dateStr, note){
   workdayConfig.extra=workdayConfig.extra.filter(e=>(e.date||e)!==dateStr);
   workdayConfig.off=workdayConfig.off.filter(o=>(o.date||o)!==dateStr);
   workdayConfig.off.push({date:dateStr,note:note||''});
   workdayConfig.off.sort((a,b)=>(a.date||a).localeCompare(b.date||b));
-  saveLS();render();
+  workdayConfig._ts=Date.now();saveLS();render();
 }
 function removeWorkdayOverride(dateStr){
   workdayConfig.extra=workdayConfig.extra.filter(e=>(e.date||e)!==dateStr);
   workdayConfig.off=workdayConfig.off.filter(o=>(o.date||o)!==dateStr);
-  saveLS();render();
+  workdayConfig._ts=Date.now();saveLS();render();
 }
 function getAnalystScheduleDefault(analystId){
   const stored=analystSchedules[analystId];
@@ -1786,7 +1787,7 @@ function renderWorkdaysTab(){
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px;margin-bottom:14px">
         <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Definí qué días de la semana son laborables. Esto aplica a todos los analistas.</p>
         ${DAY_ORDER.map(d=>`<label style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px">
-          <input type="checkbox" ${workdayConfig.weekdays[d]?'checked':''} onchange="workdayConfig.weekdays[${d}]=this.checked;saveLS('workdayConfig');render()" style="width:16px;height:16px;cursor:pointer">
+          <input type="checkbox" ${workdayConfig.weekdays[d]?'checked':''} onchange="workdayConfig.weekdays[${d}]=this.checked;workdayConfig._ts=Date.now();saveLS('workdayConfig');render()" style="width:16px;height:16px;cursor:pointer">
           <span style="flex:1">${DAY_NAMES_FULL[d]}</span>
           <span style="font-size:11px;color:var(--text3)">${workdayConfig.weekdays[d]?'Laborable':'No laborable'}</span>
         </label>`).join('')}
@@ -2228,7 +2229,7 @@ function getNotifBadge(){
       (t.assignments||[]).filter(function(a){return !a._removed;}).forEach(function(a){
         if(!a.date)return;
         var dL=Math.round((_oTMs-new Date(a.date+'T12:00:00').getTime())/86400000);
-        var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0);
+        var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0)||!!a._completedBySup;
         if(dL>=3&&!done)overdueC++;
       });
     });
@@ -4208,11 +4209,10 @@ function mergeSnapshot(local, remote) {
     });
     merged.analystSchedules = mergedSched;
 
-    // ── Workday config: keep newer ──
-    if((L.workdayConfig_ts||0) > (R.workdayConfig_ts||0)){
-      merged.workdayConfig = L.workdayConfig;
-      merged.workdayConfig_ts = L.workdayConfig_ts;
-    }
+    // ── Workday config: keep newer (timestamp stored inside object as ._ts) ──
+    var lwc_ts=(L.workdayConfig&&L.workdayConfig._ts)||0;
+    var rwc_ts=(R.workdayConfig&&R.workdayConfig._ts)||0;
+    if(lwc_ts > rwc_ts){merged.workdayConfig=L.workdayConfig;}
 
     // ── MgmtCategories: keep newer ──
     if((L.mgmtCategories_ts||0) > (R.mgmtCategories_ts||0)){
@@ -4253,7 +4253,7 @@ function quickActivateDay(dateStr, analystId) {
   workdayConfig.extra = workdayConfig.extra.filter(function(e){ return (e.date||e)!==dateStr; });
   workdayConfig.extra.push({date:dateStr, analysts:ids, note:'Activado desde gestión de conflictos'});
   workdayConfig.extra.sort(function(a,b){ return (a.date||a).localeCompare(b.date||b); });
-  workdayConfig_ts = Date.now();
+  workdayConfig._ts=Date.now();
   saveLS();
   _lastHtml='';
   render();
@@ -5024,7 +5024,7 @@ function renderDashboard(){
     return(t.assignments||[]).some(function(a){
       if(a.analyst!==currentUser.id||a._removed||!a.date)return false;
       var dL=Math.round((_aNow-new Date(a.date+'T12:00:00').getTime())/86400000);
-      var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0);
+      var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0)||!!a._completedBySup;
       return dL>=2&&!done;
     });
   });
@@ -5187,7 +5187,7 @@ function tRowAna(t,maOverride){
   // Ventana de acción: 3 días atrás hasta 1 día adelante
   var inActionWindow=(diffDays>=-3&&diffDays<=1)||t._dueStatus==='late';
   // Per-assignment state (independent per date)
-  var iThisAssignDone=ma&&((ma.realHours>0)||(ma.sessions&&ma.sessions.length>0));
+  var iThisAssignDone=ma&&((ma.realHours>0)||(ma.sessions&&ma.sessions.length>0)||!!ma._completedBySup);
   var iThisAssignPendConf=ma&&ma._pendingConfirm&&!ma._supervisorConfirmed;
   // Task is in an actionable state (not finished)
   var taskActive=['pending','scheduled','progress','pending-confirm','observed'].indexOf(t.status)>=0;
@@ -5211,7 +5211,7 @@ function tRowAna(t,maOverride){
   var dateParam=ma&&ma.date?',\''+ma.date+'\'':'';
 
   // canComplete: assignment not done and not pending-confirm, task active, date in window
-  var canComplete=!iThisAssignDone&&!iThisAssignPendConf&&inActionWindow&&taskActive;
+  var canComplete=!iThisAssignDone&&!iThisAssignPendConf&&inActionWindow&&taskActive&&t.status!=='pending-confirm';
   var daysLateAssign=ma&&ma.date?Math.round((new Date(todayStr+'T12:00:00').getTime()-new Date(ma.date+'T12:00:00').getTime())/86400000):0;
   var showOverdueWarn=daysLateAssign>=2&&!iThisAssignDone&&!iThisAssignPendConf&&(t.status==='pending'||t.status==='scheduled'||t.status==='progress');
 
@@ -6281,6 +6281,7 @@ function saveUserPwd(uid){
 function saveGuideUrl(){
   const v=(document.getElementById('guide-url-input')||{}).value||'';
   workdayConfig.guideUrl=v.trim();
+  workdayConfig._ts=Date.now();
   saveLS();saveNow().catch(function(e){console.error('saveGuideUrl:',e);});
   const msg=document.getElementById('guide-url-msg');
   if(msg){msg.textContent=v.trim()?'URL guardada.':'URL eliminada.';setTimeout(function(){if(msg)msg.textContent='';},2000);}
@@ -7411,8 +7412,11 @@ function markDone(id,assignDate){
         document.body.removeChild(hDiv);
         // Target the specific assignment by date (independent per-assignment completion)
         var myA=_assignDate
-          ?(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed&&a.date===_assignDate;})
-          :(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed;});
+          ?(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed&&!a._completedBySup&&a.date===_assignDate;})
+          :(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed&&!a._completedBySup;});
+        if(!myA&&(t.assignments||[]).some(function(a){return a.analyst===currentUser.id&&a._completedBySup;})){
+          alert('Este análisis fue completado por el supervisor. Aguardá la confirmación.');return;
+        }
         if(myA){
           if(!myA.sessions)myA.sessions=[];
           myA.sessions.push({date:today(),hours:hVal,ts:Date.now(),comment:completeCmt||undefined});
@@ -7437,9 +7441,12 @@ function markDone(id,assignDate){
           t.completionComments.push({by:currentUser.id,byName:currentUser.name,ts:Date.now(),comment:completeCmt});
         }
         auditLog('STATUS_CHANGE','TASK',tid,{field:'status',oldVal:prevStatus,newVal:'pending-confirm',description:t.producto+' '+t.lote+' — completado por '+currentUser.name,hours:hVal,comment:completeCmt||''},'Completado con '+hVal+'h');
-        // Push supervisor notification for completion
+        // Push supervisor notification for completion (dedup: remove stale copies first)
         var sup=USERS.find(function(u){return u.role==='supervisor';});
         if(sup){
+          replanNotifs=replanNotifs.filter(function(n){
+            return !(n.type==='completed'&&n.taskId===tid&&n.analystId===currentUser.id&&n.status!=='resolved');
+          });
           replanNotifs.push({id:nextNotifId++,type:'completed',taskId:tid,
             analystId:currentUser.id,forUserId:sup.id,
             status:'pending',ts:Date.now(),
@@ -8432,7 +8439,7 @@ function renderNotifPanel(){
       (t.assignments||[]).filter(function(a){return !a._removed;}).forEach(function(a){
         if(!a.date)return;
         var dL=Math.round((_oTMs2-new Date(a.date+'T12:00:00').getTime())/86400000);
-        var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0);
+        var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0)||!!a._completedBySup;
         if(dL>=3&&!done)overdueAlerts.push({task:t,assignment:a,analystId:a.analyst,daysLate:dL});
       });
     });
