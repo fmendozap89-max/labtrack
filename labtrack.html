@@ -209,6 +209,18 @@ window.onerror=function(msg,src,line,col,err){
 // ── AV COLORS (cycling) ──
 const AV_CLASSES=['av0','av1','av2','av3','av4','av5','av6','av7','av8'];
 const CHIP_CLASSES=['c1','c2','c3','c4','c5','c6','c7','c8'];
+// Calendar chip colors — light pastels aligned with each avatar color (av0–av8)
+const AV_CHIP=[
+  {bg:'#dbeafe',txt:'#1e3a8a'},  // av0 azul
+  {bg:'#d1fae5',txt:'#065f46'},  // av1 esmeralda
+  {bg:'#fef3c7',txt:'#78350f'},  // av2 dorado
+  {bg:'#fee2e2',txt:'#7f1d1d'},  // av3 rojo
+  {bg:'#ede9fe',txt:'#4c1d95'},  // av4 violeta
+  {bg:'#ffedd5',txt:'#7c2d12'},  // av5 naranja
+  {bg:'#fce7f3',txt:'#831843'},  // av6 rosa
+  {bg:'#cffafe',txt:'#164e63'},  // av7 cian
+  {bg:'#e0e7ff',txt:'#1e1b4b'},  // av8 índigo
+];
 
 function initials(name){
   const parts=name.trim().split(/\s+/).filter(Boolean);
@@ -326,6 +338,9 @@ function rebuildDerived(){
     u.av=(u.avColor!=null)?'av'+u.avColor:avClass(i);
     u.avInit=initials(u.name);
     u.chip=chipClass(i);
+    var _ai=u.avColor!=null?u.avColor:i%AV_CHIP.length;
+    u.chipBg=AV_CHIP[_ai].bg;
+    u.chipTxt=AV_CHIP[_ai].txt;
     uMap[u.id]=u;
   });
 }
@@ -5988,7 +6003,7 @@ function renderCalWeek(sup){
       <div class="whead" style="${cols}"><div>Usuario</div>${dayLbls.map((d,i)=>`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
       ${rows.map(a=>`<div class="wrow" style="${cols}">
         <div class="wcell-name"><div class="av ${a.av}" style="flex-shrink:0">${escH(a.avInit)}</div>${escH(a.name.split(' ')[0])}</div>
-        ${wd.map(d=>{const dt=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=tasks.filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>`<div class="chip ${hasConflict?'':''+a.chip}" onclick="openEdit(${t.id})" style="cursor:pointer;margin-bottom:2px;${hasConflict?'border:1px solid var(--red);background:var(--red-bg);':''}">${hasConflict?'⚠ ':''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
+        ${wd.map(d=>{const dt=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=tasks.filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>`<div class="chip" onclick="openEdit(${t.id})" style="cursor:pointer;margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ ':''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
       </div>`).join('')}
     </div>
   </div>
@@ -6105,10 +6120,11 @@ function renderCalMonth(sup){
       dayTasks.forEach(function(t){
         const analystOnTask=(t.assignments||[]).filter(function(a){return rows.some(function(r){return r.id===a.analyst;})&&a.date===dateStr;});
         const chip=rows.find(function(r){return(t.assignments||[]).some(function(a){return a.analyst===r.id&&a.date===dateStr;});});
-        const chipClass=chip?chip.chip:'av1';
+        const chipBg=chip?chip.chipBg:'#dbeafe';
+        const chipTxt=chip?chip.chipTxt:'#1e3a8a';
         const anaAvatars=analystOnTask.map(function(a){const au=getU(a.analyst);return'<span class="av '+au.av+'" style="width:13px;height:13px;font-size:6px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;flex-shrink:0">'+escH(au.avInit)+'</span>';}).join('');
         const stColor=t.status==='done'?'var(--green)':t.status==='progress'?'var(--blue)':t.status==='observed'?'var(--amber)':t.status==='reviewed'?'#0d9488':'var(--text3)';
-        gridHtml+='<div class="chip '+chipClass+'" onclick="openEdit('+t.id+')" style="cursor:pointer;margin-bottom:2px;padding:2px 4px">'
+        gridHtml+='<div class="chip" onclick="openEdit('+t.id+')" style="cursor:pointer;margin-bottom:2px;padding:2px 4px;background:'+chipBg+';color:'+chipTxt+'">'
           +'<div style="display:flex;align-items:center;gap:2px">'
           +(sup&&!selA?anaAvatars:'')
           +'<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;flex:1">'+escH(t.producto)+'</div>'
