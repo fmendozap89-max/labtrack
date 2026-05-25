@@ -276,6 +276,8 @@ function initials(name){
 }
 function avClass(idx){return AV_CLASSES[idx%AV_CLASSES.length];}
 function chipClass(idx){return CHIP_CLASSES[idx%CHIP_CLASSES.length];}
+// Índice de color estable basado en el ID del usuario — no depende del orden del array
+function stableAvIdx(uid){var s=String(uid),h=0;for(var k=0;k<s.length;k++)h=(h*31+s.charCodeAt(k))&0xffff;return h%AV_CLASSES.length;}
 
 // ── STATE ──
 let USERS=[];
@@ -385,12 +387,12 @@ function rebuildDerived(){
   CAL_USERS=USERS.filter(u=>['analyst','reviewer','sampler','staff'].includes(u.role)).sort((a,b)=>a.name.localeCompare(b.name,'es'));
   uMap={};
   USERS.forEach((u,i)=>{
-    u.av=(u.avColor!=null)?'av'+u.avColor:avClass(i);
+    var _ai=u.avColor!=null?u.avColor:stableAvIdx(u.id);
+    u.av='av'+(_ai%AV_CLASSES.length);
     u.avInit=initials(u.name);
-    u.chip=chipClass(i);
-    var _ai=u.avColor!=null?u.avColor:i%AV_CHIP.length;
-    u.chipBg=AV_CHIP[_ai].bg;
-    u.chipTxt=AV_CHIP[_ai].txt;
+    u.chip=chipClass(_ai);
+    u.chipBg=AV_CHIP[_ai%AV_CHIP.length].bg;
+    u.chipTxt=AV_CHIP[_ai%AV_CHIP.length].txt;
     uMap[u.id]=u;
   });
 }
