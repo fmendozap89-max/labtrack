@@ -5792,8 +5792,8 @@ function tRowAna(t,maOverride){
   var assignedDate=new Date((md||todayStr)+'T12:00:00');
   // diffDays: signed — negative=past, positive=future
   var diffDays=Math.round((assignedDate-todayDate)/(1000*60*60*24));
-  // Ventana de acción: 3 días atrás hasta 1 día adelante
-  var inActionWindow=(diffDays>=-3&&diffDays<=1)||t._dueStatus==='late';
+  // Ventana de acción: 3 días atrás hasta 1 día adelante (aplica siempre, incluso si la tarea está vencida)
+  var inActionWindow=(diffDays>=-3&&diffDays<=1);
   // Per-assignment state (independent per date)
   var iThisAssignDone=ma&&((ma.realHours>0)||(ma.sessions&&ma.sessions.length>0)||!!ma._completedBySup);
   var iThisAssignPendConf=ma&&ma._pendingConfirm&&!ma._supervisorConfirmed;
@@ -8780,7 +8780,7 @@ function markProg(id,assignDate){
         var diff=Math.round((ad-todayDate)/(1000*60*60*24));
         return diff<-3||diff>1;
       });
-      if(allOutOfWindow&&t._dueStatus!=='late'){
+      if(allOutOfWindow){
         alert('Solo podés iniciar esta actividad dentro de los 3 días previos o el día siguiente a la fecha asignada.');return;
       }
     }
