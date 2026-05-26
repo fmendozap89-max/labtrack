@@ -442,9 +442,17 @@ function applySnapshot(json){
     nextSuggId=d.nextSuggId||productSuggestions.length+1;
     nextId=d.nextId||11;
     nextUid=d.nextUid||100;
+    // Migración: purgar registros _removed:true que quedaron del sistema anterior.
+    // Los datos de asignaciones eliminadas por supervisor ya no se conservan.
+    tasks.forEach(function(t){
+      if(t.assignments&&t.assignments.some(function(a){return a._removed;})){
+        t.assignments=t.assignments.filter(function(a){return !a._removed;});
+        t._ts=Date.now();
+      }
+    });
     // Normalize status: pending↔scheduled based on active assignments
     tasks.forEach(function(t){
-      var activeA=(t.assignments||[]).filter(function(a){return !a._removed;}).length;
+      var activeA=(t.assignments||[]).length; // ya sin _removed tras migración
       if(t.status==='pending'&&activeA>0) t.status='scheduled';
       if(t.status==='scheduled'&&activeA===0) t.status='pending';
       // Ensure samplerAssignments array exists
@@ -5259,6 +5267,24 @@ function renderShell(){
   const myT=sup?tasks:tasks.filter(t=>isMyTask(t));
   const lateC=myT.filter(t=>t._dueStatus==='late').length;
   const pendC=myT.filter(t=>t.status==='pending').length;
+  // Tareas con acción pendiente del analista actual (dentro de ventana de 3 días)
+  const actionC=(()=>{
+    if(sup)return 0;
+    const _myId=currentUser.id,_todStr=today(),_todDate=new Date(_todStr+'T12:00:00');
+    return tasks.filter(function(t){
+      if(['a-ingresar','muestra-ok','done','reviewed','approved'].includes(t.status))return false;
+      var myA=(t.assignments||[]).filter(function(a){return a.analyst===_myId&&!a._removed;});
+      if(!myA.length)return false;
+      if(t.status==='observed')return true;
+      return myA.some(function(ma){
+        var done=(ma.realHours>0)||(ma.sessions&&ma.sessions.length>0)||!!ma._completedBySup;
+        if(done)return false;
+        if(ma._pendingConfirm&&!ma._supervisorConfirmed)return false;
+        var diff=Math.round((new Date((ma.date||_todStr)+'T12:00:00')-_todDate)/(1000*60*60*24));
+        return diff>=-3&&diff<=1;
+      });
+    }).length;
+  })();
   const reviewPendC=(isReviewer||sup)?tasks.filter(t=>t.status==='done').length:0;
   const navs=sup?[
     {id:'dashboard',label:'Panel general',icon:'▪'},
@@ -5278,7 +5304,7 @@ function renderShell(){
   ]:isReviewer?[
     {id:'dashboard',label:'Mi día',icon:'▪'},
     {id:'review',label:'Revisión',icon:'✓',badge:reviewPendC>0?reviewPendC:'',bc:'w'},
-    {id:'tasks',label:'Mis análisis',icon:'≡',badge:lateC>0?lateC:'',bc:'d'},
+    {id:'tasks',label:'Mis análisis',icon:'≡',badge:actionC>0?actionC:'',bc:'d'},
     {id:'pendientes',label:'Pendientes',icon:'📋'},
     {id:'sugerencias',label:'Sugerencias de ingreso',icon:'📦',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
     {id:'week',label:'Calendario equipo',icon:'▦'},
@@ -5297,7 +5323,7 @@ function renderShell(){
     {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending');return p.length>0?p.length:'';})()},
   ]:[
     {id:'dashboard',label:'Mi día',icon:'▪'},
-    {id:'tasks',label:'Mis análisis',icon:'≡',badge:lateC>0?lateC:'',bc:'d'},
+    {id:'tasks',label:'Mis análisis',icon:'≡',badge:actionC>0?actionC:'',bc:'d'},
     {id:'pendientes',label:'Pendientes',icon:'📋'},
     {id:'sugerencias',label:'Sugerencias de ingreso',icon:'📦',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
     {id:'cronograma',label:'Mi cronograma',icon:'▦',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
@@ -6409,6 +6435,8 @@ function renderCalWeek(sup){
   var rfHtml=(sup||isReviewerRole())?renderCalRoleFilter():'';
   const cols='grid-template-columns:88px repeat(7,minmax(0,1fr))';
   const _calCache={};wd.forEach(d=>{_calCache[d]=mgmtTasks.flatMap(mt=>expandMgmt(mt,d,d));});
+  // Fecha de mañana: solo asignaciones ≥ mañana pueden arrastrarse
+  const _tomorrowStr=(function(){var d=new Date(todayStr+'T12:00:00');d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);})();
   return `<div class="filter-row" style="margin-bottom:12px">
     <button class="btn" onclick="weekOffset--;render()">← Anterior</button>
     <span style="font-size:13px;font-weight:600;font-family:var(--mono);min-width:120px;text-align:center">${fmtD(wd[0])} – ${fmtD(wd[6])}</span>
@@ -6420,7 +6448,7 @@ function renderCalWeek(sup){
       <div class="whead" style="${cols}"><div>Usuario</div>${dayLbls.map((d,i)=>`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
       ${rows.map(a=>`<div class="wrow" style="${cols}">
         <div class="wcell-name"><div class="av ${a.av}" style="flex-shrink:0">${escH(a.avInit)}</div>${escH(a.name.split(' ')[0])}</div>
-        ${wd.map(d=>{const dt=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=tasks.filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>`<div class="chip" onclick="openEdit(${t.id})" style="cursor:pointer;margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ ':''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
+        ${wd.map(d=>{const dt=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=tasks.filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>{const _canDrag=sup&&d>=_tomorrowStr&&t.status==='scheduled';return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ ':''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`;}).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
       </div>`).join('')}
     </div>
   </div>
@@ -6429,6 +6457,7 @@ function renderCalWeek(sup){
     ${tasks.filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))).map(t=>tRowsAna(t)).join('')||'<div class="empty">Sin análisis esta semana</div>'}
   </div>`:''}
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text2)">
+    ${sup?'<span style="display:flex;align-items:center;gap:4px;background:var(--bg2);padding:2px 7px;border-radius:10px">✋ Arrastrá un análisis programado a otro día u analista</span>':''}
     <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#ddeaf8;border-left:3px solid #1a4f8a;border-radius:2px;display:inline-block"></span>Gestión</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#ede9fe;border-left:2px solid #7c3aed;border-radius:2px;display:inline-block"></span>Muestreo</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:var(--green-bg);border-left:2px solid var(--green);border-radius:2px;display:inline-block"></span>Act. libre confirmada</span>
@@ -6616,6 +6645,55 @@ function renderCalMonth(sup){
     +'</div>';
 
   return navHtml+pillsHtml+gridHtml+legendHtml;
+}
+// ── Drag & drop en calendario semanal del supervisor ──
+var _calDrag={taskId:null,analystId:null,date:null};
+function calDragStart(ev,taskId,analystId,date){
+  _calDrag={taskId:taskId,analystId:analystId,date:date};
+  ev.dataTransfer.effectAllowed='move';
+  ev.dataTransfer.setData('text/plain',taskId);
+  // No stopPropagation — permite que el evento burbujee normalmente
+}
+function calDragEnd(ev){ev.target.style.opacity='';}
+function calDragOver(ev,analystId,date){
+  // Solo aceptar si hay algo siendo arrastrado
+  if(!_calDrag.taskId)return;
+  ev.preventDefault();
+  ev.dataTransfer.dropEffect='move';
+  ev.currentTarget.style.outline='2px dashed var(--blue)';
+  ev.currentTarget.style.background='var(--blue-bg)';
+}
+function calDragLeave(ev){
+  ev.currentTarget.style.outline='';
+  ev.currentTarget.style.background='';
+}
+function calDrop(ev,newAnalystId,newDate){
+  ev.preventDefault();
+  ev.currentTarget.style.outline='';
+  ev.currentTarget.style.background='';
+  var d=_calDrag;
+  _calDrag={taskId:null,analystId:null,date:null};
+  if(!d.taskId)return;
+  if(d.analystId===newAnalystId&&d.date===newDate)return; // misma celda
+  var t=tasks.find(function(x){return x.id===d.taskId;});
+  if(!t)return;
+  var assigns=t.assignments||[];
+  var idx=assigns.findIndex(function(a){return a.analyst===d.analystId&&a.date===d.date&&!a._removed;});
+  if(idx<0){alert('No se encontró la asignación.');return;}
+  // Verificar que el analista destino existe
+  var destUser=getU(newAnalystId);
+  if(!destUser){alert('Analista destino no encontrado.');return;}
+  // Mover asignación
+  var newAssigns=assigns.slice();
+  newAssigns[idx]=Object.assign({},newAssigns[idx],{analyst:newAnalystId,date:newDate});
+  t.assignments=newAssigns;
+  t._ts=Date.now();
+  auditLog('EDIT','TASK',t.id,{
+    description:'Reasignación por drag&drop: '+t.producto+' '+t.lote,
+    from:d.analystId+'/'+d.date,to:newAnalystId+'/'+newDate
+  },'Arrastrado en calendario semanal');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('calDrop save:',e);});
 }
 function renderWeek(){
   const sup=currentUser.role==='supervisor'||currentUser.role==='reviewer';
@@ -7214,7 +7292,7 @@ function renderTaskModal(){
     selectedAnalysts=[];analystDates={};multiAssigns=[];
   }
   var selSet=new Set(selectedAnalysts);
-  var realTotal=(t.assignments||[]).reduce(function(s,a){return s+(a.realHours||0);},0);
+  var realTotal=(t.assignments||[]).filter(function(a){return !a._removed;}).reduce(function(s,a){return s+(a.realHours||0);},0);
 
   var analChecks=[...ANALYSTS].sort(function(a,b){return a.name.localeCompare(b.name,'es');}).map(function(a){
     return'<div class="ana-check'+(selSet.has(a.id)?' selected':'')+'" onclick="toggleAna(\''+a.id+'\')">'
@@ -7346,7 +7424,7 @@ function renderTaskComments(t){
 }
 
 function renderHoursSummaryBlock(t){
-  var assigns=(t.assignments||[]).filter(function(a){return a.realHours>0;});
+  var assigns=(t.assignments||[]).filter(function(a){return !a._removed&&a.realHours>0;});
   if(!assigns.length)return'';
   var realT=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
   var body=assigns.map(function(a){
@@ -7376,48 +7454,59 @@ function renderDateAssigns(){
   // Remove rows for deselected analysts
   multiAssigns=multiAssigns.filter(function(r){return selectedAnalysts.indexOf(r.analyst)>=0;});
   var editT=editingTask!==null?tasks.find(function(x){return x.id===editingTask;}):null;
-  sec.innerHTML=multiAssigns.map(function(row,idx){
-    var u=getU(row.analyst);
-    var existAss=editT?(editT.assignments||[]).find(function(a){
-      return a.analyst===row.analyst&&(a.date===row.date||!row.date);
-    }):null;
-    var tl=existAss&&existAss.timeLog?existAss.timeLog:[];
-    var realH=tl.reduce(function(s,e){return s+(e.hours||0);},0)||(existAss&&existAss.realHours||0);
-    var isFirst=!multiAssigns.slice(0,idx).some(function(r){return r.analyst===row.analyst;});
-    var rowsForAnalyst=multiAssigns.filter(function(r){return r.analyst===row.analyst;}).length;
-    var tlRows=tl.map(function(e){
-      return'<span style="font-size:10px;color:var(--text3);font-family:var(--mono)">'+e.date+': '+e.start+'\u2013'+e.end+(e.hours?' ('+e.hours.toFixed(1)+'h)':'')+'</span>';
-    }).join(' \u00b7 ');
-    return'<div style="background:var(--bg);border-radius:var(--radius);padding:8px 10px;margin-bottom:5px;border-left:3px solid var(--border2)">'
-      +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
-      +(isFirst
-        ?'<div class="av '+u.av+'" style="flex-shrink:0">'+escH(u.avInit)+'</div>'
-          +'<span style="font-weight:600;flex:1;min-width:80px">'+escH(u.name)+'</span>'
-        :'<div style="width:32px;flex-shrink:0"></div>'
-          +'<span style="flex:1;min-width:80px;font-size:11px;color:var(--text3)">\u21b3 d\u00eda adicional</span>'
-      )
-      +'<label style="font-size:11px;color:var(--text2);white-space:nowrap">Fecha:</label>'
-      +'<input type="date" value="'+escH(row.date||'')+'"'
-      +' style="font-size:12px;padding:4px 7px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);width:130px"'
-      +' onchange="updateMultiAssign(\''+row._key+'\',\'date\',this.value)">'
-      +(isSupRole()&&editingTask!==null
-        ?'<label style="font-size:11px;color:var(--text2);white-space:nowrap;flex-shrink:0">Horas:</label>'
-         +'<input type="number" min="0.25" max="99" step="0.25" placeholder="\u2014" value="'+(row.realHours>0?row.realHours:'')+'"'
-         +' title="Horas reales del an\u00e1lisis (editable por supervisor)"'
-         +' style="font-size:12px;padding:3px 6px;border:1px solid '+(row.realHours>0?'var(--green)':'var(--border2)')+';border-radius:var(--radius);background:var(--surface);color:var(--text);width:68px;flex-shrink:0"'
-         +' onchange="updateMultiAssign(\''+row._key+'\',\'realHours\',parseFloat(this.value)||0);this.style.borderColor=parseFloat(this.value)>0?\'var(--green)\':\' var(--border2)\'">'
-        :(realH>0?'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:var(--green)">Real: '+realH.toFixed(1)+'h</span>':'')
-      )
-      +'<button onclick="addMultiAssignRow(\''+row.analyst+'\')" title="Agregar otro d\u00eda para este analista"'
-      +' style="padding:2px 8px;border:1px dashed var(--blue);border-radius:var(--radius);background:transparent;color:var(--blue);cursor:pointer;font-size:12px;white-space:nowrap">+\u00a0d\u00eda</button>'
-      +(rowsForAnalyst>1
-        ?'<button onclick="removeMultiAssignRow(\''+row._key+'\')"'
-          +' style="padding:2px 6px;border:1px solid var(--border2);border-radius:var(--radius);background:transparent;color:var(--red-text);cursor:pointer;font-size:11px">\u2715</button>'
-        :'')
-      +'</div>'
-      +(tlRows?'<div style="margin-top:5px;display:flex;flex-wrap:wrap;gap:4px">'+tlRows+'</div>':'')
+  // Agrupar por analista (preservando el orden de primera aparici\u00f3n)
+  var _anaOrder=[];
+  var _byAna={};
+  multiAssigns.forEach(function(row){
+    if(!_byAna[row.analyst]){_byAna[row.analyst]=[];_anaOrder.push(row.analyst);}
+    _byAna[row.analyst].push(row);
+  });
+  var html='';
+  _anaOrder.forEach(function(analystId){
+    var rows=_byAna[analystId];
+    var u=getU(analystId);
+    // Bloque contenedor por analista
+    html+='<div style="background:var(--bg);border-radius:var(--radius);margin-bottom:8px;border:1px solid var(--border2);overflow:hidden">';
+    // Cabecera del analista
+    html+='<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--surface);border-bottom:1px solid var(--border2)">'
+      +'<div class="av '+u.av+'" style="flex-shrink:0;width:28px;height:28px;font-size:11px">'+escH(u.avInit)+'</div>'
+      +'<span style="font-weight:600;flex:1">'+escH(u.name)+'</span>'
+      +'<button onclick="addMultiAssignRow(\''+analystId+'\')" title="Agregar otro d\u00eda para este analista"'
+      +' style="padding:2px 9px;border:1px dashed var(--blue);border-radius:var(--radius);background:transparent;color:var(--blue);cursor:pointer;font-size:12px;white-space:nowrap">+\u00a0d\u00eda</button>'
       +'</div>';
-  }).join('');
+    // Filas de fecha por cada d\u00eda asignado a este analista
+    rows.forEach(function(row,localIdx){
+      var existAss=editT?(editT.assignments||[]).find(function(a){
+        return a.analyst===row.analyst&&(a.date===row.date||!row.date);
+      }):null;
+      var tl=existAss&&existAss.timeLog?existAss.timeLog:[];
+      var realH=tl.reduce(function(s,e){return s+(e.hours||0);},0)||(existAss&&existAss.realHours||0);
+      var tlRows=tl.map(function(e){
+        return'<span style="font-size:10px;color:var(--text3);font-family:var(--mono)">'+e.date+': '+e.start+'\u2013'+e.end+(e.hours?' ('+e.hours.toFixed(1)+'h)':'')+'</span>';
+      }).join(' \u00b7 ');
+      html+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 10px'+(localIdx>0?';border-top:1px dashed var(--border2)':'')+'">'
+        +'<span style="font-size:11px;color:var(--text3);min-width:60px">'+(localIdx===0?'Fecha:':'\u21b3 D\u00eda '+(localIdx+1)+':')+' </span>'
+        +'<input type="date" value="'+escH(row.date||'')+'"'
+        +' style="font-size:12px;padding:4px 7px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);width:130px"'
+        +' onchange="updateMultiAssign(\''+row._key+'\',\'date\',this.value)">'
+        +(isSupRole()&&editingTask!==null
+          ?'<label style="font-size:11px;color:var(--text2);white-space:nowrap;flex-shrink:0">Horas:</label>'
+           +'<input type="number" min="0.25" max="99" step="0.25" placeholder="\u2014" value="'+(row.realHours>0?row.realHours:'')+'"'
+           +' title="Horas reales del an\u00e1lisis (editable por supervisor)"'
+           +' style="font-size:12px;padding:3px 6px;border:1px solid '+(row.realHours>0?'var(--green)':'var(--border2)')+';border-radius:var(--radius);background:var(--surface);color:var(--text);width:68px;flex-shrink:0"'
+           +' onchange="updateMultiAssign(\''+row._key+'\',\'realHours\',parseFloat(this.value)||0);this.style.borderColor=parseFloat(this.value)>0?\'var(--green)\':\' var(--border2)\'">'
+          :(realH>0?'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:var(--green)">Real: '+realH.toFixed(1)+'h</span>':'')
+        )
+        +(rows.length>1
+          ?'<button onclick="removeMultiAssignRow(\''+row._key+'\')"'
+            +' style="padding:2px 6px;border:1px solid var(--border2);border-radius:var(--radius);background:transparent;color:var(--red-text);cursor:pointer;font-size:11px;margin-left:auto">\u2715</button>'
+          :'')
+        +'</div>'
+        +(tlRows?'<div style="padding:2px 10px 6px;display:flex;flex-wrap:wrap;gap:4px">'+tlRows+'</div>':'');
+    });
+    html+='</div>';
+  });
+  sec.innerHTML=html;
 }
 function updateMultiAssign(key,field,val){
   var r=multiAssigns.find(function(x){return x._key===key;});
@@ -9881,6 +9970,10 @@ function saveTask(){
     }
     // Supervisor: si eligió un estado explícitamente distinto al actual, respetarlo
     if(isSupRole()&&status&&status!==(_et2?_et2.status:''))_autoStatus=status;
+    // Regla: sin analistas activos → estado no puede ser scheduled/progress/pending-confirm
+    if(isSupRole()&&assignments.length===0&&['scheduled','progress','pending-confirm','observed'].includes(_autoStatus)){
+      _autoStatus='pending';
+    }
   }
   // Warn if any assignment date is >= due (no time left for review + approval)
   if(assignments.length>0&&due){
@@ -9935,14 +10028,9 @@ function saveTask(){
         }
         var _newA=Object.assign({},newA);delete _newA._formRealHours;return _newA;
       });
-      // Reasignaciones eliminadas: preservar como historial si tienen datos
-      const removedWithData=(t.assignments||[]).filter(function(oldA){
-        const stillPresent=assignments.some(function(newA){
-          return newA.analyst===oldA.analyst&&newA.date===oldA.date;
-        });
-        return !stillPresent&&(oldA.realHours||oldA.timeLog&&oldA.timeLog.length);
-      }).map(function(a){return Object.assign({},a,{_removed:true,_removedTs:Date.now()});});
-      const finalAssignments=mergedAssignments.concat(removedWithData);
+      // Reasignaciones eliminadas por el supervisor: los datos se borran completamente.
+      // (Permite corregir errores donde el analista marcó horas que no realizó en la práctica.)
+      const finalAssignments=mergedAssignments;
       // Aplicar solo campos de planificación
       t.producto=prod;t.lote=lote;t.created=created;t.due=due;
       t.priority=priority;t.notes=notes;
