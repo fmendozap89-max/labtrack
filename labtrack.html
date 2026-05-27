@@ -679,82 +679,55 @@ async function _executeSave() {
   _pendingSaves = {};
   gistStatus = 'syncing'; renderSpBadge();
 
-  // Intentar hasta 2 veces (la segunda cubre race conditions detectados en la 1ª)
-  for (let _attempt = 0; _attempt < 2; _attempt++) {
+  try {
+    // ── Fetch-merge-save: evita pérdida de datos con edición simultánea ──
+    let contentToSave = getSnapshot();
     try {
-      // ── Fetch-merge-save: evita pérdida de datos con edición simultánea ──
-      let contentToSave = getSnapshot();
-      let fetchedRemoteTs = _lastRemoteTs;
-      try {
-        const remoteGist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
-        const remoteContent = remoteGist.files[GIST_FILE_STATE]?.content;
-        if (remoteContent) {
-          let remoteState;
-          try { remoteState = JSON.parse(remoteContent); } catch(e) {}
-          if (remoteState) {
-            fetchedRemoteTs = remoteState.savedAt || 0;
-            if (fetchedRemoteTs > _lastRemoteTs) {
-              // Otro dispositivo guardó mientras trabajábamos — mergear antes de escribir
-              const localSnap = JSON.parse(contentToSave);
-              const merged = mergeSnapshot(localSnap, remoteState);
-              merged.savedAt = Date.now();
-              const _prevUser = currentUser;
-              var _syncFormState=(showModal&&editingTask!=null)?_captureModalFormState():null;
-              var _syncModalTaskId=editingTask;
-              applySnapshot(JSON.stringify(merged));
-              currentUser = _prevUser;
-              contentToSave = JSON.stringify(merged);
-              render();
-              if(_syncFormState&&showModal&&editingTask===_syncModalTaskId){
-                setTimeout(function(){_restoreModalFormState(_syncFormState);},80);
-              }
-            }
+      const remoteGist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+      const remoteContent = remoteGist.files[GIST_FILE_STATE]?.content;
+      if (remoteContent) {
+        let remoteState;
+        try { remoteState = JSON.parse(remoteContent); } catch(e) {}
+        if (remoteState && (remoteState.savedAt||0) > _lastRemoteTs) {
+          // Otro dispositivo guardó mientras trabajábamos — mergear antes de escribir
+          const localSnap = JSON.parse(contentToSave);
+          const merged = mergeSnapshot(localSnap, remoteState);
+          merged.savedAt = Date.now();
+          const _prevUser = currentUser;
+          var _syncFormState=(showModal&&editingTask!=null)?_captureModalFormState():null;
+          var _syncModalTaskId=editingTask;
+          applySnapshot(JSON.stringify(merged));
+          currentUser = _prevUser;
+          contentToSave = JSON.stringify(merged);
+          render();
+          if(_syncFormState&&showModal&&editingTask===_syncModalTaskId){
+            setTimeout(function(){_restoreModalFormState(_syncFormState);},80);
           }
         }
-      } catch(fetchErr) {
-        // Si el GET falla (sin conexión, etc.), guardar igual con estado local
-        console.warn('fetch-before-save falló, guardando estado local:', fetchErr);
       }
-
-      const _ourTs = JSON.parse(contentToSave).savedAt || Date.now();
-      await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
-        files: { [GIST_FILE_STATE]: { content: contentToSave } }
-      });
-
-      // ── Verificar que el PATCH tomó efecto (detecta race condition) ──
-      let _verifiedTs = _ourTs;
-      try {
-        await new Promise(function(res){setTimeout(res,400);});
-        const verify = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
-        _verifiedTs = JSON.parse(verify.files[GIST_FILE_STATE]?.content||'{}').savedAt || 0;
-        if (_verifiedTs !== _ourTs && _attempt === 0) {
-          // Otro dispositivo sobreescribió nuestro save — reintentar con estado actualizado
-          _lastRemoteTs = _verifiedTs;
-          console.warn('Race condition detectada, reintentando save…');
-          continue; // siguiente iteración del loop
-        }
-      } catch(ve) { /* verificación falló — asumir OK */ }
-
-      _lastRemoteTs = Math.max(_ourTs, _verifiedTs);
-      gistStatus = 'ok'; gistLastSync = new Date();
-      _showSaveFeedback(true);
-      break; // salir del loop — save exitoso
-
-    } catch(e) {
-      console.error('save intento ' + (_attempt+1) + ':', e);
-      if (_attempt === 1 || true) { // en cualquier error final
-        gistStatus = 'error';
-        _showSaveFeedback(false, e.message);
-        // Retry automático en 10 s para recuperarse de errores transitorios
-        _saveRetryTimer = setTimeout(function(){
-          if(GIST_CONFIG.configured && gistStatus==='error'){
-            console.log('Reintento automático de save…');
-            _executeSave();
-          }
-        }, 10000);
-        break;
-      }
+    } catch(fetchErr) {
+      // Si el GET falla (sin conexión, etc.), guardar igual con estado local
+      console.warn('fetch-before-save falló, guardando estado local:', fetchErr);
     }
+
+    await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
+      files: { [GIST_FILE_STATE]: { content: contentToSave } }
+    });
+    _lastRemoteTs = JSON.parse(contentToSave).savedAt || Date.now();
+    gistStatus = 'ok'; gistLastSync = new Date();
+    _showSaveFeedback(true);
+
+  } catch(e) {
+    console.error('save:', e);
+    gistStatus = 'error';
+    _showSaveFeedback(false, e.message);
+    // Retry automático en 10 s para recuperarse de errores transitorios
+    _saveRetryTimer = setTimeout(function(){
+      if(GIST_CONFIG.configured && gistStatus==='error'){
+        console.log('Reintento automático de save…');
+        _executeSave();
+      }
+    }, 10000);
   }
   renderSpBadge();
 }
