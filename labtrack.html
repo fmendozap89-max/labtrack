@@ -511,10 +511,11 @@ let _syncTimer    = null;
 let _saveDebounce = null;
 let _auditDebounce = null;
 let _pendingSaves = {};
-const SYNC_INTERVAL  = 20000;   // pull cada 20 s (antes 60 s)
-const SAVE_DEBOUNCE  = 800;     // debounce guardar (antes 1500 ms)
+const SYNC_INTERVAL  = 40000;   // pull cada 40 s
+const SAVE_DEBOUNCE  = 800;
 const AUDIT_DEBOUNCE = 3000;
-let _saveRetryTimer  = null;    // retry automático si falla el save
+let _saveRetryTimer  = null;
+let _syncDeferred    = false;   // true cuando el sync se pospuso por modal abierto
 
 // ══════════════════════════════════════════════════════════════
 // HTTP helpers
@@ -779,6 +780,12 @@ function _showSaveFeedback(ok, errMsg) {
 
 async function gistSyncFromRemote() {
   if (!GIST_CONFIG.configured) return;
+  // Si hay un modal abierto, diferir el sync para no interrumpir una edición en curso
+  const _anyModal=showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
+    ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
+    ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
+  if(_anyModal){_syncDeferred=true;gistStatus='ok';renderSpBadge();return;}
+  _syncDeferred=false;
   gistStatus = 'syncing'; renderSpBadge();
   try {
     const gist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
@@ -4085,6 +4092,16 @@ function recalcLateStatus(){
 
 function render(){
   if(_renderPending)return;
+  // Si había un sync diferido y ya no hay modales abiertos, ejecutarlo ahora
+  if(_syncDeferred){
+    const _anyModal=showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
+      ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
+      ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
+    if(!_anyModal){
+      _syncDeferred=false;
+      setTimeout(function(){gistSyncFromRemote().catch(function(e){console.error('deferred sync:',e);});},200);
+    }
+  }
   _renderPending=true;
   requestAnimationFrame(()=>{
     try{
