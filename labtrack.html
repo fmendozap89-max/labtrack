@@ -465,28 +465,21 @@ function applySnapshot(json){
       if(!t.samplerAssignments)t.samplerAssignments=[];
     });
     rebuildDerived();
-    // ── Descubrimiento automático de laboratorios desde el Gist ──
-    // El Gist contiene un registro de todos los labs (sin tokens).
-    // Si este dispositivo no conoce alguno, lo agrega con el token actual
-    // (mismo token = misma cuenta de GitHub → funciona para la mayoría de casos).
-    if(d.labRegistry&&Array.isArray(d.labRegistry)&&d.labRegistry.length>0){
+    // ── Descubrimiento de laboratorios desde el Gist ──
+    // Solo actualiza nombres de labs YA conocidos localmente.
+    // No agrega labs nuevos automáticamente (requiere acción del supervisor)
+    // para evitar mezcla de datos entre laboratorios.
+    if(d.labRegistry&&Array.isArray(d.labRegistry)&&d.labRegistry.length>0&&labProfiles.length>0){
       var _changed=false;
-      var _currentToken=GIST_CONFIG.token||'';
       d.labRegistry.forEach(function(entry){
         if(!entry.gistId||!entry.id)return;
-        // Buscar por id primero, luego por gistId
+        // Solo actualizar labs que ya existen en este dispositivo (por id o gistId)
         var existing=labProfiles.find(function(l){return l.id===entry.id;})
                    ||labProfiles.find(function(l){return l.gistId===entry.gistId;});
-        if(!existing){
-          // Lab desconocido en este dispositivo — agregarlo con token actual
-          labProfiles.push({id:entry.id,name:entry.name||'Laboratorio',token:_currentToken,gistId:entry.gistId});
-          _changed=true;
-        } else {
-          // Actualizar nombre si cambió (preservar token local)
+        if(existing){
           if(entry.name&&entry.name!==existing.name){existing.name=entry.name;_changed=true;}
-          // Actualizar id canónico si se encontró por gistId
-          if(existing.id!==entry.id){existing.id=entry.id;_changed=true;}
         }
+        // No se agregan labs nuevos automáticamente — el supervisor los configura en Administración
       });
       if(_changed)_saveLabProfiles();
     }
@@ -1279,6 +1272,70 @@ function importDataFile() {
     reader.readAsText(file);
   };
   document.body.appendChild(inp); inp.click(); inp.remove();
+}
+
+// Recuperación desde historial de revisiones del Gist
+async function cloudRestore() {
+  if(!isSupRole()){alert('Solo el Supervisor puede acceder a la recuperación.');return;}
+  if(!GIST_CONFIG.configured||!GIST_CONFIG.gistId){alert('No hay Gist configurado.');return;}
+  var overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.6);z-index:9998;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;overflow-y:auto';
+  overlay.innerHTML='<div style="background:var(--surface);border-radius:var(--radius-lg);padding:24px;max-width:560px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.35)">'
+    +'<h3 style="margin:0 0 6px;font-size:15px">⏮ Recuperar versión anterior</h3>'
+    +'<div style="font-size:12px;color:var(--text2);margin-bottom:14px">Gist: '+escH(GIST_CONFIG.gistId.slice(0,16))+'…</div>'
+    +'<div id="restore-list" style="font-size:13px;color:var(--text2)">Cargando historial…</div>'
+    +'<div style="margin-top:16px;text-align:right"><button class="btn" onclick="this.closest(\'div[style*=fixed]\').remove()">Cerrar</button></div>'
+    +'</div>';
+  document.body.appendChild(overlay);
+  try{
+    const commits=await _gistFetch('GET','/'+GIST_CONFIG.gistId+'/commits');
+    if(!commits||!commits.length){document.getElementById('restore-list').textContent='No hay versiones anteriores disponibles.';return;}
+    var rows='<div style="display:flex;flex-direction:column;gap:6px;max-height:55vh;overflow-y:auto">';
+    for(var i=0;i<Math.min(30,commits.length);i++){
+      var c=commits[i];
+      var dt=new Date(c.committed_at).toLocaleString('es',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+      var sha=c.version;
+      var label=i===0?'<span style="font-size:10px;font-weight:700;padding:1px 6px;background:var(--blue);color:#fff;border-radius:8px;margin-left:6px">actual</span>':'';
+      rows+='<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg)">'
+        +'<div><span style="font-weight:500">'+dt+'</span>'+label+'<br><span style="font-size:10px;color:var(--text3);font-family:var(--mono)">'+sha.slice(0,12)+'</span></div>'
+        +(i>0?'<button class="btn sm" onclick="_previewGistVersion(\''+sha+'\',\''+dt+'\',this.closest(\'div[style*=fixed]\'))">Vista previa</button>':'<span style="font-size:11px;color:var(--text3)">versión actual</span>')
+        +'</div>';
+    }
+    rows+='</div>';
+    document.getElementById('restore-list').innerHTML=rows;
+  }catch(e){
+    var el=document.getElementById('restore-list');
+    if(el)el.innerHTML='<div style="color:var(--red)">Error al cargar historial: '+escH(e.message)+'</div>';
+  }
+}
+
+async function _previewGistVersion(sha, label, parentOverlay){
+  var btn=event&&event.target;
+  if(btn){btn.disabled=true;btn.textContent='Cargando…';}
+  try{
+    const ver=await _gistFetch('GET','/'+GIST_CONFIG.gistId+'/'+sha);
+    const content=ver&&ver.files&&ver.files[GIST_FILE_STATE]&&ver.files[GIST_FILE_STATE].content;
+    if(!content){alert('Esta versión no tiene datos de estado.');if(btn){btn.disabled=false;btn.textContent='Vista previa';}return;}
+    var snap;try{snap=JSON.parse(content);}catch(e){alert('Versión con datos inválidos.');if(btn){btn.disabled=false;btn.textContent='Vista previa';}return;}
+    var taskCount=(snap.tasks||[]).length;
+    var userCount=(snap.users||[]).length;
+    var savedAt=snap.savedAt?new Date(snap.savedAt).toLocaleString('es'):'desconocido';
+    var info='Versión: '+label+'\nGuardado: '+savedAt+'\nAnálisis: '+taskCount+'\nUsuarios: '+userCount+'\n\n¿Restaurar esta versión?\nEl estado actual se reemplazará. Esta acción se puede deshacer volviendo a recuperar la versión anterior.';
+    if(confirm(info)){
+      if(parentOverlay)parentOverlay.remove();
+      var _prevUser=currentUser;
+      if(applySnapshot(content)){
+        currentUser=_prevUser;
+        render();
+        if(confirm('Datos restaurados en memoria ('+taskCount+' análisis, '+userCount+' usuarios).\n\n¿Guardar como estado actual en GitHub Gist?')){
+          await saveNow();
+          alert('Versión restaurada y guardada en GitHub.');
+        }else{
+          alert('Versión cargada en memoria. Los cambios no se guardaron en GitHub aún.\nUsá "Guardar y conectar" o cualquier acción para sincronizar.');
+        }
+      }else{alert('No se pudo aplicar la versión seleccionada.');}
+    }else{if(btn){btn.disabled=false;btn.textContent='Vista previa';}}
+  }catch(e){alert('Error al cargar versión: '+e.message);if(btn){btn.disabled=false;btn.textContent='Vista previa';}}
 }
 
 // Diagnóstico
@@ -7211,6 +7268,7 @@ function renderAdmin(){
     +(isSupRole()?'<button class="btn sm" onclick="importDataFile()">↑ Importar JSON</button>':'')
     +'<button class="btn sm" onclick="gistSyncFromRemote()">↻ Sincronizar</button>'
     +'<button class="btn sm" onclick="cloudDiag()">🔍 Diagnóstico</button>'
+    +(isSupRole()?'<button class="btn sm" onclick="cloudRestore()" style="border-color:var(--amber);color:var(--amber-text)">⏮ Recuperar versión</button>':'')
     +'</div>'
     +'</div>'
 
