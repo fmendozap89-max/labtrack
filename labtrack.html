@@ -516,6 +516,8 @@ const SAVE_DEBOUNCE  = 800;
 const AUDIT_DEBOUNCE = 3000;
 let _saveRetryTimer  = null;
 let _syncDeferred    = false;   // true cuando el sync se pospuso por modal abierto
+let _lastSuccessfulSync = Date.now(); // ts del último sync exitoso (save o pull)
+const STALE_SYNC_MS  = 5 * 60 * 1000; // 5 minutos sin sync → banner de advertencia
 
 // ══════════════════════════════════════════════════════════════
 // HTTP helpers
@@ -727,7 +729,18 @@ async function _executeSave() {
         }
       }
     } catch(fetchErr) {
-      // Si el GET falla (sin conexión, etc.), guardar igual con estado local
+      // Si el GET falla, evaluar si la sesión es obsoleta antes de proceder
+      const _staleSecs = Math.round((Date.now() - _lastSuccessfulSync) / 1000);
+      if (_staleSecs >= (STALE_SYNC_MS / 1000)) {
+        // Sesión obsoleta: guardar sin haber podido recuperar datos remotos
+        // significaría sobreescribir cambios generados durante la inactividad.
+        // Lanzar error para que el retry loop reintente el fetch-merge-save completo.
+        throw new Error(
+          'Sin conexión — no se pudo recuperar datos remotos antes de guardar ' +
+          '(inactivo ' + Math.round(_staleSecs/60) + ' min). Reintentando…'
+        );
+      }
+      // Sesión reciente: el riesgo de pérdida de datos es mínimo → guardar igual
       console.warn('fetch-before-save falló, guardando estado local:', fetchErr);
     }
 
@@ -736,6 +749,8 @@ async function _executeSave() {
     });
     _lastRemoteTs = JSON.parse(contentToSave).savedAt || Date.now();
     gistStatus = 'ok'; gistLastSync = new Date();
+    _lastSuccessfulSync = Date.now();
+    _hideStaleBanner();
     _showSaveFeedback(true);
 
   } catch(e) {
@@ -775,6 +790,57 @@ function _showSaveFeedback(ok, errMsg) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// BANNER — advertencia de sincronización obsoleta
+// ══════════════════════════════════════════════════════════════
+
+function _showStaleBanner() {
+  if (!GIST_CONFIG.configured) return;
+  var el = document.getElementById('sp-stale-banner');
+  if (el) return; // ya visible
+  el = document.createElement('div');
+  el.id = 'sp-stale-banner';
+  el.style.cssText = [
+    'position:fixed',
+    'top:0',
+    'left:0',
+    'right:0',
+    'z-index:9999',
+    'background:#b45309',
+    'color:#fff',
+    'font-size:13px',
+    'font-weight:600',
+    'padding:10px 20px',
+    'text-align:center',
+    'letter-spacing:.01em',
+    'box-shadow:0 2px 8px rgba(0,0,0,.3)',
+    'pointer-events:none'
+  ].join(';');
+  el.textContent = '⚠  Sin sincronización hace más de 5 minutos — los datos pueden estar desactualizados. La próxima sincronización recuperará los cambios recientes.';
+  document.body.appendChild(el);
+}
+
+function _hideStaleBanner() {
+  var el = document.getElementById('sp-stale-banner');
+  if (el) el.parentNode.removeChild(el);
+}
+
+let _staleCheckTimer = null;
+function _startStaleWatchdog() {
+  if (_staleCheckTimer) clearInterval(_staleCheckTimer);
+  _staleCheckTimer = setInterval(function() {
+    if (!GIST_CONFIG.configured) return;
+    var now = Date.now();
+    var syncStale  = (now - _lastSuccessfulSync) >= STALE_SYNC_MS;
+    var idleStale  = (now - _lastActivityTs)    >= STALE_SYNC_MS;
+    if (syncStale || idleStale) {
+      _showStaleBanner();
+    } else {
+      _hideStaleBanner();
+    }
+  }, 30000); // chequeo cada 30 s
+}
+
+// ══════════════════════════════════════════════════════════════
 // SYNC — pull de cambios desde Gist
 // ══════════════════════════════════════════════════════════════
 
@@ -800,7 +866,19 @@ async function gistSyncFromRemote() {
     if (remoteTs > _lastRemoteTs) {
       _lastRemoteTs = remoteTs;
       const prevUser = currentUser;
-      applySnapshot(stateContent);
+      // Si la sesión era obsoleta, puede haber cambios locales no guardados que
+      // aún no llegaron al Gist — mergear en lugar de reemplazar para no perderlos.
+      const _wasStale = (Date.now() - _lastSuccessfulSync) >= STALE_SYNC_MS;
+      if (_wasStale) {
+        const localSnap = JSON.parse(getSnapshot());
+        const merged = mergeSnapshot(localSnap, remoteState);
+        merged.savedAt = remoteTs; // mantener ts remoto como referencia
+        applySnapshot(JSON.stringify(merged));
+        // Programar un save para subir cualquier cambio local que ganó el merge
+        setTimeout(function(){ saveNow().catch(function(e){console.error('stale-merge save:',e);}); }, 500);
+      } else {
+        applySnapshot(stateContent);
+      }
       currentUser = prevUser;
       stateChanged = true;
     }
@@ -820,6 +898,8 @@ async function gistSyncFromRemote() {
     }
 
     gistStatus = 'ok'; gistLastSync = new Date();
+    _lastSuccessfulSync = Date.now();
+    _hideStaleBanner();
     if(!currentUser) _restoreSession();
     render(); // siempre refrescar — puede haber audit trail nuevo
   } catch(e) { console.error('gistSync:', e); gistStatus = 'error'; }
@@ -1207,7 +1287,9 @@ async function gistBoot() {
       } catch(e) {}
     }
     _hideSpinner();
-    gistStatus = 'ok'; gistLastSync = new Date(); renderSpBadge();
+    gistStatus = 'ok'; gistLastSync = new Date();
+    _lastSuccessfulSync = Date.now();
+    renderSpBadge();
     if (_syncTimer) clearInterval(_syncTimer);
     _syncTimer = setInterval(gistSyncFromRemote, SYNC_INTERVAL);
     _restoreSession(); // restore login after data loaded
@@ -10904,6 +10986,7 @@ document.addEventListener('wheel', function(e){
 }, {passive:false});
 
 loadSpConfig();
+_startStaleWatchdog(); // Iniciar vigilancia de sync obsoleto
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', gistBoot, {once:true});
 } else {
