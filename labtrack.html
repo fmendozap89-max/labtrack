@@ -402,6 +402,8 @@ function rebuildDerived(){
 
 // SK object removed — persistence via GitHub Gist
 function getSnapshot(){
+  // Registro de laboratorios (sin tokens — solo nombre y gistId para descubrimiento entre dispositivos)
+  var _labRegistry=labProfiles.filter(function(l){return l.gistId;}).map(function(l){return{id:l.id,name:l.name,gistId:l.gistId};});
   return JSON.stringify({
     savedAt:Date.now(),
     v:6,
@@ -409,7 +411,8 @@ function getSnapshot(){
     freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,
     users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{})})),
     passwords,replanNotifs,absences,workdayConfig,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
-    auditTrail
+    auditTrail,
+    labRegistry:_labRegistry
   });
 }
 function applySnapshot(json){
@@ -462,6 +465,31 @@ function applySnapshot(json){
       if(!t.samplerAssignments)t.samplerAssignments=[];
     });
     rebuildDerived();
+    // ── Descubrimiento automático de laboratorios desde el Gist ──
+    // El Gist contiene un registro de todos los labs (sin tokens).
+    // Si este dispositivo no conoce alguno, lo agrega con el token actual
+    // (mismo token = misma cuenta de GitHub → funciona para la mayoría de casos).
+    if(d.labRegistry&&Array.isArray(d.labRegistry)&&d.labRegistry.length>0){
+      var _changed=false;
+      var _currentToken=GIST_CONFIG.token||'';
+      d.labRegistry.forEach(function(entry){
+        if(!entry.gistId||!entry.id)return;
+        // Buscar por id primero, luego por gistId
+        var existing=labProfiles.find(function(l){return l.id===entry.id;})
+                   ||labProfiles.find(function(l){return l.gistId===entry.gistId;});
+        if(!existing){
+          // Lab desconocido en este dispositivo — agregarlo con token actual
+          labProfiles.push({id:entry.id,name:entry.name||'Laboratorio',token:_currentToken,gistId:entry.gistId});
+          _changed=true;
+        } else {
+          // Actualizar nombre si cambió (preservar token local)
+          if(entry.name&&entry.name!==existing.name){existing.name=entry.name;_changed=true;}
+          // Actualizar id canónico si se encontró por gistId
+          if(existing.id!==entry.id){existing.id=entry.id;_changed=true;}
+        }
+      });
+      if(_changed)_saveLabProfiles();
+    }
     return true;
   }catch(e){return false;}
 }
@@ -1021,6 +1049,8 @@ function adminSaveLabEdit(labId){
   var editEl=document.getElementById('labedit-'+labId);
   if(editEl)editEl.style.display='none';
   render();
+  // Propagar el registro actualizado al Gist activo para que otros dispositivos lo descubran
+  if(GIST_CONFIG.configured)saveNow().catch(function(e){console.warn('saveLabRegistry:',e);});
 }
 
 function adminSwitchLab(labId){
@@ -1048,6 +1078,8 @@ function deleteLabProfile(labId){
   if(activeLabId===labId){activeLabId=labProfiles[0].id;localStorage.setItem('lt9-active-lab',activeLabId);}
   _saveLabProfiles();
   render();
+  // Propagar registro actualizado (sin el lab eliminado) al Gist activo
+  if(GIST_CONFIG.configured)saveNow().catch(function(e){console.warn('saveLabRegistry:',e);});
 }
 
 // ══════════════════════════════════════════════════════════════
