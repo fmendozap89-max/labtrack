@@ -310,7 +310,10 @@ let mgmtListPeriod='week';
 let showImportModal=false,showChangePwd=false;
 let tasksView='lote';
 let filterAnalyst='',filterStatus='',filterSearch='';
-let loginStep=1,selectedLoginUser=null,loginError='',loginShowSync=false;
+let loginStep=1,selectedLoginUser=null,loginError='',loginShowSync=false,loginShowLabSwitch=false;
+// ── Multi-laboratorio ──
+var labProfiles=[]; // [{id,name,token,gistId}]
+var activeLabId=null;
 let modalTab='paste',pastePreview=[];
 let replanNotifs=[];
 let showReplanModal=false,replanTaskId=null;
@@ -487,21 +490,27 @@ let _syncTimer    = null;
 let _saveDebounce = null;
 let _auditDebounce = null;
 let _pendingSaves = {};
-const SYNC_INTERVAL = 60000;
-const SAVE_DEBOUNCE  = 1500;
+const SYNC_INTERVAL  = 20000;   // pull cada 20 s (antes 60 s)
+const SAVE_DEBOUNCE  = 800;     // debounce guardar (antes 1500 ms)
 const AUDIT_DEBOUNCE = 3000;
+let _saveRetryTimer  = null;    // retry automático si falla el save
 
 // ══════════════════════════════════════════════════════════════
 // HTTP helpers
 // ══════════════════════════════════════════════════════════════
 
 async function _gistFetch(method, path, body) {
-  const r = await fetch(GIST_API + (path||''), {
-    method: method||'GET',
+  const _method = method||'GET';
+  // Cache-busting: evitar que el CDN de GitHub devuelva estado desactualizado en GETs
+  let _url = GIST_API + (path||'');
+  if (_method === 'GET') _url += (_url.includes('?') ? '&' : '?') + '_nc=' + Date.now();
+  const r = await fetch(_url, {
+    method: _method,
     headers: {
       'Authorization': 'Bearer ' + GIST_CONFIG.token,
       'Accept': 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
+      'Cache-Control': 'no-cache',
       ...(body ? { 'Content-Type': 'application/json' } : {})
     },
     body: body ? JSON.stringify(body) : undefined
@@ -518,12 +527,14 @@ async function _gistFetch(method, path, body) {
 // ══════════════════════════════════════════════════════════════
 
 async function _gistFindOrCreate() {
-  // Buscar gist existente por descripción
+  // Excluir Gist IDs ya asignados a otros laboratorios para no compartirlos
+  const _usedIds = labProfiles.map(function(l){return l.gistId;}).filter(Boolean);
+  // Buscar gist existente por descripción que no esté ya en uso
   let page = 1;
   while (page <= 5) {
     const list = await _gistFetch('GET', '?per_page=100&page=' + page);
     if (!list.length) break;
-    const found = list.find(g => g.description === 'LabTrack-Data');
+    const found = list.find(function(g){return g.description==='LabTrack-Data'&&!_usedIds.includes(g.id);});
     if (found) { GIST_CONFIG.gistId = found.id; _saveGistConfig(); return found.id; }
     if (list.length < 100) break;
     page++;
@@ -653,7 +664,7 @@ function saveLS(hint) {
     const _snap = JSON.parse(getSnapshot());
     _snap.auditTrail = [];
     _snap._gistId = GIST_CONFIG.gistId || '';
-    localStorage.setItem('lt9-state', JSON.stringify(_snap));
+    localStorage.setItem(_labStateKey(), JSON.stringify(_snap));
   } catch(e) {}
   if (hint) _pendingSaves[hint] = true;
   else ['workdayConfig','analystSchedules','mgmtCategories','users','passwords','absenceTypesDef','counters'].forEach(k=>{ _pendingSaves[k]=true; });
@@ -664,48 +675,109 @@ function saveLS(hint) {
 async function _executeSave() {
   _saveDebounce = null;
   if (!GIST_CONFIG.configured) return;
+  if (_saveRetryTimer) { clearTimeout(_saveRetryTimer); _saveRetryTimer = null; }
   _pendingSaves = {};
   gistStatus = 'syncing'; renderSpBadge();
-  try {
-    // ── Fetch-merge-save: evita pérdida de datos con edición simultánea ──
-    let contentToSave = getSnapshot();
+
+  // Intentar hasta 2 veces (la segunda cubre race conditions detectados en la 1ª)
+  for (let _attempt = 0; _attempt < 2; _attempt++) {
     try {
-      const remoteGist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
-      const remoteContent = remoteGist.files[GIST_FILE_STATE]?.content;
-      if (remoteContent) {
-        let remoteState;
-        try { remoteState = JSON.parse(remoteContent); } catch(e) {}
-        if (remoteState && (remoteState.savedAt||0) > _lastRemoteTs) {
-          // Otro usuario guardó mientras trabajábamos — mergear antes de escribir
-          const localSnap = JSON.parse(contentToSave);
-          const merged = mergeSnapshot(localSnap, remoteState);
-          merged.savedAt = Date.now();
-          // Preservar sesión activa — applySnapshot puede resetear currentUser
-          const _prevUser = currentUser;
-          // Proteger formulario abierto durante sync en segundo plano
-          var _syncFormState=(showModal&&editingTask!=null)?_captureModalFormState():null;
-          var _syncModalTaskId=editingTask;
-          applySnapshot(JSON.stringify(merged));
-          currentUser = _prevUser;
-          contentToSave = JSON.stringify(merged);
-          render();
-          // Restaurar estado del formulario si el mismo modal sigue abierto
-          if(_syncFormState&&showModal&&editingTask===_syncModalTaskId){
-            setTimeout(function(){_restoreModalFormState(_syncFormState);},80);
+      // ── Fetch-merge-save: evita pérdida de datos con edición simultánea ──
+      let contentToSave = getSnapshot();
+      let fetchedRemoteTs = _lastRemoteTs;
+      try {
+        const remoteGist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+        const remoteContent = remoteGist.files[GIST_FILE_STATE]?.content;
+        if (remoteContent) {
+          let remoteState;
+          try { remoteState = JSON.parse(remoteContent); } catch(e) {}
+          if (remoteState) {
+            fetchedRemoteTs = remoteState.savedAt || 0;
+            if (fetchedRemoteTs > _lastRemoteTs) {
+              // Otro dispositivo guardó mientras trabajábamos — mergear antes de escribir
+              const localSnap = JSON.parse(contentToSave);
+              const merged = mergeSnapshot(localSnap, remoteState);
+              merged.savedAt = Date.now();
+              const _prevUser = currentUser;
+              var _syncFormState=(showModal&&editingTask!=null)?_captureModalFormState():null;
+              var _syncModalTaskId=editingTask;
+              applySnapshot(JSON.stringify(merged));
+              currentUser = _prevUser;
+              contentToSave = JSON.stringify(merged);
+              render();
+              if(_syncFormState&&showModal&&editingTask===_syncModalTaskId){
+                setTimeout(function(){_restoreModalFormState(_syncFormState);},80);
+              }
+            }
           }
         }
+      } catch(fetchErr) {
+        // Si el GET falla (sin conexión, etc.), guardar igual con estado local
+        console.warn('fetch-before-save falló, guardando estado local:', fetchErr);
       }
-    } catch(fetchErr) {
-      // Si el GET falla (sin conexión, etc.), guardar igual con estado local
-      console.warn('fetch-before-save falló, guardando estado local:', fetchErr);
+
+      const _ourTs = JSON.parse(contentToSave).savedAt || Date.now();
+      await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
+        files: { [GIST_FILE_STATE]: { content: contentToSave } }
+      });
+
+      // ── Verificar que el PATCH tomó efecto (detecta race condition) ──
+      let _verifiedTs = _ourTs;
+      try {
+        await new Promise(function(res){setTimeout(res,400);});
+        const verify = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+        _verifiedTs = JSON.parse(verify.files[GIST_FILE_STATE]?.content||'{}').savedAt || 0;
+        if (_verifiedTs !== _ourTs && _attempt === 0) {
+          // Otro dispositivo sobreescribió nuestro save — reintentar con estado actualizado
+          _lastRemoteTs = _verifiedTs;
+          console.warn('Race condition detectada, reintentando save…');
+          continue; // siguiente iteración del loop
+        }
+      } catch(ve) { /* verificación falló — asumir OK */ }
+
+      _lastRemoteTs = Math.max(_ourTs, _verifiedTs);
+      gistStatus = 'ok'; gistLastSync = new Date();
+      _showSaveFeedback(true);
+      break; // salir del loop — save exitoso
+
+    } catch(e) {
+      console.error('save intento ' + (_attempt+1) + ':', e);
+      if (_attempt === 1 || true) { // en cualquier error final
+        gistStatus = 'error';
+        _showSaveFeedback(false, e.message);
+        // Retry automático en 10 s para recuperarse de errores transitorios
+        _saveRetryTimer = setTimeout(function(){
+          if(GIST_CONFIG.configured && gistStatus==='error'){
+            console.log('Reintento automático de save…');
+            _executeSave();
+          }
+        }, 10000);
+        break;
+      }
     }
-    await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
-      files: { [GIST_FILE_STATE]: { content: contentToSave } }
-    });
-    _lastRemoteTs = JSON.parse(contentToSave).savedAt || Date.now();
-    gistStatus = 'ok'; gistLastSync = new Date();
-  } catch(e) { console.error('save:', e); gistStatus = 'error'; }
+  }
   renderSpBadge();
+}
+
+function _showSaveFeedback(ok, errMsg) {
+  var el = document.getElementById('sp-save-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'sp-save-toast';
+    el.style.cssText = 'position:fixed;bottom:18px;right:18px;z-index:8888;font-size:12px;font-weight:600;padding:7px 14px;border-radius:20px;box-shadow:0 2px 12px rgba(0,0,0,.18);transition:opacity .3s;pointer-events:none';
+    document.body.appendChild(el);
+  }
+  if (ok) {
+    el.style.background = 'var(--green)'; el.style.color = '#fff';
+    el.textContent = '✓ Guardado en GitHub';
+  } else {
+    el.style.background = 'var(--red)'; el.style.color = '#fff';
+    el.style.pointerEvents = 'auto'; el.style.cursor = 'pointer';
+    el.textContent = '⚠ Error al guardar — clic para reintentar';
+    el.onclick = function(){ el.style.opacity='0'; _executeSave(); };
+  }
+  el.style.opacity = '1';
+  if (ok) setTimeout(function(){ if(el)el.style.opacity='0'; }, 2500);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -762,14 +834,15 @@ function renderSpBadge() {
   const el = document.getElementById('sp-status-badge');
   if (!el) return;
   const map = {
-    offline:    { c:'var(--text3)',  t: GIST_CONFIG.configured ? '⚠ sin conexión' : '⚙ Configurar sync' },
-    connecting: { c:'var(--blue)',   t:'⟳ Conectando…' },
-    ok:         { c:'var(--green)',  t:'⬡ ' + (gistLastSync ? gistLastSync.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'}) : 'OK') },
-    syncing:    { c:'var(--blue)',   t:'↑ Guardando…' },
-    error:      { c:'var(--red)',    t:'⚠ Error sync' }
+    offline:    { c:'var(--text3)',  t: GIST_CONFIG.configured ? '⚠ sin conexión' : '⚙ Configurar sync', action:'openSpConfig()' },
+    connecting: { c:'var(--blue)',   t:'⟳ Conectando…',  action:'' },
+    ok:         { c:'var(--green)',  t:'⬡ ' + (gistLastSync ? gistLastSync.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'}) : 'OK'), action:'gistSyncFromRemote()' },
+    syncing:    { c:'var(--blue)',   t:'↑ Guardando…',   action:'' },
+    error:      { c:'var(--red)',    t:'⚠ Error — reintentar ↻', action:'_executeSave()' }
   };
   const s = map[gistStatus] || map.offline;
-  el.innerHTML = '<span style="color:'+s.c+';font-size:11px;font-weight:600;cursor:pointer" onclick="openSpConfig()" title="Sincronización GitHub — clic para configurar">'+s.t+'</span>';
+  const _tip = gistStatus==='ok'?'Última sync · clic para actualizar':gistStatus==='error'?'Error al guardar · clic para reintentar':'Sincronización GitHub';
+  el.innerHTML = '<span style="color:'+s.c+';font-size:11px;font-weight:600;'+(s.action?'cursor:pointer':'')+'" '+(s.action?'onclick="'+s.action+'"':'')+' title="'+_tip+'">'+s.t+'</span>';
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -861,14 +934,148 @@ function disconnectGist() {
 }
 
 function _saveGistConfig() {
-  localStorage.setItem('lt9-gist-config', JSON.stringify({ token: GIST_CONFIG.token, gistId: GIST_CONFIG.gistId }));
+  // Actualizar perfil activo de laboratorio
+  var _lab=_getActiveLab();
+  if(_lab){_lab.token=GIST_CONFIG.token;_lab.gistId=GIST_CONFIG.gistId;_saveLabProfiles();}
+  // Compatibilidad con acceso directo
+  localStorage.setItem('lt9-gist-config',JSON.stringify({token:GIST_CONFIG.token,gistId:GIST_CONFIG.gistId}));
+}
+
+// ── Clave de localStorage por laboratorio ──
+function _labStateKey(){return activeLabId?'lt9-state-'+activeLabId:'lt9-state';}
+
+function _getActiveLab(){return labProfiles.find(function(l){return l.id===activeLabId;})||null;}
+
+function _saveLabProfiles(){
+  try{localStorage.setItem('lt9-labs',JSON.stringify(labProfiles));}catch(e){}
+  try{if(activeLabId)localStorage.setItem('lt9-active-lab',activeLabId);}catch(e){}
+}
+
+function _loadLabProfiles(){
+  try{var r=localStorage.getItem('lt9-labs');if(r)labProfiles=JSON.parse(r);}catch(e){labProfiles=[];}
+  try{activeLabId=localStorage.getItem('lt9-active-lab')||null;}catch(e){}
+  // Migración única desde configuración anterior (lt9-gist-config sin lt9-labs)
+  try{
+    var _oldCfg=JSON.parse(localStorage.getItem('lt9-gist-config')||'null');
+    if(_oldCfg&&_oldCfg.token&&labProfiles.length===0){
+      var _labId='lab_'+Date.now().toString(36);
+      labProfiles=[{id:_labId,name:'Planta C',token:_oldCfg.token,gistId:_oldCfg.gistId||''}];
+      activeLabId=_labId;
+      _saveLabProfiles();
+      // Copiar estado existente al key por laboratorio
+      var _oldState=localStorage.getItem('lt9-state');
+      if(_oldState)localStorage.setItem('lt9-state-'+_labId,_oldState);
+    }
+  }catch(e){}
 }
 
 function loadSpConfig() {
-  try {
-    const c = JSON.parse(localStorage.getItem('lt9-gist-config')||'null');
-    if (c?.token) GIST_CONFIG = { token:c.token, gistId:c.gistId||'', configured:true };
-  } catch(e) {}
+  _loadLabProfiles();
+  var _lab=_getActiveLab();
+  if(_lab&&_lab.token){
+    GIST_CONFIG={token:_lab.token,gistId:_lab.gistId||'',configured:true};
+  } else {
+    try{var c=JSON.parse(localStorage.getItem('lt9-gist-config')||'null');
+      if(c&&c.token)GIST_CONFIG={token:c.token,gistId:c.gistId||'',configured:true};
+    }catch(e){}
+  }
+}
+
+// Cambiar al laboratorio seleccionado
+function switchLab(labId){
+  if(labId===activeLabId){loginShowLabSwitch=false;render();return;}
+  saveLS();
+  activeLabId=labId;
+  localStorage.setItem('lt9-active-lab',labId);
+  var _lab=_getActiveLab();
+  if(_lab&&_lab.token){GIST_CONFIG={token:_lab.token,gistId:_lab.gistId||'',configured:true};}
+  else{GIST_CONFIG={token:'',gistId:'',configured:false};}
+  loginShowLabSwitch=false;loginShowSync=false;
+  currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';
+  gistBoot().then(function(){render();}).catch(function(e){console.error('switchLab:',e);render();});
+}
+
+// Guardar/crear perfil de laboratorio desde el formulario de configuración
+function saveLabProfile(labId,name,token,gistId){
+  var idx=labProfiles.findIndex(function(l){return l.id===labId;});
+  var prof={id:labId,name:name||'Laboratorio',token:token,gistId:gistId};
+  if(idx>=0)labProfiles[idx]=prof;else labProfiles.push(prof);
+  _saveLabProfiles();
+  if(labId===activeLabId){GIST_CONFIG={token:token,gistId:gistId,configured:!!token};_saveGistConfig();}
+}
+
+// Agregar nuevo laboratorio (llamado desde Administración)
+function addLabProfile(){
+  var _newId='lab_'+Date.now().toString(36);
+  labProfiles.push({id:_newId,name:'Nuevo laboratorio',token:'',gistId:''});
+  _saveLabProfiles();
+  render();
+}
+
+// ── Funciones de gestión de laboratorios desde Administración ──
+
+function adminEditLabToggle(labId){
+  var el=document.getElementById('labedit-'+labId);
+  if(el)el.style.display=(el.style.display==='none'?'block':'none');
+}
+
+function adminSaveLabEdit(labId){
+  var nameEl=document.getElementById('labname-'+labId);
+  var gistEl=document.getElementById('labgist-'+labId);
+  var tokenEl=document.getElementById('labtoken-'+labId);
+  var msgEl=document.getElementById('labedit-msg-'+labId);
+  var name=(nameEl?nameEl.value.trim():'');
+  var gistId=(gistEl?gistEl.value.trim():'');
+  var token=(tokenEl?tokenEl.value.trim():'');
+  if(!name){alert('El nombre del laboratorio es requerido.');return;}
+  if(token&&!token.startsWith('ghp_')&&!token.startsWith('github_pat_')&&token.length<20){
+    alert('El token no parece válido. Debe empezar con ghp_ o github_pat_');return;
+  }
+  // Token vacío = no cambiar; Gist ID vacío = sin Gist asignado (se creará automáticamente al activar)
+  var lab=labProfiles.find(function(l){return l.id===labId;});
+  if(!lab)return;
+  var finalToken=token||lab.token;
+  // gistId: si el campo tiene valor se usa; si está vacío se limpia (permite crear Gist nuevo al activar)
+  var finalGistId=gistId; // puede ser '' intencionalmente
+  var gistCambio=finalGistId!==lab.gistId;
+  if(gistCambio&&lab.gistId&&!finalGistId&&labId===activeLabId){
+    if(!confirm('Vas a quitar el Gist ID de este laboratorio. Al activarlo se creará un Gist nuevo y perderás el vínculo con el anterior.\n¿Continuar?'))return;
+  }
+  if(gistCambio&&finalGistId&&lab.gistId&&finalGistId!==lab.gistId&&labId===activeLabId){
+    if(!confirm('Cambiás el Gist ID del laboratorio activo. Los datos se recargarán desde el nuevo Gist.\n¿Continuar?'))return;
+  }
+  saveLabProfile(labId,name,finalToken,finalGistId);
+  if(msgEl){msgEl.textContent='Guardado.';setTimeout(function(){if(msgEl)msgEl.textContent='';},2000);}
+  var editEl=document.getElementById('labedit-'+labId);
+  if(editEl)editEl.style.display='none';
+  render();
+}
+
+function adminSwitchLab(labId){
+  if(!confirm('¿Cambiar al laboratorio seleccionado?\nLa sesión actual se cerrará.'))return;
+  switchLab(labId);
+}
+
+function adminAddLab(){
+  var name=prompt('Nombre del nuevo laboratorio (por ej. Planta B):');
+  if(!name||!name.trim())return;
+  name=name.trim();
+  var _newId='lab_'+Date.now().toString(36);
+  labProfiles.push({id:_newId,name:name,token:'',gistId:''});
+  _saveLabProfiles();
+  render();
+  // Abrir editor del nuevo lab automáticamente
+  setTimeout(function(){adminEditLabToggle(_newId);},80);
+}
+
+// Eliminar perfil de laboratorio (no toca el Gist)
+function deleteLabProfile(labId){
+  if(labProfiles.length<=1){alert('No podés eliminar el único laboratorio configurado.');return;}
+  if(!confirm('¿Quitar este laboratorio de la lista?\nLos datos en GitHub no se borran.'))return;
+  labProfiles=labProfiles.filter(function(l){return l.id!==labId;});
+  if(activeLabId===labId){activeLabId=labProfiles[0].id;localStorage.setItem('lt9-active-lab',activeLabId);}
+  _saveLabProfiles();
+  render();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -923,14 +1130,15 @@ function _restoreSession(){
 // Sin requireGistId (modo offline): usa cualquier lt9-state disponible.
 function _loadLocalState(requireGistId) {
   try {
-    const ls = localStorage.getItem('lt9-state');
+    var _lsKey=_labStateKey();
+    const ls = localStorage.getItem(_lsKey);
     if (ls) {
       const lsState = JSON.parse(ls);
       const gistMatch = !requireGistId || (lsState._gistId || '') === requireGistId;
       if (gistMatch && applySnapshot(ls)) return true;
       if (!gistMatch) {
-        // lt9-state es de otro Gist o pre-configuración — descartarlo
-        try { localStorage.removeItem('lt9-state'); } catch(_) {}
+        // Estado de otro Gist — descartarlo
+        try { localStorage.removeItem(_lsKey); } catch(_) {}
       }
     }
   } catch(e) {}
@@ -965,12 +1173,13 @@ async function gistBoot() {
       // Si lt9-state del mismo Gist tiene cambios más recientes: mergear para no perder
       // cambios locales no enviados antes del refresh. Si es de otro Gist → ignorar.
       try {
-        const ls = localStorage.getItem('lt9-state');
+        var _lsKey2=_labStateKey();
+        const ls = localStorage.getItem(_lsKey2);
         if (ls) {
           const lsState = JSON.parse(ls);
           const sameGist = (lsState._gistId || '') === GIST_CONFIG.gistId;
           if (!sameGist) {
-            localStorage.removeItem('lt9-state'); // basura de otra configuración
+            localStorage.removeItem(_lsKey2); // basura de otra configuración
           } else if ((lsState.savedAt||0) > _lastRemoteTs) {
             const prevUser = currentUser;
             const merged = mergeSnapshot(lsState, remoteState);
@@ -3828,7 +4037,7 @@ function render(){
     if(!currentUser){
       const h=renderLogin();
       if(h!==_lastHtml){_lastHtml=h;el.innerHTML=h;attachLogin();}
-      document.body.style.overflowY=loginShowSync?'auto':'';
+      document.body.style.overflowY='';
       return;
     }
     document.body.style.overflowY='';
@@ -3926,42 +4135,63 @@ function renderLogin(){
       +'</div>'
     :'';
   // ── Widget sincronización ─────────────────────────────────────
+  // Solo se muestra si el dispositivo no tiene ningún laboratorio configurado (primer acceso)
   const cfg=GIST_CONFIG;
   const _inp='width:100%;padding:8px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:12px;box-sizing:border-box;font-family:var(--mono)';
   let syncWidget='';
-  if(loginShowSync){
+  if(!cfg.configured&&labProfiles.length===0){
+    // Primer acceso: mostrar formulario directamente, sin botón
     syncWidget='<div style="margin-top:14px;padding:12px;border-top:1px solid var(--border2);background:var(--hover);border-radius:0 0 var(--radius-lg) var(--radius-lg);margin:-1px -1px -1px -1px;box-sizing:border-box">'
-      +'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);margin-bottom:10px">⚙ Configurar sincronización</div>'
+      +'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);margin-bottom:8px">🔗 Primer acceso — conectar al laboratorio</div>'
+      +'<div style="font-size:11px;color:var(--text2);margin-bottom:10px;line-height:1.4">Ingresá los datos que te proporcionó el supervisor para sincronizar.</div>'
       +'<div style="margin-bottom:7px">'
       +'<label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Token de GitHub</label>'
-      +'<input type="password" id="ls-token" value="'+escH(cfg.token)+'" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" style="'+_inp+'">'
+      +'<input type="password" id="ls-token" value="" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" style="'+_inp+'">'
       +'</div>'
       +'<div style="margin-bottom:10px">'
       +'<label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Gist ID</label>'
-      +'<input type="text" id="ls-gistid" value="'+escH(cfg.gistId)+'" placeholder="Se completa automáticamente al guardar" autocomplete="off" style="'+_inp+'">'
+      +'<input type="text" id="ls-gistid" value="" placeholder="Identificador del Gist" autocomplete="off" style="'+_inp+'">'
       +'</div>'
-      +'<div style="font-size:10px;color:var(--text3);margin-bottom:10px;line-height:1.4">El token se guarda en este navegador. El Supervisor lo comparte con el equipo.</div>'
       +'<div style="display:flex;gap:6px">'
-      +'<button class="btn pri" onclick="loginSyncSave()" style="flex:1;font-size:12px;padding:7px">Guardar y conectar</button>'
+      +'<button class="btn pri" onclick="loginSyncSave()" style="flex:1;font-size:12px;padding:7px">Conectar</button>'
       +'<button class="btn" onclick="loginSyncCancel()" style="font-size:12px;padding:7px">Cancelar</button>'
       +'</div>'
       +'</div>';
-  } else {
-    const isConn=cfg.configured&&cfg.token;
-    const dot=isConn
-      ?'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#10b981;margin-right:5px;flex-shrink:0"></span>'
-      :'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#9ca3af;margin-right:5px;flex-shrink:0"></span>';
-    const statusTxt=isConn
-      ?'Sincronizado · '+escH(cfg.gistId?cfg.gistId.slice(0,10)+'…':'buscando Gist…')
-      :'Sin sincronización';
-    syncWidget='<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border2);display:flex;align-items:center;justify-content:space-between;gap:8px">'
-      +'<div style="display:flex;align-items:center;font-size:11px;color:var(--text2);min-width:0">'+dot+'<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+statusTxt+'</span></div>'
-      +'<button onclick="loginShowSync=true;render()" style="flex-shrink:0;background:none;border:1px solid var(--border2);border-radius:6px;padding:3px 8px;font-size:11px;color:var(--text2);cursor:pointer;white-space:nowrap" onmouseover="this.style.borderColor=\'var(--accent)\';this.style.color=\'var(--accent)\'" onmouseout="this.style.borderColor=\'var(--border2)\';this.style.color=\'var(--text2)\'">⚙ Configurar</button>'
+  }
+  // Si ya está configurado: no mostrar nada en login (supervisores configuran desde Administración)
+  // ── Selector de laboratorio (overlay cuando loginShowLabSwitch=true) ──
+  if(loginShowLabSwitch){
+    var _labBtns=labProfiles.map(function(l){
+      var _isAct=l.id===activeLabId;
+      return'<button onclick="switchLab(\''+l.id+'\')" style="width:100%;text-align:left;padding:11px 14px;border:2px solid '+(_isAct?'var(--blue)':'var(--border2)')+';border-radius:var(--radius-lg);background:'+(_isAct?'var(--blue-bg)':'var(--surface)')+';color:var(--text);cursor:pointer;font-size:14px;display:flex;align-items:center;gap:10px;margin-bottom:8px">'
+        +'<span style="font-size:18px">🏭</span>'
+        +'<span style="font-weight:'+(_isAct?'700':'500')+'">'+escH(l.name)+'</span>'
+        +(_isAct?'<span style="margin-left:auto;font-size:11px;background:var(--blue);color:#fff;padding:2px 8px;border-radius:10px">Activo</span>':'')
+        +'</button>';
+    }).join('');
+    return'<div class="login-wrap"><div class="login-card" style="max-width:380px">'
+      +logo
+      +'<h2 style="font-size:14px;font-weight:600;margin-bottom:14px;color:var(--text)">Seleccioná el laboratorio</h2>'
+      +_labBtns
+      +'<div style="display:flex;gap:8px;margin-top:4px">'
+      +'<button onclick="loginShowLabSwitch=false;render()" style="width:100%;padding:8px 14px;border:1px solid var(--border2);border-radius:var(--radius);background:transparent;color:var(--text2);cursor:pointer;font-size:12px">Cancelar</button>'
+      +'</div>'
+      +'</div></div>';
+  }
+
+  // ── Indicador de laboratorio activo (cuando hay más de uno configurado) ──
+  var _labIndicator='';
+  if(labProfiles.length>1){
+    var _actLab=_getActiveLab();
+    _labIndicator='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;padding:5px 8px;background:var(--bg2);border-radius:var(--radius);border:1px solid var(--border2)">'
+      +'<span style="font-size:11px;color:var(--text2)">🏭 <b>'+escH((_actLab&&_actLab.name)||'Laboratorio')+'</b></span>'
+      +'<button onclick="loginShowLabSwitch=true;render()" style="background:none;border:none;font-size:11px;color:var(--blue);cursor:pointer;padding:0;font-weight:500">Cambiar ▾</button>'
       +'</div>';
   }
-  const wrapSt=loginShowSync?'align-items:flex-start;padding-top:32px;':'';
-  return '<div class="login-wrap" style="'+wrapSt+'"><div class="login-card" style="max-width:380px">'
+
+  return '<div class="login-wrap"><div class="login-card" style="max-width:380px">'
     +logo
+    +_labIndicator
     +'<h2 style="font-size:14px;font-weight:500;margin-bottom:2px;color:var(--text)">Seleccioná tu usuario</h2>'
     +grid
     +errHtml
@@ -3995,7 +4225,14 @@ function loginSyncSave(){
   if(gistCambio){
     if(!confirm('Al cambiar el Gist ID se cargarán los datos de ese Gist y los datos locales actuales serán reemplazados.\n\nEl Gist anterior no se modifica.\n\n¿Continuar?'))return;
   }
+  // Obtener nombre del lab del campo si existe
+  var _labName=(document.getElementById('ls-labname')||{}).value||'';
+  _labName=_labName.trim();
   GIST_CONFIG={token:token,gistId:gistId,configured:true};
+  // Si no hay lab activo, crear uno nuevo
+  if(!activeLabId){var _nid='lab_'+Date.now().toString(36);activeLabId=_nid;labProfiles.push({id:_nid,name:_labName||'Laboratorio',token:token,gistId:gistId});}
+  else{var _lab2=_getActiveLab();if(_lab2){if(_labName)_lab2.name=_labName;_lab2.token=token;_lab2.gistId=gistId;}}
+  _saveLabProfiles();
   _saveGistConfig();
   loginShowSync=false;
   gistBoot().then(function(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';render();}).catch(function(e){console.error('loginSyncSave gistBoot:',e);render();});
@@ -4657,11 +4894,19 @@ function mergeSnapshot(local, remote) {
     merged.nextSuggId     = Math.max(L.nextSuggId||0,     R.nextSuggId||0);
 
     // ── Schedule requests: merge by id ──
+    // Status priority: approved/rejected > pending (una solicitud resuelta nunca retrocede)
+    function _srPriority(r){ return {approved:2,rejected:2,pending:1}[r.status]||0; }
     var srMap = {};
     (R.scheduleRequests||[]).forEach(function(r){ srMap[r.id] = r; });
     (L.scheduleRequests||[]).forEach(function(r){
       var rr = srMap[r.id];
-      if(!rr || (r._ts||0) > (rr._ts||0)) srMap[r.id] = r;
+      if(!rr) { srMap[r.id]=r; return; }
+      var lPri=_srPriority(r), rPri=_srPriority(rr);
+      // Primero: status resuelto gana sobre pendiente
+      if(lPri > rPri){ srMap[r.id]=r; return; }
+      if(rPri > lPri){ return; }
+      // Mismo nivel de status: gana el más reciente por _ts
+      if((r._ts||0) > (rr._ts||0)) srMap[r.id]=r;
     });
     merged.scheduleRequests = Object.values(srMap);
 
@@ -5334,7 +5579,7 @@ function renderShell(){
     <div class="sidebar">
       <div class="sb-header">
         <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAU0AAAEzCAYAAAC12FF1AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAGPHSURBVHhe7b2JexvV+f79+xff61tia3diW5rR4iTsLaWFAoW2QFtaWkqBErI6XuJ433dnJYQEEsIeyL6TON4kje73us+ZI49lJ1iGCEd6nvZGsqTY0syZj55zzrP8P6zJHABZAGkA8wBmAcy4mnMfd4AcFsV/QpmfzW9yHDhOBrlcxv13aWSdOeRyvM+/wcdXI76WMn+o0uQ5qAWWy+XUcV7Z7vHvvedOTOwnGa9LcoLXNK/Vew0qjkNzHedWfFkuR2bo26VPALkVh3gOOT7hHc8/cWz/v8IHVm/8iwacXvGgeN69emP8ecEjA0RHfSBe1DwKTjaHbIYyB0A/nv+E5r77+qWPrXBAKk33MB5fdYzVD0A2q6XN+8WzAjyNreLviImtbBxs5rq/HzT5uHGUXHAucQw0UHM5A1bep5OVRg4ZZHN34eSmkQOdLneAmzFrhrb60+bvGCerOPsJ0CzGeBC8nijFg0gPc/HD5ZycgmVeHj6KfkTe41Yod7A4hGUGyKT5BWXODQfNSl57AUAFmmJrNgPCAodqiRmymdcRsIWO1uLPuZwrdX8eWWcWudwPyOEWcrjr/g495p1l/gDfDxnEGXL+Qli1rR2a3otoJS15kffbw/vNsfgPMhkHmUz2PtNIsfta4fEvlAtQYxxMhKc+V+4L8t/mZtCac1bwu8TEirLVDB4+Z8YewUigTXscLU7vF71VJ2eW9OhtZpDJ0LucV16mk1twl/08fzL/5/mg+f383esFmvkXmAOQXfYS5f2I/aK28jngg4XeZ4HXKSb2s1rhmON0ewY5cKrNW8KQcCt+DBKeGq7GETDOgHEIiv+da4DmEjIuB6Z6iv/xfmPQjXa4JFv4r/WvyAALs1ncvrmAb7+axeED5zA29DUmhr8tUmcrWyNfYWL082UaHz2jbifHv8T4yBlMTXyF05/ewNVL85i7k4bDL/ElJ8TcKYSnAaiY2M9pBppmpkMni6CkMi41Fi097yhWfPP5HA5OXMJw3zcYHzyH8f7LODr+A777fB4zt9N6Wr74rzyeqjvDKgTRKm0N0DQX0vJFVL2+psnOtQYnR5f5LrK523CUK8zH9b/hUuaVC7M4cfQG9u/9Fq+9OIKnG/ZjS/0+JDe1IrGxFcliVdNW4dqP5MYV5H1c3W/H5tpOPGa144/P9GD728dxeOwKLn47jXnOiFxTG3NZLplQXDfitz4H3vLRlt9oEhMr0szY0UtzOtIjy+k11+HNsHKAG1fTODp1Ae+8eQDPPLoXDfW7kKrbCyu8RzFjS203UjUc24147qlW7PrfEXx6/DJ+uEnHTVtWjWmj/MNF2Rqh6d0tX7pOaXa2+A2Rzswhm+W3RRqOAi2wMA+cOXUFzbuP4ZXne5Cs3YloYA/qqlth+XsQDwzD8g0jVj0Ey1esRipb/mFY/qEfl28IMaVexAItiAV2wgp+gCdTTXj/3x/i+KHLuH45rWYAtEyag1if16zDhXfxNsV+qmlXzxsOp6No9FMcbmYD89qlDKZGz+HVPw5gY/VbiIV2o+ZXexALtCMV4ZgeQH1VH2z/AGx/N+o2tGLTI7tgBXdga2wXXnuhB0enLmHmNpBZANIL5JSBdPH2M0DTq4yKuaR3osNcFp2ShRngs5N3sPN/H+LXjzWiPvhf1Po+gBVsgR3ohB0YQDw4jERoHKnwFBLBScQDE0VqqoI1iXhwBPHgYBHqh+XvQENND5KRDmzasBN11dvQULcLb/xpHAdGLuHW1fz4VgvrTv6rXw9y8TDFijPvVFyHGxp4qegOs9udBeamgU+P38Q/XxtHXfBt1Pr+p2ZK8VCvYoXtH4NVPYG4/yASgQOwfAOIB/rQEB5Bis/7BmD5ulFf1YJHo/uw47+f4Pw3s3koZzMlgybNfGizuKp3tuhdKvc6m0PGXTrg05e+c9DeeAlPbe7DJt9uRIOtiAU7EAv2IBbshR0aQDw8CCvUh1ioB3aYj/XDCg0UqaEKFo9f4WP3E6HJQdYLW3n4vUiG+pAM9cDy70PUvwuP28145x+HcfLoLcwzisOMdzGxoswMHHNrdsk9HiZ/yugvZtrCXWCo+xKefrQDdcFtiIb2Ih7phB3uhxUcQSI8CTtIZ+EAEqFDsPzjCphqDAdGkPBNIF59AAnfIcSrJxQ84+EmvP7SCE5/fAMOV5nMWyvS1ghNY8brdKGZo4e5+EYys8BHh67i9ZcmYIW7EA30os7Xi3r/AGKBEcQCo4iHJxGPjMMODyOmoNmlXmuFu2GFe4pTqK/CVewXxwDsQA8SwT6kQiNIBsaR8I8h7huFVd2LqK8VVnAnnnuiHb37vsXNy45nw3HpaBOPU+zexrGhl3eWbyy6r+Asxh1b87NZjPZfwDOPDmOTvxHxjZ2I1/QjGuhDNDCkuBELjCmG2OFRxCMjiAX7YQe6Eed49g8j6Z9Cyn8EKf8xxKsPIhWcQDzYgWhgG/7+p2GcOnYbDtG1BlsbND1g1AdCT8+Vq+1+8Ls3gcGub/G7p7hQux2xYCdiwT4kN44hEZmAFZyAFZhCzD+FqG8CUbraQR6EkfwFbSlvsxjR26pkFXre91c8NIAtG4cQD/bCqu5Hwj+BhuBhJHwHkeCgC40gEepE1LcTm+t3YcfbJ3H2iwV1frmQvmRICDTF7mmFHqYRnSzXtTSO1ryDsaHP8OwT+1Hr249ooAt2ZACx4BDi4TElMiIWGFQzVCvci2ioA/FIF1I1/UiFhhQ0474x7WFWjSNePYYkl674uwLNsELb8fqLU/jmNB29JW/0Prb4wjVBUy+imvsOsjnuqs4h6653/XAZ2Pv+d9gabUM0uB1WqBnxYB/s0CBi/gFYgSEkwuOwg6OwA6Owg2OIh8aQ4EEJjbivGYQdHIId5O1qxddXsgqPx/3FdU2bU5rwIJLhEdjcSKoeRSIwgURgHJZPr3vGg12oq25CQ207/vbyQXzxyW11DeTHu1qX8gbKmzXunxbaIVY+pocB/8cIGsZh6hBEnQLJnXI9SM6cnMFzT/eq8Rbz9SDOZaQQx/Yw4qFhxPwuQ4KDSIQHEVfT9W7Egz1IhAeQ4OsCQ2pDOcFpenBUPcY9E47zzZsGEK3eh4aabrz9t09x84rjZs5xfZVLjHT+FjehtBng6weKhiYvkGxOhwNksvzYDjK5GWRzelv/0rkcWj64hK31Y6h9pAuJSDfiIX4oXoD0akQPk6wAp/ADSIQ4aDl4O/Hn30/gq9O3NDjdMaEAmoemSZXlFqisg4q54YhqdBCWOvaSP2dzGRWZQSfswndpvPnaR0iE+tUXeGKF8bhUq2OKGrvu6+kcWP5+xHz9eCw2gNG+y8jMEZr0eskw/uDZtlFmZtM6RqloaPIbgdDk783wD6kwFL0BNHPHQfPO09ga7UDU36m+EXgAEpwKrvIDitaHONA4wHjfptcfGFSPRX3tqKvegTf+NIpzX+ugTpPj7o4QT46wp7qMWEWbGQZaysdUXh2hSZu5k8Pe7adhRxqRCPd6QPfTxXHM30dQ8j4V8w2grnofXvn9IC6fM2urHLPzS6siKTPQXKOnSSM0+WH5wdMZBrHr+Mue9jP49aP7YIX2IlnTC8vfp8MA6DKv8GFE61ccZGbgGmhSyXA/UpE2taD+77+O49YV7U3qKY3ZGNThZ/oJgaYYnazCVGpOy9PaCUsDE0OX8Xi8A3ZoH6zgfiQiXBZaPi7XIjOOGc9JYDbUjCERGkHU36Hik4e7v3HX5OlteuKQ1bhV7mHey+SPa4OmQ+9yHo6qfakvmqMHruOZR9tRH9ilPng83A070I94YBy2f3TZBxGtb3lBSZnHGyLD2FzTh9pHGhEPNaLpg1PIMnhCQZODiz+4wFS2ZJ4jVpGmvUpvGjV/NiA6feIu/vDUOGqr96tojniY8OSS3vJxuVYZJ4DSY3oIycgA6qr24K9/HMHdH/QY1XV882tNHi9z0ftcEzTNh3aUOwtc/H4Bf/3jpIJlzN8OK9gBK9CBRGgIqfAhxP3c7hdv82HSSsBUjzPrwsddyhHEqjvwhN2BYwcuqnHgqBgON80y712anVJxNyvXDDT1sp5OpdaQunbZwZuvf4iovx2J4JiaQqc29qiNncIxuVZ5l5e8P3OTyfJ14NFYE86cvObupBOS5v15Z06MidI3RUOTbizXMjOOrjwyP5dD865TSG4kMJlhMoBkpB8Jxk36+2H7pmAz0FSg+VCpEJj5nykf4+AOwK4aRbSqDa++0I/vv73ljg939zHvXJoiCWKVa3qXnOXcODvlLY0pjU07z8AOtehIDcYJhxhN06dnqSuMy7WI45Zc4n2zVq+iRbjL7htEffVujPR+4QmbMzGllFmfZ8jQGqFJy2RNLjLw+Wc/4PdPtqPe1+5G5ROQjAHs02/afwBxP1P8BJrlIR0Dl/QfQbz6MBIMH9u4HT0dp9yCx9wJ1VlhvOUakZMrLKMkVklGFM2nM0hn51SUTTq7oOBzcPQaEjXNiDFbJ8A4Sm48MmTIvV029n5eEdAJ/yQ2/l8j2vd+jlxGQ1OvaVJmueknQpO/1oTkzdwFGrd/BCu8E9HqXuVVxv1MbeIHppfCA8Cfx5e9YdHDKbUTyUwulaJ2GHH/KOp9u/Cn5/fj0jnmWi4uYaoKSWphXTzNSjazjpnlLMSddXz52V089+QgotUEptnzMMwgL0qwDxIYQ8J/AHWPtOKD/3yEuWkDTfOu6RgSmpS7prkmaHrKNX375QKe3rIXdb696sMmgwfcwhnmm4IHYMxzUEQPu1QYkn8QVvUIUgFmDo3DDrQjUfM+evZ/postuBVkWFJOF4+VjaBKN+Ns8c6dWzm8+doB1FW1qKIbenZKXriRNurnsWVj72cXueSbRMy3H//48yhu33AT0s0sPb+myZhjNi7TzxUPTeVB6DWrvvavUevbjlRNr/ZA+EH5RozUgZD4zHJSkovpAQYfDyAZGINVNYxUmEHwe/HqCwO4cl57EhmGorlVYFefqiZWjqajbbikB8zeBdoav4AVboTl712sZpafjnN8kR06RviBijNi35j60n/9j4O4dc2tu2lcY2Ucz24nTTdCv2ho0hi9f/1KThUOrqtuVulLOiXPXbxV3qVbqizEVCiubwo8y0P9SAR7VDUk5qzHmLPOmgH+bjwRb8WRyfPa01QbQguLjd3EKtgYmjivuHFw/CqeTHbpKBtGYpi1TAVKA0tTurBw7P3MIjRZ88Lfqop43L7urr2703BtBeuaa4GmuQA+OnwVjyeY9dOtdskT4T63zh13wThFdzd/FDR5gZXgIIgeuOgdsAZnMtypinkkme3lH4FdPYhkpBV7P/hYlwVUtRIzSC94w4/EKss0fVQTNKTx+ekbePn3w7BC7aoANkMSE8wtJ7y4jqnWMskMcsTdSH6gGkEyOI76qr34x1/GcPu6u/ZuPE01bs0OOuGpSbpmaLY3fQY71I5odR9seh/hHvcAcGo+VZqFXFHJxdmExRqoalDzvOvZBcM3GJj8j1eO49oFLt/Qu6CnKdCsCPOAhpETegeakRN6ynv1PPDff3wMK8SK6x1I1TAMyHWy1NScHqbrZaqZ6c8XcnRvDSMZGEV91T7840+HcPuGWU7yDlh3TV49xM+ULR6aNMZXvfev46jdsA8xn1tthBH8Ibq8xst01yQUREuwPiEqkdzScvQ6lVfAGQYzvwZVPu/vHzuILz/hhZJTHkaWC1kCzfI3FvDhsh+5os63rmjEqe3sHaCj8TIes/sQj7QhHub0vBOpCHPCC8OLTLiijqt80GIkSH1VB/7xyjHcuanDKHXLHjNovUVn+HkW1gbN61fn8fJzg6j5v2YV65QMs/pNl34j3ql5fjdMoFk+ugc0g+w5NIDNtV04OHrRXTPPIJ12dx3FysTy89ZlpuNy9XPGWWM495HJK3hm6yBqq1mTohPJCBNfepCKjFYONL/+4hqe3tKG2g2dSAS5FjGgpud6PdOsTQzlL6alB0X0cKsAmpxGqfPMhnhDSET2o7Plc2TUTCcLRzzNMjTXnfRMyfV/mO0zD4fQcc/5V5/dwat/4JhpQoIdGQKdCopbNo3D8nPz2EzNF8dXWULz42NnsTnWpHe/GKfHEnDhHtiq5wx3zllM2JMVJNAsIxVC05T9011EkzXt2PP+R7h7R6//LC0bJ/bwm5sWswyaDFy/q+VC8+Zl4IO3jyPq34FYoE1tCHMNnPVZUxHGYbq75ktmomUKzQPjnyMW2qXyRZlXngyP6lzzAD+seyAUNOl9lubDi0olt63GPaCZiLRjx7tHMHNXjzTVFkM8zTKye0PTwR1W1VXPs5Nkd8tZPFbP0KIOtXEYY1ymqjLEOrsjSIY4K60QaI4Pn8bG6u3qIrH9k0hFxpFQpeAMNBmfyWmbQLMcpaE5rHo6eaFp+0cUNHe99xHmZjjSOD0XaJafuVBxgcmdclWoBXPIMTwnB3x8+Dqe3dqN2l+1oaGGhTh0hqAq/OJnkoQGporTzM9EOZbIjTKE5tjQadQ8sl1PzVnFiP04wqx/xw8qnmZ5y23iFhyBpcLKXGiyMyDrpobasft/x93puRvZLtAsI9MEYZpsxu0brgq0qLRZ/fO5s7P428tDiPoaVRxk3OfGXxrlMwY96dbu2FpcIy9NXPc6hKasaZafCqGpH1NeA/OIBZoVYaoYS767ooEKcPuGgw/+e1RV9rf9HUgFJmAraHoBaWIyvcCkyA+jsoXmmJqeqwKfYYYc8RvCpETxQ/PDS8hReWklaOp4XIFmZdhiFSA3xMhM09nyZt9ZNGxqRMzXigaGIlaPwPaZ698AshCWRuUOzQ3bYQfuBU1ToYQeiLubvsIbFj2cUn3pg+xT7yn5J9CsGFMdbhQ5M1hIz+fP7ydH7+DpZA/qHmnDo7UsE0koGefJgLBQXlAuH2sPWiWE5inUbPhgBU/TbAR51jBUsLvU0ywn/Sg03/sYd+8Y98Mz/sTKw9TmOU/qYoHpi2fn8NoLkwqYrOrfEDwMq3oIqUivXrozSRD3UvlD88c8TVMWjhcTd8nE0ywnLULTuxHkheYJgeZDae7swIQU3cNyDnfLCRYNmbs/5LDj3Y8QDzchyTFRfQgJ30GkguNIBLuRVNBknrkBpKs8LCvA0xwfOo3wr/SapmpnQUCGvJ6mZ01zWRyW6GGXCTfSaZS97gXBpmuEZid2v3cSd29zpHkHn9i6tPyXGv9DKJhGYhog+efzpzELB3dVFXbuA6VngcHui3jU2o+Yr12HFrlLciwZqMfM/abny8dXKVU6aA4aaI4vQjPc6ULTDSnI757fa9FX9LAqD00WaFGFWnTnQA3NLux+71OB5sNiS6BpuolS94Imm6PNIOsWmP7wwHX8/slBxAKEJr88C6/3wp/XlwSaopJIoFlGlj89vEMoGLkxRHnT5GQgu+NW4zh/9i7++grHwU7EmFOuPMeH63oXaIpKIoFmuZmhwr3WM/kYz6X2LmnTt4H33joIq+Z9JCJtsANsXeHpKKnGyvqZht9LAk1RSSTQLCfzwnIl8wJTQzObBob7vsHW+G5Eg7t1IY4QM8K8m8AEpdn0EWgKNCtcAs1yMZKAICg4T/m7Xg+U9/UTnxybxXNPdyMa2olUjT73evPHLcChrnf3+lcMEGgKNCtcAs1yMZKAmz+EwdLwMFbcJzwopkuaosKXzy/gH385DCu8G7HAPqRqdM0BsiARZFdJTs/ZycEtvKH0y4QTrUYCTVFJJNAsF7sHNFXlIhbhyOiNH7dS1ex0Dk07P8HmaCtifq5j9qlqRbHqMSRDB3RBcjVGvMAUT1OZQLOyJdAsFzPTc3c90wNN/iebTSOd1pX3M7PA5NAFPBbfg3p/M+ygWxvTT2hyWj6BhEp2oJfJ2F12oeWtQFOZQLOyJdAsFzPnyG1Jkgcmy71pLzOTITGBMx/P4Pmn+lHvYzfJTiRr2H7XzQILTMLyjaiOpNrLdNt2q+u/dMU31iKBpqgkEmiWk7nnp8DLJDgyuoE9rl1YwNt/O4r6qkbEWWjcrXepOjcERpEMTere5Wrzh95llzsuDDSXj6H1IoGmqCQSaJahFUCT5y6dnsfcbA5tjR8huXEXbF8f4n5u9rBdc5+qwG7SpBlylFCbPxwPXmhyzKzf61+gKSqJBJrlY/mWu24VP/4nD40c8OHBy3g8vhubHmlEQ2gCqdCU27pi0AXliGqwmAgNqaZp+VoE+fVMjpn1e/0LNEUlkUCzPCzHzZ5cBtlcFulsTqVHOrkMMo6eln/75Qyee2oAmx7Zj1R4oqCfz0oqLMaxftcyjQSaopJIoFk+RnCmnQVVtSjHlsvuHP3WjTTefH0CtdW71FQ8FZ6E5TfXcflczwJNUUkk0Cwfc3Lkge4kmXHm1GMsxt7W+AXqA9sQj7QiGelBfVUPEkGWe/O0OCkDCTRFJZFAszyMZybj0LukpzmNLBZAXhwYvY6nU92q3Fu9rxXJjZ1IRhjIPoZYdXldywJNUUkk0CwX05s+hGaO3mYOOPvVLF55bhybNjSrPj91VR1IRLphhzpVvUyCs5yuZ4GmqCQSaJaLOXCUl+nGY17J4j//OIBYkN0k+5EMTWHLxgOw/P1IRkxq5PoOVi9WAk1RSSTQfDhNF97Q50Pfz+q2FchiZhpob/4Sj1pNqhAHg9XZ/ysZPAzbN4FkeBSJcC/sINvaCDSLNoFmZUug+XAagZlOcxqu+5UTnKptRQ44PHENv320D3ZoH+xQF6xAvy715jusxfs817zO13HVomIl0BSVRALNh9eyWV3qzWtffz6LV1+YQp2vGTFfD+wg88YJzRF9fStoTujzLNAUaIqKl0Dz4TMzNTfeJutl0m5dc/Cfvx9FcmOLm1M+jGR4GImwmYKb4sLcADLV2JePiYdVAk1RSSTQfPgsk8koL5PQ5C3Py8Ic0LPvW2ypb4Md3u8W4SA0p3TrinwBDnaZZG973Zq3cDw8zBJoikoigebDZ/lNoPzpcHDsyNf47WN9sIKdKqTIDvarOEzbR2hOalCG27QITjVVP+Q2T1s+Lh5GCTRFJZFAc73b0mO+hJXMAMoyHnMGr77Ui1igVU257UAPUhFWLRqB7TOtKwjNTncd061wRJgKNIs3gWZlS6C5Po1HWstROeT5n3NAOuMg424A3boGbP/vGeVBWgFOvc25NeuY3uvVW3yj/K5lgaaoJBJork9bhOZS8YpfSGfUFJ0FjAa7zqGhfi+i/n1ltRO+Fgk0RSWRQHN92hLvUolX+gKyzjyynJOr9ru38HiiFXa4EcmadveaXX6OK0UCTVFJJNBcn7YcmhnkcFflltMufpfBH58ZU0U4rNA+BU1VOHiFc1wpEmiKSiKB5vq0Qi9TF+JgubccZqeB9948CSuwH5trxhDzdyEeZlsKmZ4LNEUPXALN9WmLwOT/CMz5/PEf7P4am+vbYPl7VFhRMuReo2WUR74WCTRFJZFAcx1aDshmGI/JwsJZpJ1pVe6N9tGRy/jdE92I+ltgB1gXcxy2jwWF2au8fMKH1iKBpqgkEmiuT+O1nk7rqbmT0+uY3309j9demoIVbEHUxyD1PiTDI7Cqx2BXT+lrdYVzXCkSaIpKIoHm+jRukDNDkk3SaLdv5rDj3VNI1OhpeSLch0SYtwNIhg4gFTwi0BRoikohgeb6NAavs+cPj3hmARjqOY/H7A7YwW6kIqyHOaQ2gJgumQxPIBFgqmRlX5sCTVFJJNBcj8b2u/NYyM6pQ37642m89JtxRP37EfV1q77kPEfsWZ6KjKmiwlZANoIEmqKSSKC5Ho0hRrOqfcXF77J489XjiPr2IREagB3od6E5olrxxoOjsIN9SEaYQikhRwJN0QOXQLPUxmOoxVRIlnmjLdbIzLgXuoOFGWDvjs8QjzTCCnQqz5K75bwm1fkJjMHyD8IKdKv1TYGmQFNUAgk0S23mqiUkHReWvLj1sTXA5DU91ncVT6XaYAX3IBHuhuUf0BWLuH6piglz42fQrZMp0BRoikoigeYvYYvgdHIZZLI6BlNx0z3EX52ex7OP92BT1TZsreeGDz1NrlmOusD0QtPtLinQFGiKHrwEmqWywmPHnzNwcnPI5eZ1czT3EF/6Po03XzuEWHAXrFALUjWdanquqrH7WXV9xK2Daa5HU+5t+fmtJAk0RSWRQPNB26JXmf/RPYzM8nFwF8B8vkHa7O0cmnechh3Zg3i4Q1Vh53lhqFGsusf1Ns35M9ejXJeUQFNUEgk0H7Rpj1Ifv6XQhEqNnIGTm1UPZuaBycFLah2Tu+UNNaM6VTIypCoY2cFepGq8DdF4LdLr5JSdU/XKvjYFmqKSSKD5oE1D0+SOL4Ump+ezyLKaMIDPP/kBL/66FzF/EywfN33GkQyPwQ4MqlAjbvjolrze9UtC0zRJq+xrU6ApKokEmg/a9FWay7mbPd6Zeo6dJXVXyVvX5vHvv43BCuxAkrvhCoTcJTcw9Gz4CDRXlEBTVBIJNB+86XAixmXmFCTNYWRuucoxXwCadhxHctN22ME2xP1DSAYJTIYXEYamepGZmlPeHkB8vrIrHFECTVFJJNB88EYw6jBMglOvb+Zb8DrA4bFLeCLRgrqq3UgE+9EQ5LVI75Frld5dcrn27ieBpqgkEmiWwLSj6V6tC2od02QCffv5LF789RCi1a1oCA8jGRxBIsDj74259EKzEKD0OPnayo7RpASaopJIoFkCc4sK8wLOYRrAHfXwzasLePuNI4gHW2FXD8GuGkMqOIZYNfPIeb151y7da3HZ+qXeIFKqcHAKNEUl0f2h2Ynd753C3dscKQLNe1velVzZmBWZ1ldrxplWnub8HNDefAJbY42I+bqQ8E/BrppEwj+KhjDPBXfJeT7M+uWPQVPSKAWaopLo3tAcVz/vfve0C0134N2HDRVjSxjJi5IXIOVui5vX5O/OI5NjywoW43DAZc2jUzfUOqYVbEVclXUbRUIBcRjJMK+xwg0fqnBqTpnNocoGJiXQFJVE94dmz1Jo/ohDVTHGi04dB/6HoUSUB5pLjhMbVkzDwQ+q3w/tq88y+PPzhxAN7FMB64XnRFIi1yaBpqgkEmiuwVb0NHnr8TSV8UVcx5yH48Zp3riSxf/eOoFocI8qwqGn3+Z8mA0d8RrXIoGmqCQSaP5UM9Hq5mo0t9TitJ2Pzs0A3W1fYHP9HtihVnfzxutVCjR/igSaopJIoFms5a+6FYyPG8/TTNuzKguI1+6xQ9fx7BNtqA/sVJEJLCq89HoSaP4UCTRFJZFAs1gzUFwJnAaaZo3TnbLnuI65gL++PIFYZBeSNQTmIBKqNqY3k8dcZ94pu2i1EmiKSqJ7QdMy0HzvNKZ/4EjRF79AswCanuOh4jBzaThOWl+s7nN3bjj44D+nEN+4V5d7Y+Wi8LgqyLEITfcaE2iuWQJNUUl0L2jGfKyw0yvQXGbGk9QXpfd4EJaZ9BwWFhaQZb9yB0jPAgOdF7A12oHa6mYkw4OwfAwrOuC2riA03aweBU0JH1qrBJqikuhe0KSnmYz0YfvbJ3HbHYACTZrxNN0DkT8ezCufx/zCrG6Qxpdlgc9P3sKzj3Vj4yNsjtatyryxEMfmmiOIVplryVvBqDA2U7RaCTRFJdE9oelj1kk33nnjCG5eW1BjZbHwRCWbB5pLvkQcZLNzujamu4l+/UIWr70whmiAVdi7sHnTCGz/MGLVY0iFDyqPU50HBUxm9fAaE2CuVQJNUUl0L2hyPLDFwr9em8T1K3NqrJgeNpVtZrNnqefN1ruZzIx6jrvl6bvA9v+cRl1VIxKRbsQCXbD89CIJzlE1NU+G+MVkpuWmuLCbMrnCuRLdXwJNUUl0L2iqArihHrzxpxFcvcQ+NrrohECT5vEy1fHgf1idfR5Zt7PkUNfniIf3IhUaRiI4qNtVBPpVJfZUeAK2313LzANToPlTJdAUlUQamsMuNHnh6rQ+ekMxfwde/cMQLp/X0MykXQ9LbAk0c+qO3jnnT6dPnsNvtjSivroFSX75+EfQsHFIhRnFfAMKnIkQe/rwHBCa3ipFco2tVQJNUYlkzql391Y/V7uhBX94uh/ffcVpJ8db1k0HrFx3k2u6jlJOiUcindH3aRe+n8VfXuxGrX+H8hqt6kkdWuSuVaqNoCXHX+ph/lwSaIpKJJ5PE/KyuHPLSjsxfzue2dqHU8dVdDscpBcbhFWwqetOAZN55fwi0Y8zNGvPB5/CimxHPNSOZHhUXVf0LJcfd9HPLYGmqIQq8HZU7OCo2gjaEt2H8aErqpxZNjePHPROeqUaHcqsClnNIpubxYLa/AHS88Bw7zk8Hm/Fxg2NaKgZhOXvgx3kOmbh8RY9CAk0RSVSYb4zU/sYdD2BmK8XseBu7Gv8XEGBXqaTmy8cQhVl9DAzjq5clM3dVV8kjgOc/Ogmnnua7Xf3642ewCgsfy8SkU715bP8uIt+bgk0RSWSF5o83xwHU0gEDqpNi2igEW///QBuXOcg01P0yracAmXauZtfqjj7zW3887Vx2KEWVVU9FTiK+g3c/BlGamMnov52xLnRtuzYi35OCTRFJZKbiaKgyR7ak4j7DiHhP4xY9Qjs0D688Ewnvjij+9q4I66Cjeu6M8jkdOzqrZtZ7Nr2EVK1exDz9SAROIRk4EPYvkl1TOlpqlCuZcdd9HNLoCkqkcwGkLtrzqm57xDs6kOwfOOwgh3YEtuF8eGzOrhdDUSmDDIDZjEEiT+Xk3k/j+5b7t7HLDI5JuM7YEjmcN85PBZvRdS/P/+lkwwxr3zMDWbvV6FGy4+76OeWQFNUIrl5z/nKOqNqem77DmqvM9iLWGg7tr97GPOzhKUedyq/2gOTcoOm+WzmC0J/XgdObg7ZnN78+ezkXbzw9AgS4R6VHrnYo5yQdIPUef0QpsuOu+jnlkBTVEK5mSl5b5Mly6aQCE4hER5EvX83nnu6DRfOLihoLg5CbV54lpMZWHqNHX9ol85n8K+/HkFtVSsaIlOI+yd1lo+KdWVmFY8nPc8pxIMSclQKCTRFJRDPpUnnY1aKe7EHeN7H3KDsIcSC+5DYuAeDnedUyA1Bwql5IVDKyYyHacyhl+n+PDMNtOw6hYb6ZqRqhlH/yAgSgQNulg+PI9cxmeHjQpNfQsuOvejnlkBTVALxona9IKZQ8ryHu9QFbweGYQdGYPkHVV1NO9KK116cxPTNwmmrHkflyk/zBZFVBYZ1jcwDI1fxqN0CK9SKzRtHUb/BVLrntcGNNebve5Y75JopiQSaohKI0HS9IAXNDq1QF+wAwcm0P126zA62Y3NdG6ZGLrlT9KXeWLl6nYUe5zefz+DFZ8ZR8yu2rehE1Nepsqf0lwyPqff6MKFcshFUCgk0RSWQ2agYXlyLU54mi+WyKo/ezLACA7D83aj3teKfr07ghxs6ZpNAyWR1lpDOFHrYNoN4QZl+Pu61lfeceUenSZoHr12ZxVt/H8emDU2IB3vUBhC98mRkEAkVh2k2gwpaWEj7ipJIoCkqsUz++b2LRzAOcXP9Poz0fYPsgh57zIpxcjfh4LYK9lbcWVI5ja9arzDl+72DHOYW37f73h2mSWIWWYc9y1nhCWhrOoH64PvKC188ZkbLj9fS1xQ+Lvq5JdAUrUvFAvvwuyd6cOGsDrth/nUOt1xoct0PumWtWzItpwanHsDrz3Q6JN/jIuT1+3awgExuHhk3FvXowYvYYu2EFWxZzJ5a4fiIfjkJNEXrUpa/B1awFXu2nUJaJcU4KuB7ibe2BJqctrvT33VoS2FJEaQLyDiz6pPRWBrvD7/pRW3VXiSkh8+6lUBTtE41rKr3sPrRkclr7njk2ia9NQaAP0TQ9EzHtbg2O63k5BbUuubNq8C///oh6qubEfONIBli3GXhMRGtBwk0RetSrN5Tv2EYscB+vPLcEL75Yk7tpnMWy7U/77rgQwHNPODpYbIIxy3lOfORmekcWnZ9ga2xDli+QTQEP0KsillScg2sRwk0RetSzHpJBJn90ota3y68/Y/juPCdm1uZByW9Tr3zrGubm0G7/mwR7lzbpJfJtdqc6ofE8KqnG7pQu6ENDZGDSAWPwaqekGtgnUqgKVqnGkQyRI+zH1F/F5Ib92PHO2cwfUsPTA1MbgrN6Krm6xSZKv4yx/fHHXQCc1bllWfc5Ppjhy7jj88OI+pvheXrQzI4gbh/HImQZPesVwk0RetTKi6xG8nIMJLhcdRVdeMxuwctuz7DndtuoDvuIO3cUVk0ikHrkJqqAAcWkM7dRjZ3BxknjUxGX2inTtzGn/8wjmigGXVVHUhFRt1KRdwEWjkcS/TLS6ApWpeyGQAfYdbQoOrdzfx0dq18PNGKlsbjuHmDa5g5pLPzcJzFjaH1YAqUSwjO9zqtigpn2MMCwJlPZvHaC4cQD+9H1NelWlUweJ2f2w52wApIbcz1KoGmaH1KeZq9sDg9r+ZUfQJ2cABWsBlb7Z3Ys+Morl3RFc0ZEJ5eR4XeC6HJpYSF9Ew+TfLYgRv4428PqJYVUZ8OYE+GBxU8rUAXUjXs+cO8cgk5Wo8SaIrWpZhamVCFKZghpJuGEZp2oBtRXyuSm/bi3Tc/xLdfrO9eQnp6rm12mtfBOTyzZQAWc+79o6pYiVq/jfQr75LwTEZGVAuQwmMiWh8SaIrWpQiUeOCAzrEO9aFhI4t59CIRYnm0cdh+XUru1ReH8dHRS0in1+GCpseuX11AS+MJbI42qvXLJGuIBg6qGpnJ8ABSNb1IhHWZN9YXtXzM1V9+XES/vASaonUormOOqQBvVdVHwbJXdV3kuEiFD8IOcI2zF/X+Pfj1llbsb/oM1y4vztFNDKdOrTQ71wtwcux0aXJw7m3892ZzSc20Pf8g/5gy/n5eGBnkcml18XiXM2dnHHxy/DJef2UQVninSg9VVYr87CTJIsz0NlnmjdWe+tRzyeCk+vxyDaxPCTRFD4GWFqNIhkfdKTurJg2g9hFuGHXjb68cwOHJ85i7q8ecBicBuQAHM0rcjMnmMsg6OSykM8gs6B487LeuNpJcQPI+exWpoHQ+7t7ysSyBmv/dBDJTO01wvb5wMgvAhe/S2N98Ek+k9mDThhbYgXsXKVkiVfpNtF4l0BQ9lLL8upgFAcoCxvVVvdi0oRGPxVuw7T8n8emxu5ibdgefghwL/M4ji3kVM0mPM+OwrQZFD5Fi7CchyOcXkMnOIpud0xWInPn8axz1Ov6+tH7O026YfduvXnQw2H0OL/9uCPHIHpVLzigAGdPlIYGm6KGVBueQG99Ir3MI9dXdqmPj7x4dwQf/OYWjU3dw/bKjPL9FY+Myep+EHTeSmM64VDoIfUYpR+Wfm9dhTp6UTU7jmQr5zZdz6N53Fq+/NIFHYx2or+JUfBCpiASql5MEmqKHUsmwLsDLaTrBRHENNBk6DMs3hvoNupjxrxv68K/Xj6Kj+RucOHoD1y4vYOaunmYvGkc3H3Cl1iXpUWrPUg98PrcYCJpeAG5dz+Dbr+5gYvgctv33Q7z02z61q8+/q5YTApNIBI7o8a52yZd/DtHDJ4Gm6KGT18M08FTTdN8oYlVjSIQmlXfHjZX66jbU+ZoQr2nC75/owZuvHcLe7WcwPngZp0/cwYXvsrh+Fbh7G3BWivV0gIU54PZN4OL5NL79cgbHDl1DZ8tZ/OeNo3jptwN4MtmGWGg37PA+WIFOxHy6hQffTyLA/Hnp31NOEmiKHipxGk5YGu+Sj9Hb1M8xKF5vtuhNF72BxAB51ueM+tpR72uBHW7FY1Y3frt1CK+9NIW3/n4EH7x9Es07zmD/3i/RvvdL7G/8Qt3ft+cL7Hn/NP77z2N4/eUxvPDMAB6NdSG1sUv1M4r5Kbbt4M43/xYbxLFH+aDa9Wf8pa3GuASql4sEmqKHTibo3cjAU/XSibCtbacClgaV2wkzMKY8Pss/DMs3oLxBwi4W6IAVbIcV7IAd7ISt/q0r3nd/5mtYpo6QjFb3wfLpSkwMHYoHtDi2GazO98cQKd1Abr/bD2kVu+aih0ICTVH5iGNH9VRnT3C3yRjHlYqHpDQ81WOuF2o6YSr576H8azhOKYLY+3sXwakf55IBx7JpV8z3JNAsFwk0ReWjJVBzpTo2UmY8DWqgKrCa/G4z3lYpBWfKG3fp+VsKnAae/DcyNS8nCTRF5SMFqklXzKgpaHGbF1vialmhflihoSLkepDKo138Pdqz9QBUebT0PM17WeH9ih5KCTRF5aP8lJnA4vjheHI9SiUzbTcZRoOwQsXK3WBS3ioB7P399FzN73fB6Z/S8Cx8r6KHVgJNURnJjBlCzXiU3IShuDFk1jldmPmnYAVHVvAm7yeOVbMu6k69FUDpefLvmDVV1+vMT9ML36voYZVAU1SGMtXPOZaMCqfPehPHDrIgCMvOrV7xIIFZsE667O+ZkKfC9yZ62CXQFIlEoiIk0BSJRKIiJNAUiUSiIiTQFIlEoiIk0BSJRKIiJNAUiUSiIiTQFIlEoiIk0BSJRKIiJNAUiUSiIiTQFIlEoiIk0BSJRKIiJNAUiUSiIiTQFIlEoiIk0BSJRKIiJNAUiUSiIiTQFIlEoiIk0BSJRKIiJNAUiUSiIiTQFIlEoiIk0BSJRKIiJNAUiUSiIiTQFIlEoiIk0BSJRKIiJNAUiUSiIiTQFK1BAx6Zx8w584qPDxa8pvB3Ff7bEcRDI/rxUL8eD2pMrOZv3uvxwuepwt8lEq1OAk1RkeI56kE81IV4qNeF4gjigQnEA5Pu7TjiAYJvMA88KzgMOzgKKzQCOzSifo4FhvTjoVHYoTFYwXFYgUnYwSlYwUFEg22IhdtghTtghbthhboRC/bCCg3CCvHf8veMwgry347B5vswYykw5r4PvidqTL9P9RkIY36GHn1/2WcUie4tgaaoSBGS9NB463qGBKSCFGFF8XH3daFe2KFexAjO0CDssNEArPAA4pFBxCNDsEIDiAUGUe8fQtQ3jCiBGuK/6UcsSA1oBfgYnyM0B7XU6wZge73aPDgJcQPyUfc9G/ATmuJtioqTQFNUpIYR90/qc5j34Pi4e+7ofXoV5G2/AmMs1I96fzfq/V2wwj1IbOxTHmQs1IlYuAt2uAfxmn4kagZghyZgB4/AChxBzH8IVuAA7NAU4uFxWKFhDcqw/vdWuFPJDnW7U3rKC/aVxOe8Swci0eok0BQVKUJzyoXmhP5ZQYrA4pSdohfnTnuVFzqOBIEX5Ovp7XG9chCJcL/yQq1AF2KBLnWfihKqvhEkgkdg+w/D8h1ArHoC0epRxKrNuOBYMX/X/G3euh6kgjYh7kI0D0h3bCmv053OL/uMItG9JdAUFS8FwsL1QQMs7zqn65H6p9R5t/2jSHAd0j+A+qoubHqkBTX/14yNjzSh3rcPdqgTiXAnooE21PyqCeH/rwmbHmlF1NcOO9iNRLgXibC7MZTfHPJ6i1xD9WweeeV9bX7qTi9ZxpmoOAk0RUXKQNLr2dGrG0A8wOddIKnzTGgSmCOI+jtRu6EJtdVNaKjtxHNPjOG1F47gX699hLf//hE+ePskmj74DM3bz2DXe6fxzpsf4p+vjeOvrwzhxWc78WSqEbHI+4hseBd1vj2wAu36vRDe/FuBKdfzNd6jmX4XykBfoClamwSaouJET47nLdKhoGnTgwuMIhmaQCI4CauaIBpFMjKMqK8TtVX7kNzUgj880453/30I/Z3f4NjBy/jqzAyuXgLm7gKZecBJu2MuB2TTQCYNpBeAWzdz+O7sHZz86CKG+r5E085P8dqLo9gaa0Ft1W41rU+GCcFR2P4xWD59mwzrpQDbP4yECmEqHE98zHjLItHqJdAUFafQgJoiW4EeNc22lVc5hVToEDbXHEbMN4hNG1pgRxrxuyfb0bj9FE5+dAOXL05jfs4MqsXhpUcWB5YR6clbDsIMHHW7aATsrWtpfHbiJtqbzuIvz48rKNdVNyLq60YipD3IaNUQEsFxpMKTCpzLx5S7u1/4+USiH5FAU1SUbP8g6jcMoiFySIGSGzSJwBRiviHUbmjHlrpO/P1PYxgbOosb1xaQW6Sja3yAAyyNHOYBzAC469G0e8vnMsjxdTneegelaxlg5lYGJ47exI53juI3m7tRX70P9dXtSDKkyd+P+uo+tY66fNPHXfsUcIqKlEBTVJQ41d1ScwRWNT24cQWjmL8TDbUd+NdrR3Bs6rqaci/aPJzcHLLZLLJZB7kc5XqROUJ1wfUuC0RQ5jjqcur1WYe/hwDNwnH4nBmU2pwF4NsvZtG47QweT7QiGtiJeLhNLyEEuHvO8eRZ71yyQbT8c4pE95JAU1SkeF7GEfMNKFjGI8146beDGBu8gOlbi+fbUV7iHHK4Cyc3ryBHBjpZIJvhIPMMDnctMy9n8bWLzqWZxqfhOLNqIGazC3CyS6fv6Xng0+M38e+/jaOhfheigb1q5129dxN8rz6HQFO0Ngk0RUVqAFagE7FgE55ItqFx+0lcPDeXP88OFtS0O5ObRTa3gKxDL5HeIgcWbxfv0/vkbd4K4WmkjK+dR9aZRTY7o+47DmHsIJ1xFGAd/q0cPVXghxtZDPdewB9/Ow4ruB8xP3fa3awlNbZkei5amwSaFa+Vs2ISoWHYAW709CGhsmv6kWRWT6Adds0H+OPv2jExfAELdPrUcMkiR+8Pd5DFtLqfU/9z2cdd8WxGKadGk1euFcJSwVUD1qyD6rXQtJquZ7nNzt+gZ/HqPagpvzt4uSN/+uNZvPPPjxCvaUTMvw+JUL/awEqqDaMR2AFO1b3FQLwQLZjSqzx1yVWvdAk0K14GFEvhmQhROnc8Ee52A8+7kdzUjLfe6MOZU1f0oHDB5jhcqzRrkmad0uyC593Fn2ArEHUF0+/F81yOu+1ZNO86iidT25GINCLm60IqcBAp/xHEubOuAuZN6qfxPjmVZ/wn89bpnfJYuNlH4p1WtASaFS0ed8Y48lib3HFK7zzT2yRMCUsr2IxEzV7seu8zXDk/i2zG9eY4LeYYyXuDepNnEZiUx5t8kOaO2UXvdPHvztxxMNj1BX6zZR9SkQ5Y1YMq+F55nAqCHHeUSbn0FvwgNOmRuplPAs2KlkCz0mUqACkodOtzEupRwFT53yzlFuxAYuNu7Nn2Ga5f1gODY4SbNWaDRxuf8wJzhSn4gzSPA+rkHDg5vg81b1dvYWEaGO4+j980dMLytyAe6NHT83uONZOj7k7PTYqmQLOiJdCsZKkURBbfmNRQCHchHmamT496LhU+gGSYtS734YP/nMTtm/pcLtnZdqfDnJ4vjhRzv8TmgSbvOI6O8VT3XY4v3AX627/F0w3NSET2IMHx5qdXWRjHaeR9TALiRQLNyhan5So/3IUmYUlwch0zOAwrMAg72IkP3voCN6+6u9Okj2fHe3FH3BDLq9Ka8nzzvOZ/9FIBwcmdesNybl4N93yBxxPbEPU3ewqQFIKzcL1XUi9FAk2RgoA7BQ0ZT0pPQ63gPrzxpw9x6Ts9GNIZhhLdUUHmHBUEpfYwF+H5i5rLar3GyvelByzDk9KZOT1lJzszjOd00N5yDMmNuxHzsTKTOR5m3HkrJrnrnAquZrpeeBxFlSKBZkVLh9FYAUJDF91gznYqMorIr3bh5d8N4ZvPmc7INUIG8izAwYy6/UXWLH/MXGhqdvM/HLAE/LyKHdW7+xqctPnZLN598wjs0H5V05PhSFzLra/q1ZtgCpqecnemhYaMzYqWQLOiNYgGVk8PdCIVmUD9Bl0w2A724DF7HyaGLuoNHzhIZ5ndk0bG0bdLN3x+YQ/TmAvNxR/43gw0GYBP2PM9c5NID/azX2bw0jOjqPfvRqqmB3UbetBQM+7Gb9LLZJiRQFO0KIFmJSs0gGRE18W0/BoKDPxmvcq2vV9gTgWuO8q7zOamFWg4xV304FYDzSUkK6EZaGpwatAvSgXfq0VQYGrkPLbEdqPWtxt2oBepCI+DmZqbAst9eg1YpucVL4Fmhcvy96BhI6up96NhIxuaNeEffzmAG1f0YMjk7iKH23Awi0yW0OSjBpz3A6YZNQZc93rdz20G0l6Z92A8Tx2Az4HOqXx6Pocd7x5Dre9d5W2qqTkLKqvxaFp4eCrSr3AcRZUjgWZFaxgWi/QGx5CqGVFFfX//VAe+/1rnRtKzZEpk2rnllmgDMmo8GBDdby3TCygOnFJA04xU6l5/zwty4zkD3389jeef7samDc3quCRDnthVU6W+IGtKVJkSaFa0RhCrmoTtm1QbIY/azRgd+E6F7WQdB1m1fjmHjDOr8rqzDpDO6lJtxUFT77Y/eOPf0GuWy/7ekh+NB+qoDSIW+eBH6t1/FonIfkSr+zzQZGql622qsSrgrHQJNMtOK1zUaleYF79emzPrlwxsZ13MeGAA8Zo92LvjE8zO6HCdnCrtxuIXZlAAmcxK8Zj3MuPR/dg0/ue0+7y3FR7iA7p4iH7iwncOXn9pHLVVTUiGOU658aPBaavAf7cXUuHxFVWUBJplJW/GijmGA4izn3i4HYlIB5I1vQqaCf9BxH2HYfsIhSa8+eoELp/n7jJLtrGKMKfoDGS/F3BWYz/pHz94cwe2SQNdmAN62z+FHdmhjqHtY7YUPc4BWJEu2BHCc4UvJVFFSaBZ1tIQtYO9qgEZPSU72AfLN6CaoPFcRH1teOk3Qzh9/I460ZkMa2DecaGpd5eXcm+dAnAtxpjOglWGz0/dwAu/6VWtO1SmlOpwOQiLRUtCfbDDMi4rXQLNshWPJTNZtOeZUFk/I6riui5SMYiYvwNPxPdjoP080m6LCt2PZ1a1qNBU8UIzPxLKxnQO/eLnmrkDbH/npKq9qVMrdYUjK9wLiw3lQoXHWVRpEmiWlTxT8nwZM90bPBk4hFTwCBLBKaRqhlHva0Z84y40bvsUt6/r88y2uTzJrI7ONU1lS6Bp1ijLB5y6WwbXanW2ED/i1PA1PJlk7GqPe1wHYbF4MUvmCTQrXgLNchKPoQq+ZmA2p+OsWNQPyzeG2IbDSPiOwfZPwQ51IRbajjdeHcWF73SapMr8UR7XAjLZe3mZegCUEzQX64AuqIZttHPfZPCXFyZQ7291vfUhWKFBxOidS5WjipdAs5yk0vxYVJfQ7NDQDPbDDkwiGTiOhP8YYtUjqPc14tknWnD65FV1bkyXyHy2TI7Ny/RgWIQmTacklg80zReB/tymfcbsNPDuv46iPrATCW6iEZqBYYGmSEmgWU7yQpPHVh1fTs8nEfextcNBVZxjS6wZI31nPTBcBMeS6fcSYC5CtZygyU6ZKjtISXua87PAYPdZbIk26gLMoRFEfcNI1IwiGuhz14RXOP6iipBAs5yUrwvJMCNWYWdAdr/K+LH8o6pRWnJjGxq3ncL0bXNmeLJXACZtGTQNXMsHmjonnRWQdFoljU72iWPX8OwTbYgF9iFOaPpHEA+PqnXNZcddVFESaJalOD1fbBSWCA8iGelFvW8P/vbyJL7/huuSPK+6g6QGIU/6Sh6mMT5HeQfHw278HEuXI0xJ0AvnpvHaHwfUUoaamgcmYAVHYIeXN6ETVZYEmmUlE9xuLmxd3swKdSAW2oPnnu7CiQ9vqWDuDHMi88AsgOUyaJoRUC6wNMbPk1HANIlOZin31s0F/Oef46hTlY/YJ+kgYmpdk4U7xNusZAk0y0am/iOPH392WzOE+hH1N6GhficGe76Du9eBDPuG56Zdz3EFYKrzb858OXmXS02ljKrucEuhOTPjYPcHR2GHtacZDx2EFSQ0uTEk0KxkCTTXtVYzDXQ9yjw03dYNbvgRC3FYoUZsf+c47vzgrtnlHKSdO6rsmzIDSTMDXwJNnnTKE4JURqajBtyP53Gm02mgs+0zbIm2IVrNRIApWCFuBAk0K10CzXUrk9FDIPL4uFXDFQzpRRKS7mtc2cF+JEPMmR5EIjACy9eLuupdePWFPlw6x9hLGtcx6WWymrkLjPsaB4PrfpWjebxMbytiepyDPV9ja6xVFWZmUgCzg3RrEIFmJUuguW7lVg3npg6n2cyBZrtdhg+pAHZv4y+3+VdgAFsiEwqaqfAgrEAzntnaio+PXFPnQLd4IDy5+cG5aOFZqkAz3nPei3aXIxxgbOAbbI22qNz9ZHACdmBY5e6vbgYgKlcJNNet3B1w5dXo3j0KnCoOk8fGu+lDDcP2DSEZGFXAjPla8Wi0GZ3NX8HRm+XuWXTDiwSa2u4FTQAHR7/Do9Y+lU6ZYO8ktbapM4RElSuB5rpV4fTcxGAWHhvedwtL+EaR8LM4Rwfs8E5se+s4bl3xVCpS/+HJFVrm7T7QPHbgHB6P70fM153/skqokKPCcyWqJAk017XMNND1KvMQdZ9XIOVaJz1QZv2MIhUaRM3/bcOrLwzh/Lf0KBfPJVuUu23KvZSobLsPNI8fvoDH4+2IVncteviF50BUcRJormuZY2D6b1M8Pq63wyyV/LR9HLafu7xtePbRbhyZuKJOnOOwgg/PnqOAubhDzGyYggygSrQioJlQHr2saVa6BJrrVmY6znYV3Ohxm3t51jnZx8YOMD1yRF3QdqALm+v2oX//OWRYQziXU7vk6TTjMRmP6IWDLodm2llUrP0INB+z2TOoCwmBpsiVQHPditB0e2wTlDxWIUrHYRKUm2sOqNYVVoBQ7UY0sBsfvPUJbl7Wx5y75RlnGsjNLJ5IDzQ1HMyJrlC7DzQ/PnpRQVOtafrHVOEOvXteeK5ElSSB5roV4zG5jkZPk9Ny03+7HykWjvANw6oeQoLHLNyOWHAX/vTcAD4/wc5ogJPJIaPSfxhi5Pb74RNLGFnhwKQJNEVFSqC5bmWgyXhMQpNepq7tmGDMoJ/PDyG1sQfR4A789vFWHJq4CBYgV/HaSo4qfcZgdn3yKnz9ciUTaIqKlEBz3cpMzw00Td9tPs4gd93wKxZkXvk27G8+hTnOwlnsbCGTz27JZlmMgj+YdEgPOMXRFGiKipZAc93KC02WeHNzngMTSAYPqeyg+upupOqa8c6bh3DpAqfhWTjMJ88twGEVoyWpgTypjHL3tKsQx1OgKSpaAs11K35+t6Cw2vxhmiSPE8OLDqipe8zfjpefG8Hnp+YUHLPODHL4ATk2RuMJYwm4BQNOnkVO0yl9ogWaAk1R8RJorksNqyIRBGaCDb18fUiGx5AMsVc5Q4yGUFfdgieTbRgfvqg6KmadjKo+rquQ80Tpc8hzqQvr8j88sZTQcpmZ8e6B5vEPL+Kx+H5E/d2wAmOwwyOwBJoVL4HmOpXuQ9OPVGQUDRF6l3rzJ6GafLUjXrMHe7efxCxn44y2zLHtru4sKbYG80DTxK4KNEUrSaC5TpUIDSPm64ftH0FD+CCiVTrYPRHuxcYN2/Cvvx7Ajcvao1T1MVXbXdfDFCveBJqiVUqguU5FaKpSZL4xxP2TsPzjSIYHUVu1B88+3o6vP9cFhDk1T2eyyGQzCp5iazSBpmiVEmiuUzHTh7GaiSDXMVnLcRT11W3YHG3C1OgldUwXMhmks8wpzyHrsB1t4VEXW7UJNEWrlEBznYpT80RwVB0vrmVa/j7Y4Ra07j6DhTlOyXNYyEwjk5tTXuZCWp88sTWaQFO0Sgk017GSIaZL8v4gov59ePPVw7h5Ra9bshBHNvcDHMwg66SVl2naz4qtwQSaolVKoLlOxTVNFuJIhPpRV92E554cwumPTQl2XtiMybzt3vJnsZ9kAk3RKiXQXLcaUDvldmgfNtfvxVj/RWQZqK5qbmRcWFIL6vwINH+iCTRFq5RAc92K5d46kKjZjeYdn+GH6/o4ZnJpOAqUFDtLai9ToPkTTaApWqUEmutUVqAbsUAT3nz9MC58r09MFhlklXfJ4sH8nz43As2fwQSaolVKoLkOxTTJmL8LL/56Ap8em8XCPM9BGtncTbX5oz1MnVO+2LabZ0jiNNdsAk3RKiXQLJmYS75ymwSmTDLHnK+xg/2I+nqwNdqN4e4rcFhHOMfd8lmkc9fh4M49oMmTpk+g2BpMoClapQSaJZH5XN6e2foz6nTJXiTCug9Qva9NrWXuef9z3LrmHrxcDo6iZxqOamLuepRL5uVLfhAr1gSaolVKoFkSsSYmO0oSmt4WsMOwfIPYXDOOTY/sR7KmC3a4CX996Qi+PmPCi3QhYYqWk2DMB2MCTdEqJdAsidzPx/uqoLDpKsne5WNIhSeRCA0hFmzBb7a24+SH03DUuWDHyOUSewAm0BStUgLNkogViib1LSuwhzsQD7N9xaDKLY9W6c+eqm1Bb/s3qnAwjdXXjYcp9oBNoClapQSaJZEXmvQ03R7m3ATyjyJWPYSofz+2/ecEZu7otUnHLfMmHmaJTKApWqUEmiURPx9bV/AzcX1TV2Xnc3ZgAHaoA3/5wxQufKc6oyEDFhRm2119EnRzNH3fcSSs6IGYQFO0Sgk0SyAVTqQ2gRhaNAbLN4pUZFJ93vrqZvx6azuOH7mhjhNrYjq460JTA9LrZQo0H5AJNEWrlECzJOpHItyFVGQQqfAUYtUTSIQmEfN3IlW3E+2tp5Bhv3KwTzmzfdirnAdbpuQlM4GmaJUSaJZCIRbe6IAV6EUiyBa8B1FX1YNYcA/ee+sgbt3k0WVa5DyymEM2p4PXxUpoAk3RKiXQLIVCg6piUbS6R7WBTYWHEQ0049UXR3D2a72OmXamVdWidHZWVWGXfZ8Sm0BTtEoJNEuiESRDum82P29d9W4881gbjh++qo4Np+IZZxrZ3AyyuQyyDvv+FB5BsQdqAk3RKiXQLIHsAJujHVRTc/Yr3xLbg47WM5jTvdGQUSmS7PfDqbnu9UNwipXQBJqiVUqguSZxJ1yHDOn3qcOJmEeeUOFE/bADFHfLdYxmKvghLF8/rNAOvP+fg7h+VbuS7PVDaDq5LLLcOc8BmSwvXLGSmkBTtEoJNIsW32OPJw1yXAeuB8aQCA/DDvYgEe5Wt5Z/QO2WJ4MHkAqOoXbDbvzpuW58/fm0e1R0EY7l1Yn4s7iaJTWBpmiVEmgWLRbbYEUit2IR37cCJ9vtsg4mM3760FAzrKAZ8w0hFR6H5W/HU8k2HBq7osKL9BGdd6Hp1nfLGw+09ySIPXATaIpWKYHmz6hEiEU52EGS0/QRle0T8/egrroVyY2N6Gm9gAXXydQXpoGme7zzF65As+Qm0BStUgLNosX3Ss9yzE2JpNfJqfogYr5hpIKHkPAfVK9pqBmBHWqHFd6Bt9+Ywh23z48qHqxaVhCa7jRcoPnLmkBTtEoJNIvWiH7/gQl3fZPFNzrVdN2qHkVD6CMkA8cQ948jFuhAre8DvPK8u46ZYxokjwbjMOeRy7nljAwwBZq/nAk0RauUQLNY8X36DunNH75XfgaWeuN9fjbfEUQfOYBkmNBkXnkrDoxdyB9PHtysw7xy5k1mdF65QPOXN4GmaJUSaBYrvk//CtAM9iEZnoRVfQDRqnFYgR5sjjahdfenmJ/jETAbP3PI5Vxo8jEvMD0XrkCzxCbQFK1SAs1ipaA5pafn3EFnMWF+jlAfbP+wCjFi6FGdbzf+/beDuHTe3ehRwOQuENMmeZ8HcyUvk8ajLcAsqQk0RauUQLNo8b2O6fqY6v0yxIjSAe0NNQPYuGEXnnu6B1+c0ik/ukM53U3+zFsXmF5b8uMyioo9aBNoilYpgWbRcosIq5a7uu2uac+bqulHvW8vtlqNmBq9pA4cM3x0FXZu+lArTbtXdDfFSmkCTdEqJdAsWmbHnO0qBtzgdr73IcQCbYiFd6K96UsszOidcqZHZtTGDw/qSuFFNB5Ys/kj9ouYQFO0Sgk0i5Xa/Nnvbv4M6rXNwBTswBDqfE14629HcfWiXqtcyDhqpzyb45S8YP3Sc5HqA2tSKsXb/EVMoClapQSaqtgGZX5e7Em+9DlOwQnMbiTC7bCD3Yj7uSnEvPNxxHz78cJvevHp8dvq87IKOw9eOj2/2FFyRWjyDp/nwXU9UbHSm0BTtEpVODTdv0upv2fWKHnL6kTc8GHmD58jMLtUBfZEqFvlmdvVY2gIHkTt/7XjCbsVE4PnMTfLIzUHJ3dHB69zir7Cvs9SW0JRsV/CBJqiVUqgmYcmp97u31fvgVPvxWIci9WNupEM9StopoKjSAYHEfU3Ye/7Z3D3B33QWIE94/wAh3UyzcETJq5vE2iKVimB5hJoEpgEI8VNHnqbhCbFaTrrYw6hITKMWHU3GmrYwqIR/371GC5/rz+nTvDRO+W5nKPyzAWYD4EJNEWrVIVDk8HqnIKP6/sq3pI745R5X3ye65bc8NHwTAaGkAz3orZqB55/qhuffeyWYFe55cwr16TkrZMtLPsmti5NoClapQSa+XVLxl/2uGmRzPDpcZ93iwwzC8g/pXqWx6p7sWVTF56IN2G8/zyyC9rDzJtbmMMLULF1bgJN0Sol0FwCze4VoDkG2z+BRJDQ1Dvltr8LVnAH9vzvBGZ+0J/PcVh8QxfgICed/DF0kMtJKNG6N4GmaJWqcGh61zTNRo87PQ/2IhkeQax6CLHqEWyuOYho1bAqLJwIt+AvfxjBhW9VJQ44DtcwTU65e+zyFyEP5o9un4v90ibQFK1SAk212cNNHv5tk0dOYOrnLT+rsI/B8rEKey+sYBuef6oXJ47egTpOKrN8Fk6O8ZkFQezKBJoPhQk0RatUhUPTK5NDrjtNMsPHVjBl2woW4+hEsqYDW+1mDHZ+B4dOpYJjFo4zjXTmpptb7gao5y/C/NETW88m0BStUgJNJQNM05Z3BJZvBMkQd8yHYAU6YQX3IlW7B9vfOY7bN7Q3qaqw82Dl5pF17qpq7ALIh9QEmqJVSqC5BJjMBOJ74Y75FBLBSdVRMhHpRDS0A3/+wzDOf6vXLVXFdR4S1VqS1dgXkM1yes6DJ+B86EygKVqlBJqcjruN0fLvwz+JROAgYtWjam2T5d6eTLXi+KE77oHIIat6/KThOI4KLeKtPnA8SJ4DqKbwBQdDbP3ZPaHZ5kJz3IWm27pZVLFKBMZcaH64Cmjy8bKCpo7NTLAIR6gf0eoB1ecnFTqEWBVDjYYQD7fDiryPjpZPkXWzImlOLu0eKBOPmX9GKPnQGM+Tp7qUOm08f3qm8PHRC3gs3oqYvxM2w9JCY7DzBV1EFanACBK+SdRtaMcbfzqA2zd0ZwZVoCd/2Xs9JX2/rKBpBzuVUhHmmuu0yVT4EOLBMSQjfajzb8e7/57E3Tv0JPlJBIrlYzyXrHVaGPWgz+/HH57HY/EWBU2OT0ZRCDQrXBwHvkOoe6QNb/x5GLdv6o6y+WGTR4P75es+VlbQTIT593pUTnkyPAHLRw9zFKmaYdRW7cZLz/bi2sXFA7PoUYo9/MZzaSrq3wuazYj5OtUMJBGcgB0oxbgUrVspaB5eBTS5TOeGGpYbNNnbJxUZUrvlzC9viBxEKjKCqL8Zjyda8OlHP+Sdy3TWQTrDNS+x8jCeSU6vMosD3nNyBZqiZXKhWb9hP/7xlxHc+cGFphk3eXqaZR+91FNG0BxCtLoXm2uYGql3zFORKUR97Sq8qL/ja7WOmc3oXj/zaVZiF2SWj/Fc0hsoaKXs2sdHC6E56cbulmZsitah3Ol5tGo//vnqGKZvmTVN7/ghKM0MpgyhyZCiVGRS5ZezMEfthi7U+/dg238/xs1reh2TOT8L6TQWFjJgEXaZoZeTucA0+z8rQrMLcdYfCByArVJuSzM2RetQCppMqW7DP18dwfQP94OmadXtlBc0mfkTD7Jy0TCSoVFE/fvw5+fH8NUZ5pLzGGSQyc2o3fL5hSyyLPUmVkbmrmWuAM0TH57Ho3YT6qs7kGDcrkBTFBiF7ZtEfVUz/vP3Cdy9QyjeD5p6il5W0KQSoREkwoOIBfbjma19mBq56nrV9DHnkMM0ckjrYyLMLC8zA30FaJ46fhmPJfZi04Z9SIan1Ni1/aUdm6L1phHYvlFs/NUuNO88icy8HjBqRpofP2UOTVYysgJ9qhDH5mgzOlvOYnZaHwDGXmloziqPkwgVZpaZeaG5xFMAvvrsBp5/ugv1vjYVgsbNQj0zEVWuhpEMjmDThh3obPoUOe8eR3788D+EJcGpd9DLCpos9cZmadHgdvz3zcO4elFfMPrzE5qEJcX7As2ys0Joqjs6aeHSuVn87ZVxRP2tiAeGkQgyVrM041K0XsVxMIBYYDtG+s7o+rnGxcxDk8YxtFhHt4ygOQgr0IO66j340/ND+OrMtHqv3CHXkFw8DhqYWQVQ44mIlYEtPcmewQ7cvgG899Zx1TjP8verWQnjeZePI1HlaBCx6g48EW/BJ8cuqGm5w66zy6BJRiyWhCwjaA4h5u/GE4keTI3cUFWLCEsHczq3nB+Zj+UjUuhxMoNEeyJiZWDLoElgMkPIQWYB6Gz+BsmN7Yj5elU2kOXn+Fw+jkQVosAAah9pxqvPT+LqeV28xzHVzZZAk3dc5+onBbc/QmiyIAahOeJWSWexDL4h3e1RVxtaKzT57wvT3Ap/z+JrLH8vEpH92N94DndZQ1h9zHlkc9NwVDdJDzTVFwk3g7irLtAsHyucWtE7MNWqgCMT1/HMlgHEw7r9iR1YaYwVjjfP+JVg+HWue51Pl0XKkXNLRqoY3X6VKbjtraN6E4j/V21usnp9Mw9N19xxtSZojg1+htCv3oMdHEAyyF47DN3o04NReZfum1KPF36A1Uhn9+jf5QEvQwQC3CHXrSr4mkS4H1Fft1qr+ufrI7h+RVcl0eFEWWQy9CbdT7/s20OHGIiVg5nz6X4J5s/z4mPXLi3gr6/0Ierfowq4pIIH9XjLj1m2SzFtntlvym2fYh53+0otH6+iX15khtutQbGC55Dx2mOq8Hiqphd2qB1WsBMNNWOof2QUMV8fGur/h6NT5+C4CT+qJ9i9kl5+CjTHh04hvOG/SIR73DqVbGbWj3i4u+BNmwG2Ev1/TMZTNcWEKcKTRYXZtmIEMV+3KtDBeMw//HoEX37Giuv80IzB1BdKNpOVHPOKsBWgqU47F/d1NgczwtqbjyNR8wHigUHYVcwKMuUEPd1K3YttiafJx1QXUz4vHuf6k9tMkeJMl+eJ54vnLcg6ut1IRNoVL5Jh7pofQt2GDrz0u2ZcvjCtgWmWLd1xo2cuntg192aN0PwENVXvIBHuVdCM+egBum1zl0CTA8/9QMs+5I/JDFh6lPwG4ZRqQHuw/gNIhrgsMIg6XxMeT+zHodEb6kOxFiaBKaCsNOP5JjAX1560MRNsIV9X86vTd/C7x9thBzqQDPJL3UzZOGbdbqYKihyz9ECpfv2Ygql4mutTXk/TdKY1M4MR1ROMDLGDPYhWdyEVGYMV3Ie2puNIzxEcOsXaO27yabk/BzQPjJ9BNPQ/WIF2tRkUq3bhqN40B5kuy6an5/daZ/gRmWmRKizMVrwd6vfb/jEkg0cQ9x9S7rVd04i9Oz7R/cp52bjANPAUqyQznsHSx/T6tV6Kmb2Tw853jqPevwMNNf1IhNyxmV9Octfj+SUd7tIbnJxBqYLF7ianWeMUrTPxHFE8pzxHZMgYEkGWiJxCIjSqE1/8nair3ocXfj2Kr86wtc3i1Fw7WwaYPyM0P/2YVbD3oq6qFZZvVJVgS/BNEphci1wCTb32WDQ48z3MuXDvDt5gn6pOY1VNqb9bu6EVf3tlAjevMnwot6QAB4GpK7BrgIpVgq00u3Dg5OZ0KAmfzgGnPrqOpzc3q7XNxS958yXNi41LTRxz7a463ZmO+2Uu0FynMufFs6zHNU3/FFLho7B9nKoPwQruR6KmCW27v8HCbE6vY7rbG9wIWgTmzwjNS+fn8eKzPdhUtccdcLppmc2pzIrQ5MAsEppK/Mbn73SnSCoYdQKWfwR1Ve14/qkhnP74B/We0tkFZB1WYM/lgUnTAasrXUxi5W/GY2DImWk5CszfBVp3nYQd2QYr0OF6JJSpeuSujykvk9Ds0tP0vDcq0Fx/8s4CyAyzVDii6wz42MFhAlagH9EAY7lH8dVptrnRGz9684ezVM5KtH5WaM7PAn//8yA2Ve3QAcLqzRKanJ6T8O5uowpFMtArBpqDsIKcHnGjpw+Wf0jBknBmvrAVbMejditG+r5T7yfDjR9nzv2WWDTxMivdDDTTKv6O2R4m4eP7r2/j5d93IepvUdWxeLGlwuNqrDEyIxHmlz3ByVA6epnsBmBmPwLN9adhVaiHX2ypCM8dZ6bdOsqGPaF8U0iGJmGHurDVasZg93fKy9Qg1FNyA0sFztzPDE1ae+sniIV2qIVVTs25I5WfhqvBZaBpFmeLgya/5e3wfiRCA8qttqr15k8s0IV4zQ407jiOWV28CFnGVnmKhIqJadPeAwd/Jssv1SycLNQuOp/68MAVPJnoQl3VPqRqGOyuNxo3b/RGfbhf+LIRtM6lN58tFmEJDahW3YlwF1I1jOEeVCFmXMvktHzb2ydw86qXFXqMrCzP69YKTTPTPf/dAp5saEZtVbP6VrYDvW67CQ68nw7NZA29gFYk2PvHP4XoI5NIhsaUa/2P14dw8fxd9T6y7CKpXGqZgosVmt4YIiyzWSY46JqqGXdC4qgsobNI1TYjGtirpuqcvnHDwPK5F6ISp+Xe3djC8Sr65UXHjZWrRlS2F+O3bTcEKVXDzeR21Pu3qz2Qs1/O55NcFseJibwo1HIrGprGXWWL8Hf/dQTxyD71xkh2HSdFb5PTcy66rh2a5gOrYPbgBBKsTBNow++f6sSpEzf1WoTK+JlR4SQrBfCLVbLpKZd3emXWrpT/mdUXxPQtYOf/TiAaegepTa0qCLq+iqF0ns0hJdcRcJeiROtPMR+LkI8hFWExliFYgW5VwKdh037U+d/DH3/fg9Mn7iCjMyZVAszibjlvC7WyrQGajHnTf/XzT2bxh6fHUFvVBJtrCCqVkt7mT4UmNawOAN3qLbVjqKtuweb6PRgbuKjjqZhPnGOZN4Izjaxs9ogtMXMxLKbPcnk7kzEXSAY5d7371vUMPnjnEOyN/4MdakGS65lmY2HJBlHhGBWtJzFWfPPGCdRXDSDmG0QqMoxYsA21vvfwh9/ux8cfXnHZAWS4WawWuIu3oqHJmpQZcMfaQXYW6Gq+hq3RPtT79iGxoqdpdrGKgyara1tVBxCtYr/yDsQ37sS2/x7GjMkr51RLLfCnkXF4K9AUM+b1MqHWMVVbe85OsjlkMpyqMyedu+puiuWVNLa9/SESNY2qr5QehyZukzHIJslCinysV3FNmtWrolXc1GOK7DA2bdiL557qxYkPr6svzqwaCA7m0jPIcH3GDJeVtMz0E0VDk56mo6qf8x0At68A7//rC0QDO2GFmt1A4GHVvIrTGeaJqwBilUtOoPJbfDHgfcXyXIEhJAOHEPcfge0fRM0jH+Dvfx7B5fMc6LoxGiHp5LIq1Eh5nVkdbiQm5vUyzY/ZjI7H431VlEEBcwbZ3B04btTFzO0c9u3+Aluj+2AFKIYaLR+ztkq4MHURCmVeV/i4qCipL6lCZpAPrDuhb1WXBsUXk8FFaLIb7QAsXy82VTXjT88dxJlPZvPVzTKq4pmO23XchAfvOMnfrogS/UW8Bmjqr21Fbf7NHHD+2wW8+foI7Mh/YQV3IxXpQ5yplVUHkfIfQyIwjmQNcz87YAe7YAcYpM4Pzm9xfnD321wt4OpBlwyOIe7jt0cr/vL8CM6c1PGY2viJ9I6XzvTgrWT/iN3HllwEBqqcoTAEYyGfPZaeBaZGzuGlZ7tgh7ejrqoR8UAfGkJTqt2r7RtX6+12hFEcPUpWqAexYC+igV5YvMgjg+rnen83ogH9nBXqE61avYhHupGs6USCxzmfQj2sN3r85AU7itIp0+zgBl6cm3jBHtRu2IMt9Y3Y+e6H+P6bWffc83ybthXU2nlRNDRVWTUVMK6nPWb8XfxuDu+8OYEt0R2IBXapGCnm9iaqDyJWxR0tnfepCiQQlMFxt0LSJGLV/HYYdD3SPtjBblj+dliBJrzx8mF8e2bek1a8CEx9a55Y8atBTOw+xmwh3Z7VcTI6wJn/zzJH/RZ2/+9jPJVsVeXDLH83EqpizjDscA8spV7Egn2IBQZhhbh+NgI7NIZ4ZBwW850Dw+pxOzQCS1SU6OHbZmlPpbq6S36BSVXvQsVcBkYRre5DtNrNKfe1IB5uxEu/GcRY//f5DR8dq83zzIpnnK263t4arWhoLkLLDd9Iu9MeADevpNHe9DmefWwfrNAOxPzNSIZ7kHQD4NU3hGpoNYFY1Tis6gk0RA4i5uMirq6SxLXRWKAFT6c60bz9DK58n1afMT+1WgLLe/rRYmKrMC7xOAqY7o+qRJha9gJw9yZwZPwa3v7bYTxuNyMWoEPQpGKFo0y6UEkYGpQWC9fQAfCz6teUulX3A5Owg1OwuEYvWrVsBqSzxa7yKFmt6ADifNw/ofo7sdssY7hj/g6157GlvhMv/24IHU2f48I3s2BsOs8jT61OejG9y90g3Z+AjjVAk7BkdoXuA6xCONzdSdrsHeDkkZv47xtTeDLViMTGbbCCTbD9/EboU7vhjIGjZ8l1i02PtCHm34fkRoJ2J7bEmvGv1z/EhwduYNbd9FGD2WF+OT8wZYApJvYTzZ0xpdOE5+JYTvP6cofZ9K0cPjp4Be+/PY7nnmrDlnpdC6Guug111ftVxwC20LDoWTKI2qfFQGvKDrCJm6gYqWPnY8IBjyXbUnBHvBcxf5fKCIzyyyu0G0+m9uPffz2GnrYLOPf1nK6LydNGYDKkSE2HDTc8weq/BDQdpi16yM2BxpYCyrLAtQsZfHToElp3H8efnx/EU8lebK5rV7FwdmgvrNBuNNTtxaP2XgXXl5/rwvZ3juLA6EXcvLoYdMkNJ5Ui6brWLL6w5JviJ3x4MTGzxOQNdtbptwWBv9z0vOXgy9O30dt2FjvePo0/Pz+OX2/pwNZYK1KbWtTYTmxsURuialM00op4pEUpUdMqKkJJpX1IRFqR3NiMzXWteNRqw1OpNrz421689fcptLd8hmOHr+HqxZyGZS6HdCaNhQVuCjOhYV5nguUdraWbg2vlxtqgmSe3zunVHifj3nKL65yuzU0DZ7+cVt/UI73fo6v1SzTtOIG92z9EZ8snGBv4EscOfYuzX9/CvJsWqf6KCjzVu5wZZxq5HDOA5lWIkbJlwFzjERCrWCMkza66AaYuYM01zsULjRdg4fiauQOcP7uA0yev49DkOQz1fIX25tNo2nkSuz/4GLu3fYzG7Sewx72vHhOtWo1KJ7D3g4+xb/cp9HV8hYmhb/DRoe/w7Zc/4ObVTL4ykTYH8wt3kHVmFJOUnAWdLWjWW7xWWmjq7o6a2mZtkdVB3AFm9mRWeFN8SXoemL1L6WZXha9Rr8tH6fOocPCa9Qj3wy/7/ea9rPDLxMR+xJZ6mRxHOiLDTOn0mph+gdoIvcc445R+bhaqJsIMx7h7m9e059Z7X55f+fk7wOx0DgvcAF+Be/q65zni7JMeF2eis64jRybp0pDLbRlAirI1QLPQvG/gXrvY5rl7PV9o3g/k/bcFfy7/q8y6xYpHVkzsPlY4fgtVaJxp6VJzuqOpruUqVgoz58g4a7zmCUhCk8t37izU+/JlrKCZ3+FZ4yzC1g7NosYJX+x5k4UfZqXxWvi891cteZz/MQdPoClWrHkvQu/gK7Al483E+5nNhRVeL/YTzUDBc7EXXvvFKm+/FDSLsoJ37/2xEJaFWvKBVzhwysTTFFuLcQCZi8eAc8nVtXy8qafNRVcA2IJ/KvYTTB3LFa53o0JOeFmxkvK/1PsLVjjfq7A1QrPwXa7CCj9EMVL/8X4zqAfzN4vP5x8QE1ulFV55VJG2bLwWPiFWtBUe00IVnrL7Hn/zIvNF532+eFsDNPlHzbTEaBWDbcmHNh/EfLsbIBoxVdOEfPB1nA5xoVcv9i4B5No+t5hYEbbSVXq/8W7Gtoky8XqyolXJXP9LYOiFH3Wv8+E9/t6gdp4H1/K/s3j7ZaCZ/1D8t2ZgmQ/nidpXxtfyMbPY64k6FhN74LbSF7wZ74Vj0Axwc8F65b1eRD8qU2FDydzhMV/htXmtdPy9wPQwKs+i4u3/B/JpZFRImZggAAAAAElFTkSuQmCC" width="30" height="30" style="flex-shrink:0;display:block" alt="Humanova">
-        <div style="line-height:1.15;min-width:0"><div class="sb-logo-text">Humanova</div><div style="font-size:10px;color:var(--text2);font-weight:500;margin-top:1px">LabTrack</div></div>
+        <div style="line-height:1.15;min-width:0"><div class="sb-logo-text">Humanova</div><div style="font-size:10px;color:var(--text2);font-weight:500;margin-top:1px">LabTrack${labProfiles.length>1&&_getActiveLab()?` · <span style="color:var(--blue)">${escH(_getActiveLab().name)}</span>`:''}</div></div>
         <span class="sb-role-badge ${currentUser.role==='supervisor'?'sup':currentUser.role==='staff'?'stf':'ana'}">${currentUser.role==='supervisor'?'Sup.':currentUser.role==='reviewer'?'Rev.':currentUser.role==='staff'?'Pers.':currentUser.role==='sampler'?'Muest.':'Ana.'}</span>
       </div>
       <div class="sb-nav">${navs.map(n=>`<div class="nav-item${currentView===n.id?' active':''}" onclick="setView('${n.id}')"><span class="ni">${n.icon}</span>${n.label}${n.badge?`<span class="nbadge ${n.bc||''}">${n.badge}</span>`:''}</div>`).join('')}</div>
@@ -6965,6 +7210,53 @@ function renderAdmin(){
     +'</div>'
     +'</div>'
 
+    // ── Laboratorios ──
+    +(function(){
+      var labHtml='<div style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px">';
+      labHtml+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">'
+        +'<div><div style="font-weight:700;margin-bottom:2px">🏭 Laboratorios</div>'
+        +'<div style="font-size:12px;color:var(--text2)">Cada laboratorio usa sus propios datos y credenciales de GitHub.</div></div>'
+        +'<button class="btn pri sm" onclick="adminAddLab()" style="white-space:nowrap">+ Agregar laboratorio</button>'
+        +'</div>';
+      if(labProfiles.length===0){
+        labHtml+='<div style="font-size:12px;color:var(--text3);padding:10px 0">No hay laboratorios configurados.</div>';
+      } else {
+        labHtml+=labProfiles.map(function(l){
+          var _isAct=l.id===activeLabId;
+          var _gistShort=l.gistId?l.gistId.slice(0,12)+'…':'—';
+          return '<div id="labrow-'+l.id+'" style="border:2px solid '+(_isAct?'var(--blue)':'var(--border)')+';border-radius:var(--radius-lg);padding:12px;margin-bottom:10px;background:'+(_isAct?'var(--blue-bg)':'var(--bg)')+';">'
+            // Header
+            +'<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">'
+            +'<div style="display:flex;align-items:center;gap:8px">'
+            +'<span style="font-size:18px">🏭</span>'
+            +'<div><div style="font-weight:700;font-size:14px">'+escH(l.name)+(l.id===activeLabId?' <span style="font-size:11px;font-weight:500;color:var(--blue-text)">(activo)</span>':'')+'</div>'
+            +'<div style="font-size:11px;color:var(--text3);font-family:var(--mono)">Gist: '+escH(_gistShort)+'</div></div></div>'
+            +'<div style="display:flex;gap:5px;flex-shrink:0">'
+            +(l.id!==activeLabId?'<button class="btn sm" onclick="adminSwitchLab(\''+l.id+'\')">Activar</button>':'')
+            +'<button class="btn sm" onclick="adminEditLabToggle(\''+l.id+'\')">Editar</button>'
+            +'<button class="btn dan sm" onclick="doLabReset(\''+l.id+'\')" title="Borrar todos los datos de este laboratorio" style="white-space:nowrap">🗑 Borrar datos</button>'
+            +(labProfiles.length>1?'<button class="btn dan sm" onclick="deleteLabProfile(\''+l.id+'\')">✕</button>':'')
+            +'</div></div>'
+            // Edit form (hidden by default)
+            +'<div id="labedit-'+l.id+'" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">'
+            +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">'
+            +'<div class="frow" style="margin-bottom:0"><label>Nombre del laboratorio</label><input type="text" id="labname-'+l.id+'" value="'+escH(l.name)+'" placeholder="Planta C"></div>'
+            +'<div class="frow" style="margin-bottom:0"><label>Gist ID</label><input type="text" id="labgist-'+l.id+'" value="'+escH(l.gistId||'')+'" placeholder="Identificador del Gist" style="font-family:var(--mono);font-size:12px"></div>'
+            +'</div>'
+            +'<div class="frow" style="margin-bottom:10px"><label>Token de GitHub</label><input type="password" id="labtoken-'+l.id+'" value="'+escH(l.token||'')+'" placeholder="ghp_xxxxxxxxx" autocomplete="off" style="font-family:var(--mono);font-size:12px"></div>'
+            +'<div style="display:flex;gap:6px">'
+            +'<button class="btn pri sm" onclick="adminSaveLabEdit(\''+l.id+'\')">Guardar cambios</button>'
+            +'<button class="btn sm" onclick="adminEditLabToggle(\''+l.id+'\')">Cancelar</button>'
+            +'</div>'
+            +'<div id="labedit-msg-'+l.id+'" style="font-size:11px;min-height:14px;margin-top:6px;color:var(--green)"></div>'
+            +'</div>'
+            +'</div>';
+        }).join('');
+      }
+      labHtml+='</div>';
+      return labHtml;
+    })()
+
     +'<div style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px">'
     +'<div style="font-weight:700;margin-bottom:4px">📖 Guía de usuario</div>'
     +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">URL que aparece como enlace en la pantalla de login. Puede ser una ruta local o una URL web.</div>'
@@ -7073,6 +7365,67 @@ function addUser(){
   document.getElementById('nu-name').value='';
   document.getElementById('nu-pwd').value='';
   setTimeout(()=>{const m=document.getElementById('new-user-msg');if(m)m.textContent='';render();},1500);
+}
+
+function doLabReset(labId){
+  if(!isSupRole()){alert('Acceso restringido.');return;}
+  var lab=labProfiles.find(function(l){return l.id===labId;});
+  if(!lab)return;
+  var isActive=labId===activeLabId;
+  var overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.55);z-index:9998;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box';
+  overlay.innerHTML='<div style="background:var(--surface);border-radius:var(--radius-lg);padding:24px;max-width:420px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.35);box-sizing:border-box">'
+    +'<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">'
+    +'<div style="width:40px;height:40px;background:var(--red-bg);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0">🗑</div>'
+    +'<h3 style="margin:0;font-size:15px;color:var(--red)">Borrar datos — '+escH(lab.name)+'</h3></div>'
+    +'<p style="font-size:13px;margin:0 0 8px;font-weight:600">Se eliminarán TODOS los datos del laboratorio:</p>'
+    +'<ul style="font-size:12px;color:var(--text2);margin:0 0 16px;padding-left:18px;line-height:1.8">'
+    +'<li>Análisis, lotes y asignaciones</li>'
+    +'<li>Usuarios y contraseñas</li>'
+    +'<li>Solicitudes, actividades de gestión, auditoría</li>'
+    +(isActive?'<li>El Gist del laboratorio también será sobreescrito</li>':'<li>Los datos locales del dispositivo serán borrados</li>')
+    +'</ul>'
+    +'<p style="font-size:12px;margin:0 0 16px;color:var(--amber-text);background:var(--amber-bg);padding:8px 12px;border-radius:var(--radius)">⚠️ Esta acción no se puede deshacer. El laboratorio quedará en estado inicial con los usuarios por defecto.</p>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end">'
+    +'<button id="lrst-cancel" style="padding:9px 18px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px">Cancelar</button>'
+    +'<button id="lrst-confirm" style="padding:9px 18px;border:none;border-radius:var(--radius);background:var(--red);color:#fff;cursor:pointer;font-size:13px;font-weight:600">Borrar todo</button>'
+    +'</div></div>';
+  document.body.appendChild(overlay);
+  document.getElementById('lrst-cancel').onclick=function(){overlay.remove();};
+  document.getElementById('lrst-confirm').onclick=function(){
+    overlay.remove();
+    requireSignature('Borrar datos de laboratorio','Borrar datos — '+lab.name,function(reason){
+    if(isActive){
+      // Resetear estado en memoria a valores por defecto
+      USERS=DEFAULT_USERS.map(function(u){return Object.assign({},u);});
+      passwords={};
+      USERS.forEach(function(u){passwords[u.id]=u.defaultPwd||'labtrack123';});
+      rebuildDerived();
+      tasks=[];nextId=1;
+      freeTasks=[];nextFreeTaskId=1;
+      replanNotifs=[];nextNotifId=1;
+      scheduleRequests=[];nextSchedReqId=1;
+      mgmtTasks=[];nextMgmtId=1;
+      absences={};absences_ts=Date.now();
+      auditTrail=[];
+      workdayConfig={weekdays:{1:true,2:true,3:true,4:true,5:true,0:false,6:false},extra:[],off:[],guideUrl:''};
+      analystSchedules={};
+      // Limpiar localStorage de este lab
+      try{localStorage.removeItem(_labStateKey());}catch(e){}
+      // Guardar estado limpio y sobreescribir Gist
+      saveLS();
+      render();
+      auditLog('DELETE','USER','SYSTEM',{description:'Borrado completo de laboratorio: '+lab.name},''+reason);
+      saveNow().then(function(){alert('Datos de '+escH(lab.name)+' borrados. El laboratorio está listo para configurar de nuevo.');}).catch(function(e){alert('Datos borrados localmente. Error al sincronizar con Gist: '+e.message);});
+    } else {
+      // Lab inactivo: solo limpiar su localStorage
+      var _key='lt9-state-'+labId;
+      try{localStorage.removeItem(_key);}catch(e){}
+      alert('Datos locales de '+escH(lab.name)+' borrados en este dispositivo.\nAl activarlo, se cargará el estado del Gist o iniciará desde cero.');
+      render();
+    }
+    }); // fin requireSignature
+  };
 }
 
 function doSystemReset(){
@@ -8106,7 +8459,7 @@ function setView(v){
   try{localStorage.setItem('lt9-lastView',v);}catch(e){}
   render();
 }
-function logout(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';loginShowSync=false;try{localStorage.removeItem('lt9-session');localStorage.removeItem('lt9-lastView');}catch(e){}render();}
+function logout(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';loginShowSync=false;loginShowLabSwitch=false;try{localStorage.removeItem('lt9-session');localStorage.removeItem('lt9-lastView');}catch(e){}render();}
 function openNewTask(){editingTask=null;selectedAnalysts=[];analystDates={};multiAssigns=[];newTaskPrefill={};showModal=true;render();}
 function openNewTaskFromSuggestion(suggId){
   var sug=productSuggestions.find(function(s){return s.id===suggId;});
@@ -8808,6 +9161,7 @@ function declineApproval(reqId){
   r.reviewedBy=currentUser.id;
   r.reviewedTs=Date.now();
   r.declineReason=reason;
+  r._ts=Date.now(); // CRÍTICO: garantiza que el merge preserve el estado resuelto
   // Remove override if it was applied
   if(r.dateStr&&analystSchedules[r.analystId]&&analystSchedules[r.analystId].overrides){
     delete analystSchedules[r.analystId].overrides[r.dateStr];
@@ -8827,6 +9181,7 @@ function approveSchedule(reqId){
     setAnalystDefault(req.analystId,req.proposed);
   }
   req.status='approved';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();
+  req._ts=Date.now(); // CRÍTICO: garantiza que el merge preserve la aprobación ante saves concurrentes
   saveLS();render();
   saveNow().catch(e=>console.error('saveNow approve:',e));
 }
@@ -8836,6 +9191,7 @@ function rejectSchedule(reqId){
   var reason=prompt('Motivo del rechazo (opcional):','');
   if(reason===null)return;
   req.status='rejected';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();req.rejectionReason=reason||'';
+  req._ts=Date.now(); // CRÍTICO: garantiza que el merge preserve el rechazo ante saves concurrentes
   replanNotifs.push({id:nextNotifId++,type:'schedule_rejected',
     analystId:req.analystId,forUserId:req.analystId,
     reason:reason||'',rejectedByName:currentUser.name,rejectedById:currentUser.id,
