@@ -702,6 +702,40 @@ async function _executeSave() {
   _pendingSaves = {};
   gistStatus = 'syncing'; renderSpBadge();
 
+  // ── Sesión obsoleta (5+ min sin sync) ──
+  // No guardar datos locales desactualizados. Descargar estado remoto actual
+  // y aplicarlo directamente, descartando el estado local obsoleto.
+  // Excepción: si hay un modal abierto, el usuario está en medio de una edición
+  // activa → respetar el flujo normal de fetch-merge-save para esa acción puntual.
+  const _anyModalNow = showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
+    ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
+    ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
+  if (_isSyncStale() && !_anyModalNow) {
+    try {
+      const remoteGist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+      const remoteContent = remoteGist.files[GIST_FILE_STATE]?.content;
+      if (remoteContent) {
+        const _prevUser = currentUser;
+        applySnapshot(remoteContent);
+        currentUser = _prevUser;
+        _lastRemoteTs = (JSON.parse(remoteContent).savedAt) || Date.now();
+        _lastSuccessfulSync = Date.now();
+        gistStatus = 'ok'; gistLastSync = new Date();
+        _hideStaleBanner();
+        render();
+      }
+    } catch(e) {
+      console.error('stale-recover:', e);
+      gistStatus = 'error';
+      _showSaveFeedback(false, 'Sin conexión — no es posible guardar en sesión desactualizada. Reintentando…');
+      _saveRetryTimer = setTimeout(function(){
+        if(GIST_CONFIG.configured && gistStatus==='error') _executeSave();
+      }, 10000);
+    }
+    renderSpBadge();
+    return; // No escribir al Gist desde una sesión obsoleta
+  }
+
   try {
     // ── Fetch-merge-save: evita pérdida de datos con edición simultánea ──
     let contentToSave = getSnapshot();
@@ -729,16 +763,9 @@ async function _executeSave() {
         }
       }
     } catch(fetchErr) {
-      // Si el GET falla, evaluar si la sesión es obsoleta antes de proceder
-      const _staleSecs = Math.round((Date.now() - _lastSuccessfulSync) / 1000);
-      if (_staleSecs >= (STALE_SYNC_MS / 1000)) {
-        // Sesión obsoleta: guardar sin haber podido recuperar datos remotos
-        // significaría sobreescribir cambios generados durante la inactividad.
-        // Lanzar error para que el retry loop reintente el fetch-merge-save completo.
-        throw new Error(
-          'Sin conexión — no se pudo recuperar datos remotos antes de guardar ' +
-          '(inactivo ' + Math.round(_staleSecs/60) + ' min). Reintentando…'
-        );
+      // GET falló — si hay indicios de obsolescencia, no guardar datos potencialmente viejos
+      if (_isSyncStale()) {
+        throw new Error('Sin conexión — sesión desactualizada. Reintentando…');
       }
       // Sesión reciente: el riesgo de pérdida de datos es mínimo → guardar igual
       console.warn('fetch-before-save falló, guardando estado local:', fetchErr);
@@ -815,7 +842,7 @@ function _showStaleBanner() {
     'box-shadow:0 2px 8px rgba(0,0,0,.3)',
     'pointer-events:none'
   ].join(';');
-  el.textContent = '⚠  Sin sincronización hace más de 5 minutos — los datos pueden estar desactualizados. La próxima sincronización recuperará los cambios recientes.';
+  el.textContent = '⚠  Sesión sin sincronizar por más de 5 minutos — se descargará el estado actual antes de registrar cambios.';
   document.body.appendChild(el);
 }
 
@@ -825,20 +852,29 @@ function _hideStaleBanner() {
 }
 
 let _staleCheckTimer = null;
+function _isSyncStale() {
+  return (Date.now() - _lastSuccessfulSync) >= STALE_SYNC_MS;
+}
 function _startStaleWatchdog() {
   if (_staleCheckTimer) clearInterval(_staleCheckTimer);
   _staleCheckTimer = setInterval(function() {
     if (!GIST_CONFIG.configured) return;
-    var now = Date.now();
-    var syncStale  = (now - _lastSuccessfulSync) >= STALE_SYNC_MS;
-    var idleStale  = (now - _lastActivityTs)    >= STALE_SYNC_MS;
-    if (syncStale || idleStale) {
-      _showStaleBanner();
-    } else {
-      _hideStaleBanner();
-    }
-  }, 30000); // chequeo cada 30 s
+    if (_isSyncStale()) _showStaleBanner();
+    else _hideStaleBanner();
+  }, 60000); // chequeo cada minuto (complementa al visibilitychange)
 }
+// Cuando el tab vuelve al foco tras estar en segundo plano:
+// si la sesión es obsoleta, disparar sync inmediato para descargar estado actual
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState !== 'visible' || !GIST_CONFIG.configured) return;
+  if (_isSyncStale()) {
+    _showStaleBanner();
+    // Solo disparar si no hay un sync ya en curso
+    if (gistStatus !== 'syncing' && gistStatus !== 'connecting') {
+      gistSyncFromRemote().catch(function(e){ console.warn('visibility-sync:', e); });
+    }
+  }
+});
 
 // ══════════════════════════════════════════════════════════════
 // SYNC — pull de cambios desde Gist
