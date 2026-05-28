@@ -866,19 +866,7 @@ async function gistSyncFromRemote() {
     if (remoteTs > _lastRemoteTs) {
       _lastRemoteTs = remoteTs;
       const prevUser = currentUser;
-      // Si la sesión era obsoleta, puede haber cambios locales no guardados que
-      // aún no llegaron al Gist — mergear en lugar de reemplazar para no perderlos.
-      const _wasStale = (Date.now() - _lastSuccessfulSync) >= STALE_SYNC_MS;
-      if (_wasStale) {
-        const localSnap = JSON.parse(getSnapshot());
-        const merged = mergeSnapshot(localSnap, remoteState);
-        merged.savedAt = remoteTs; // mantener ts remoto como referencia
-        applySnapshot(JSON.stringify(merged));
-        // Programar un save para subir cualquier cambio local que ganó el merge
-        setTimeout(function(){ saveNow().catch(function(e){console.error('stale-merge save:',e);}); }, 500);
-      } else {
-        applySnapshot(stateContent);
-      }
+      applySnapshot(stateContent);
       currentUser = prevUser;
       stateChanged = true;
     }
