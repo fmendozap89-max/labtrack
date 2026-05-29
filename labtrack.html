@@ -309,7 +309,8 @@ let auditFilterEntity='';
 let mgmtListPeriod='week';
 let showImportModal=false,showChangePwd=false;
 let tasksView='lote';
-let filterAnalyst='',filterStatus='',filterSearch='';
+let filterAnalyst='',filterStatus='',filterSearch='',filterTipo='';
+let estabTab='activas',limpvalTab='activas';
 let loginStep=1,selectedLoginUser=null,loginError='',loginShowSync=false,loginShowLabSwitch=false;
 // ── Multi-laboratorio ──
 var labProfiles=[]; // [{id,name,token,gistId}]
@@ -516,6 +517,7 @@ const SAVE_DEBOUNCE  = 800;
 const AUDIT_DEBOUNCE = 3000;
 let _saveRetryTimer  = null;
 let _syncDeferred    = false;   // true cuando el sync se pospuso por modal abierto
+let _rateLimitUntil  = 0;      // timestamp hasta el cual la API está rate-limited
 let _lastSuccessfulSync = Date.now(); // ts del último sync exitoso (save o pull)
 const STALE_SYNC_MS  = 5 * 60 * 1000; // 5 minutos sin sync → banner de advertencia
 
@@ -540,7 +542,16 @@ async function _gistFetch(method, path, body) {
   });
   if (!r.ok) {
     const t = await r.text().catch(()=>'');
-    throw new Error('GitHub API ' + r.status + ': ' + t.slice(0,200));
+    const err = new Error('GitHub API ' + r.status + ': ' + t.slice(0,200));
+    if (r.status === 403 || r.status === 429) {
+      const body = t.toLowerCase();
+      if (body.includes('rate limit') || body.includes('rate_limit') || r.status === 429) {
+        err._isRateLimit = true;
+        const resetHdr = r.headers.get('x-ratelimit-reset');
+        err._rateLimitReset = resetHdr ? parseInt(resetHdr) * 1000 : (Date.now() + 60 * 60 * 1000);
+      }
+    }
+    throw err;
   }
   return r.status === 204 ? {} : r.json();
 }
@@ -662,7 +673,7 @@ async function saveNow() {
 // Captura el estado del formulario de edición para protegerlo durante un sync
 function _captureModalFormState(){
   var s={};
-  ['f-prod','f-lote','f-created','f-due','f-notes','f-sampler-note','f-expected-arrival','f-arrival-notes'].forEach(function(id){
+  ['f-prod','f-lote','f-created','f-due','f-notes','f-sampler-note','f-expected-arrival','f-arrival-notes','f-tipo'].forEach(function(id){
     var el=document.getElementById(id);if(el)s[id]=el.value;
   });
   ['f-prio','f-status'].forEach(function(id){var el=document.getElementById(id);if(el)s[id]=el.value;});
@@ -672,7 +683,7 @@ function _captureModalFormState(){
 }
 function _restoreModalFormState(s){
   if(!s)return;
-  ['f-prod','f-lote','f-created','f-due','f-notes','f-sampler-note','f-expected-arrival','f-arrival-notes'].forEach(function(id){
+  ['f-prod','f-lote','f-created','f-due','f-notes','f-sampler-note','f-expected-arrival','f-arrival-notes','f-tipo'].forEach(function(id){
     if(s[id]!==undefined){var el=document.getElementById(id);if(el)el.value=s[id];}
   });
   ['f-prio','f-status'].forEach(function(id){if(s[id]!==undefined){var el=document.getElementById(id);if(el)el.value=s[id];}});
@@ -727,10 +738,20 @@ async function _executeSave() {
     } catch(e) {
       console.error('stale-recover:', e);
       gistStatus = 'error';
-      _showSaveFeedback(false, 'Sin conexión — no es posible guardar en sesión desactualizada. Reintentando…');
-      _saveRetryTimer = setTimeout(function(){
-        if(GIST_CONFIG.configured && gistStatus==='error') _executeSave();
-      }, 10000);
+      if (e._isRateLimit) {
+        _rateLimitUntil = e._rateLimitReset || (Date.now() + 60 * 60 * 1000);
+        var _rlT2 = new Date(_rateLimitUntil).toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'});
+        _showSaveFeedback(false, '⛔ Límite de API GitHub superado. Los datos están guardados localmente. Se reintentará a las ' + _rlT2 + '.');
+        _saveRetryTimer = setTimeout(function(){
+          _rateLimitUntil=0;
+          if(GIST_CONFIG.configured && gistStatus==='error') _executeSave();
+        }, Math.max(_rateLimitUntil-Date.now()+5000,60000));
+      } else {
+        _showSaveFeedback(false, 'Sin conexión — no es posible guardar en sesión desactualizada. Reintentando…');
+        _saveRetryTimer = setTimeout(function(){
+          if(GIST_CONFIG.configured && gistStatus==='error') _executeSave();
+        }, 30000);
+      }
     }
     renderSpBadge();
     return; // No escribir al Gist desde una sesión obsoleta
@@ -783,14 +804,32 @@ async function _executeSave() {
   } catch(e) {
     console.error('save:', e);
     gistStatus = 'error';
-    _showSaveFeedback(false, e.message);
-    // Retry automático en 10 s para recuperarse de errores transitorios
-    _saveRetryTimer = setTimeout(function(){
-      if(GIST_CONFIG.configured && gistStatus==='error'){
-        console.log('Reintento automático de save…');
-        _executeSave();
-      }
-    }, 10000);
+    if (e._isRateLimit) {
+      // Rate limit: cancelar cualquier retry anterior y esperar hasta el reset
+      if (_saveRetryTimer) { clearTimeout(_saveRetryTimer); _saveRetryTimer = null; }
+      var _rlReset = e._rateLimitReset || (Date.now() + 60 * 60 * 1000);
+      _rateLimitUntil = _rlReset; // pausar también el sync periódico
+      var _rlWaitMs = Math.max(_rlReset - Date.now() + 5000, 30000);
+      var _rlMin = Math.ceil(_rlWaitMs / 60000);
+      var _rlTime = new Date(_rlReset).toLocaleTimeString('es', {hour:'2-digit',minute:'2-digit'});
+      _showSaveFeedback(false, '⛔ Límite de API GitHub superado. Los datos están guardados localmente. Se reintentará a las ' + _rlTime + ' (~' + _rlMin + ' min).');
+      _saveRetryTimer = setTimeout(function(){
+        _rateLimitUntil = 0;
+        if (GIST_CONFIG.configured && gistStatus === 'error') {
+          console.log('Reintento post-rate-limit a las', new Date().toLocaleTimeString());
+          _executeSave();
+        }
+      }, _rlWaitMs);
+    } else {
+      _showSaveFeedback(false, e.message);
+      // Retry automático en 30 s para errores transitorios (red, etc.)
+      _saveRetryTimer = setTimeout(function(){
+        if(GIST_CONFIG.configured && gistStatus==='error'){
+          console.log('Reintento automático de save…');
+          _executeSave();
+        }
+      }, 30000);
+    }
   }
   renderSpBadge();
 }
@@ -882,6 +921,10 @@ document.addEventListener('visibilitychange', function() {
 
 async function gistSyncFromRemote() {
   if (!GIST_CONFIG.configured) return;
+  // Si estamos rate-limited, no hacer nada hasta que expire el límite
+  if (_rateLimitUntil && Date.now() < _rateLimitUntil) {
+    gistStatus = 'error'; renderSpBadge(); return;
+  }
   // Si hay un modal abierto, diferir el sync para no interrumpir una edición en curso
   const _anyModal=showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
     ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
@@ -926,7 +969,17 @@ async function gistSyncFromRemote() {
     _hideStaleBanner();
     if(!currentUser) _restoreSession();
     render(); // siempre refrescar — puede haber audit trail nuevo
-  } catch(e) { console.error('gistSync:', e); gistStatus = 'error'; }
+  } catch(e) {
+    console.error('gistSync:', e);
+    gistStatus = 'error';
+    if (e._isRateLimit) {
+      _rateLimitUntil = e._rateLimitReset || (Date.now() + 60 * 60 * 1000);
+      var _rlT = new Date(_rateLimitUntil).toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'});
+      console.warn('Rate limit activo hasta', _rlT, '— sync pausado');
+      // Limpiar el rateLimitUntil automáticamente cuando llegue el reset
+      setTimeout(function(){_rateLimitUntil=0;},Math.max(_rateLimitUntil-Date.now()+5000,60000));
+    }
+  }
   renderSpBadge();
 }
 
@@ -1191,6 +1244,59 @@ function deleteLabProfile(labId){
 // ══════════════════════════════════════════════════════════════
 
 // Restore session from localStorage after page refresh
+// ── TIPOS DE MUESTRA ──
+const SAMPLE_TYPES=[
+  {id:'PT',  label:'PT',   title:'Producto Terminado', color:'#1e40af', bg:'#dbeafe'},
+  {id:'MP',  label:'MP',   title:'Materia Prima',      color:'#065f46', bg:'#d1fae5'},
+  {id:'Limp',label:'Limp', title:'Limpieza',           color:'#92400e', bg:'#fef3c7'},
+  {id:'Val', label:'Val',  title:'Validación',         color:'#6b21a8', bg:'#f3e8ff'},
+  {id:'EE',  label:'EE',   title:'Estabilidades',      color:'#be123c', bg:'#ffe4e6'},
+];
+function sampleTypeBadge(tipo){
+  if(!tipo)return'<span style="color:var(--text3);font-size:10px;font-family:var(--mono)">—</span>';
+  var st=SAMPLE_TYPES.find(function(s){return s.id===tipo;});
+  if(!st)return'<span style="color:var(--text3);font-size:10px">'+escH(tipo)+'</span>';
+  return'<span title="'+st.title+'" style="background:'+st.bg+';color:'+st.color+';border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700;white-space:nowrap;cursor:default">'+st.label+'</span>';
+}
+function selectTipoPill(val){
+  document.getElementById('f-tipo').value=val;
+  document.querySelectorAll('.tipo-pill-btn').forEach(function(b){
+    var active=b.dataset.val===val;
+    b.style.background=active?b.dataset.bg:'var(--bg2)';
+    b.style.color=active?b.dataset.color:'var(--text2)';
+    b.style.borderColor=active?b.dataset.color:'var(--border)';
+    b.style.fontWeight=active?'700':'400';
+  });
+}
+function saveAprobadoTipo(taskId, val){
+  var t=tasks.find(function(x){return x.id===Number(taskId);});
+  if(!t||t.status!=='approved')return;
+  var oldTipo=t.tipo||'';
+  t.tipo=val||'';
+  t._ts=Date.now();
+  auditLog('EDIT','TASK',t.id,{field:'tipo',oldVal:oldTipo,newVal:val},'Cambio de tipo en muestra aprobada');
+  saveLS();render();saveNow().catch(function(e){console.error('saveAprobadoTipo:',e);});
+}
+function setFTipo(v){filterTipo=v;render();}
+function renderTipoPillsHtml(currentTipo){
+  var html='<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">';
+  var noneActive=!currentTipo;
+  html+='<button type="button" class="tipo-pill-btn" data-val="" data-bg="var(--bg2)" data-color="var(--text2)"'
+    +' onclick="selectTipoPill(\'\')"'
+    +' style="padding:3px 11px;border:1px solid '+(noneActive?'var(--border)':'var(--border)')+';border-radius:20px;font-size:11px;cursor:pointer;background:'+(noneActive?'var(--bg2)':'var(--surface)')+';color:var(--text2);font-weight:'+(noneActive?'600':'400')+'">'
+    +'Sin tipo</button>';
+  SAMPLE_TYPES.forEach(function(st){
+    var active=currentTipo===st.id;
+    html+='<button type="button" class="tipo-pill-btn" data-val="'+st.id+'" data-bg="'+st.bg+'" data-color="'+st.color+'"'
+      +' onclick="selectTipoPill(\''+st.id+'\')"'
+      +' title="'+st.title+'"'
+      +' style="padding:3px 11px;border:1px solid '+(active?st.color:'var(--border)')+';border-radius:20px;font-size:11px;font-weight:'+(active?'700':'400')+';cursor:pointer;background:'+(active?st.bg:'var(--surface)')+';color:'+(active?st.color:'var(--text2)')+'">'
+      +st.label+'</button>';
+  });
+  html+='</div><input type="hidden" id="f-tipo" value="'+(currentTipo||'')+'">';
+  return html;
+}
+
 function firstViewForRole(user){
   if(!user)return 'dashboard';
   switch(user.role){
@@ -1209,7 +1315,7 @@ function isViewAllowed(view, user){
   var supOnly=['admin','audit','historial'];
   if(supOnly.includes(view)&&role!=='supervisor')return false;
   // Views restricted to supervisor + reviewer
-  var supRevOnly=['aprobados'];
+  var supRevOnly=['aprobados','estabilidades','limpval'];
   if(supRevOnly.includes(view)&&role!=='supervisor'&&role!=='reviewer')return false;
   return true;
 }
@@ -2933,8 +3039,18 @@ function renderMgmtList(isSup, weekOccs, myOccs){
     nextBtn=`<button class="btn sm" onclick="monthOffset++;render()">→</button>`;
   }
 
+  if(typeof window.mgmtListSearch==='undefined') window.mgmtListSearch='';
+  var _mlq=(window.mgmtListSearch||'').toLowerCase().trim();
+  if(_mlq){
+    periodOccs=periodOccs.filter(function(o){
+      var cat=getMgmtCat(o.category);
+      var analNames=(o.analysts||[]).map(function(id){return getU(id).name;}).join(' ');
+      return (cat.label||'').toLowerCase().includes(_mlq)||analNames.toLowerCase().includes(_mlq)||(o.notes||'').toLowerCase().includes(_mlq);
+    });
+  }
+
   return`
-  <div style="display:flex;align-items:center;margin-bottom:12px;gap:6px;flex-wrap:wrap">
+  <div style="display:flex;align-items:center;margin-bottom:10px;gap:6px;flex-wrap:wrap">
     ${periodToggle}
     ${prevBtn}
     <span style="font-size:13px;font-weight:600;font-family:var(--mono)">${periodLabel}</span>
@@ -2945,7 +3061,13 @@ function renderMgmtList(isSup, weekOccs, myOccs){
       <button class="btn sm" onclick="exportMgmtListXLSX()">↓ Excel</button>
     </div>
   </div>
-  ${periodOccs.length===0?`<div class="tbl"><div class="empty">Sin actividades de gestión en este período</div></div>`:
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+    <input id="srch-mgmtlist" type="text" placeholder="Buscar por categoría, analista o nota…" value="${escH(window.mgmtListSearch||'')}"
+      oninput="_srch('mgmtListSearch',this.value,'srch-mgmtlist')"
+      style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">
+    ${_mlq?'<button class="btn sm" onclick="window.mgmtListSearch=\'\';render()">✕ Limpiar</button>':''}
+  </div>
+  ${periodOccs.length===0?`<div class="tbl"><div class="empty">${_mlq?'Sin resultados para "'+escH(_mlq)+'"':'Sin actividades de gestión en este período'}</div></div>`:
     `<div class="tbl" style="margin-bottom:16px">
       <div class="thead" style="grid-template-columns:1.2fr .9fr .8fr 1.1fr .65fr .65fr .4fr">
         <div>Categoría</div><div>Fecha</div><div>Analista(s)</div><div>Horario · Dedicación</div><div>Frecuencia</div><div>Nota</div><div></div>
@@ -2978,10 +3100,23 @@ function renderMgmtList(isSup, weekOccs, myOccs){
 
 function renderMgmtDefined(isSup){
   if(!isSup) return '';
-  return `<div class="tbl">
-    ${mgmtTasks.length===0?'<div class="empty">Sin actividades de gestión definidas</div>':
+  if(typeof window.mgmtDefinedSearch==='undefined') window.mgmtDefinedSearch='';
+  var _mdq=(window.mgmtDefinedSearch||'').toLowerCase().trim();
+  var _mtFiltered=_mdq?mgmtTasks.filter(function(mt){
+    var cat=getMgmtCat(mt.category);
+    var analNames=(mt.analysts||[]).map(function(id){return getU(id).name;}).join(' ');
+    return (cat.label||'').toLowerCase().includes(_mdq)||analNames.toLowerCase().includes(_mdq);
+  }):mgmtTasks;
+  var _searchBar='<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'
+    +'<input id="srch-mgmtdef" type="text" placeholder="Buscar por categoría o analista…" value="'+escH(window.mgmtDefinedSearch||'')+'"'
+    +' oninput="_srch(\'mgmtDefinedSearch\',this.value,\'srch-mgmtdef\')"'
+    +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+    +(_mdq?'<button class="btn sm" onclick="window.mgmtDefinedSearch=\'\';render()">✕ Limpiar</button>':'')
+    +'</div>';
+  return _searchBar+`<div class="tbl">
+    ${_mtFiltered.length===0?'<div class="empty">'+(_mdq?'Sin resultados para "'+escH(_mdq)+'"':'Sin actividades de gestión definidas')+'</div>':
       '<div class="thead" style="grid-template-columns:1.2fr 1.1fr .8fr .7fr .65fr .65fr .4fr"><div>Categoría</div><div>Período</div><div>Analista(s)</div><div>Frecuencia</div><div>Horario</div><div>Excepciones</div><div></div></div>'+
-      mgmtTasks.map(mt=>{
+      _mtFiltered.map(mt=>{
         const cat=getMgmtCat(mt.category);
         const analAvs=(mt.analysts||[]).map(id=>{const u=getU(id);return`<div class="av ${u.av}" title="${escH(u.name)}">${escH(u.avInit)}</div>`;}).join('');
         const analNames=(mt.analysts||[]).map(id=>getU(id).name.split(' ')[0]).join(', ')||'—';
@@ -4104,11 +4239,13 @@ function renderAprobados(){
   var q=window.aprobSearch.toLowerCase().trim();
   if(q)approved=approved.filter(function(t){return t.producto.toLowerCase().includes(q)||t.lote.toLowerCase().includes(q);});
 
-  var cols='grid-template-columns:1.6fr 0.9fr 0.8fr 0.8fr 0.7fr 0.9fr 0.7fr';
+  var _isSupApro=isSupRole();
+  var cols=_isSupApro?'grid-template-columns:1.4fr 0.5fr 0.8fr 0.75fr 0.75fr 0.6fr 0.8fr 0.6fr':'grid-template-columns:1.4fr 0.5fr 0.8fr 0.75fr 0.75fr 0.6fr 0.8fr 0.6fr';
   var hdr='<div class="thead" style="'+cols+'">'
     +sortHdr('producto','Producto / Lote')
+    +'<div>Tipo</div>'
     +'<div>Analistas</div>'
-    +sortHdr('due','F. límite aprobación')
+    +sortHdr('due','F. límite')
     +'<div>F. aprobación</div>'
     +sortHdr('priority','Prioridad')
     +'<div>H. reales</div>'
@@ -4120,9 +4257,18 @@ function renderAprobados(){
     var anaAv=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':'';}).join('');
     var realH=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
     var approverName=_approverName(t);
+    var tipoCell=_isSupApro
+      ?'<div onclick="event.stopPropagation()" style="display:flex;align-items:center">'
+        +'<select style="font-size:11px;padding:2px 4px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text);max-width:70px"'
+        +' onchange="saveAprobadoTipo('+t.id+',this.value)">'
+        +'<option value="">—</option>'
+        +SAMPLE_TYPES.map(function(st){return'<option value="'+st.id+'"'+(t.tipo===st.id?' selected':'')+'>'+st.label+'</option>';}).join('')
+        +'</select></div>'
+      :'<div>'+sampleTypeBadge(t.tipo)+'</div>';
     return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
       +'<div><div class="cell-trunc" style="font-weight:500;font-size:12px">'+escH(t.producto)+'</div>'
       +'<div class="cell-sub cell-trunc" style="font-size:10px">'+escH(t.lote)+'</div></div>'
+      +tipoCell
       +'<div style="display:flex;gap:2px;flex-wrap:wrap">'+(anaAv||'—')+'</div>'
       +'<div style="font-family:var(--mono);font-size:11px">'+(t.due?fmtDDMMYY(t.due):'—')+'</div>'
       +'<div style="font-family:var(--mono);font-size:11px">'+(t.approvedDate?fmtDDMMYY(t.approvedDate):'—')+'</div>'
@@ -4133,9 +4279,9 @@ function renderAprobados(){
   }
 
   var search='<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">'
-    +'<input type="text" placeholder="Buscar producto o lote…" value="'+escH(window.aprobSearch||'')+'"'
+    +'<input id="srch-aprobados" type="text" placeholder="Buscar producto o lote…" value="'+escH(window.aprobSearch||'')+'"'
     +' style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface)"'
-    +' oninput="window.aprobSearch=this.value;render()">'
+    +' oninput="_srch(\'aprobSearch\',this.value,\'srch-aprobados\')">'
     +(q?'<button class="btn sm" onclick="window.aprobSearch=\'\';render()">✕ Limpiar</button>':'')
     +'<div style="display:flex;gap:5px;margin-left:auto">'
     +'<button class="btn sm" onclick="copyAprobados(this)">📋 Copiar</button>'
@@ -4156,8 +4302,11 @@ function doExportAprobados(){
   var rows=approved.map(function(t){
     var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
     var realH=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
+    var tipoSt=SAMPLE_TYPES.find(function(s){return s.id===t.tipo;});
     return{
       'Producto':t.producto,'Lote':t.lote,
+      'Tipo':t.tipo||'',
+      'Tipo descripción':tipoSt?tipoSt.title:'',
       'Analistas':assigns.map(function(a){var u=getU(a.analyst);return u?u.name:'?';}).join(', '),
       'F. límite aprobación':t.due?fmtDF(t.due):'',
       'F. aprobación':t.approvedDate?fmtDF(t.approvedDate):'',
@@ -4169,9 +4318,171 @@ function doExportAprobados(){
   });
   var wb=XLSX.utils.book_new();
   var ws=XLSX.utils.json_to_sheet(rows);
-  ws['!cols']=[{wch:24},{wch:14},{wch:28},{wch:16},{wch:16},{wch:10},{wch:10},{wch:18},{wch:30}];
+  ws['!cols']=[{wch:24},{wch:14},{wch:8},{wch:20},{wch:28},{wch:16},{wch:16},{wch:10},{wch:10},{wch:18},{wch:30}];
   XLSX.utils.book_append_sheet(wb,ws,'Aprobados');
   XLSX.writeFile(wb,'labtrack_aprobados_'+today()+'.xlsx');
+}
+
+// ── ESTABILIDADES ──
+function renderEstabilidades(){
+  var sup=isSupRole();
+  var allEE=tasks.filter(function(t){return (t.tipo||'')==='EE';});
+  var activas=sortTasks(allEE.filter(function(t){return t.status!=='approved';}),taskSort,taskSortDir);
+  var aprobadas=sortTasks(allEE.filter(function(t){return t.status==='approved';}),taskSort,taskSortDir);
+
+  if(typeof window.estabSearch==='undefined')window.estabSearch='';
+  var _eq=(window.estabSearch||'').toLowerCase().trim();
+
+  var tabs='<div style="display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid var(--border)">'
+    +'<button onclick="estabTab=\'activas\';render()" style="padding:8px 18px;border:none;border-bottom:'+(estabTab==='activas'?'2px solid var(--blue);font-weight:700;color:var(--blue)':'2px solid transparent;color:var(--text2)')+';background:transparent;cursor:pointer;font-size:13px">Activas ('+activas.length+')</button>'
+    +'<button onclick="estabTab=\'aprobadas\';render()" style="padding:8px 18px;border:none;border-bottom:'+(estabTab==='aprobadas'?'2px solid var(--blue);font-weight:700;color:var(--blue)':'2px solid transparent;color:var(--text2)')+';background:transparent;cursor:pointer;font-size:13px">Aprobadas ('+aprobadas.length+')</button>'
+    +'</div>';
+
+  var searchBar='<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">'
+    +'<input id="srch-estab" type="text" placeholder="Buscar producto o lote…" value="'+escH(window.estabSearch||'')+'"'
+    +' oninput="_srch(\'estabSearch\',this.value,\'srch-estab\')"'
+    +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+    +(_eq?'<button class="btn sm" onclick="window.estabSearch=\'\';render()">✕ Limpiar</button>':'')
+    +(sup?'<button class="btn sm" onclick="exportTipoXLSX(\'EE\',\'estabilidades\')">↓ Excel</button>':'')
+    +'</div>';
+
+  var list=(estabTab==='activas'?activas:aprobadas).filter(function(t){
+    return !_eq||t.producto.toLowerCase().includes(_eq)||(t.lote||'').toLowerCase().includes(_eq);
+  });
+
+  var cols='grid-template-columns:1.6fr 0.9fr 0.8fr 0.8fr 0.7fr 0.7fr';
+  var hdr='<div class="thead" style="'+cols+'">'
+    +sortHdr('producto','Producto / Lote')
+    +'<div>Analistas</div>'
+    +sortHdr('created','Ingreso')
+    +sortHdr('due','F. límite')
+    +(estabTab==='activas'?sortHdr('status','Estado'):'<div>F. aprobación</div>')
+    +sortHdr('priority','Prioridad')
+    +'</div>';
+
+  var rows=list.map(function(t){
+    var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
+    var anaAv=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':'';}).join('');
+    return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
+      +'<div><div class="cell-trunc" style="font-weight:500">'+escH(t.producto)+'</div>'
+      +'<div class="cell-sub cell-trunc">'+escH(t.lote)+'</div></div>'
+      +'<div style="display:flex;gap:2px;flex-wrap:wrap">'+(anaAv||'—')+'</div>'
+      +'<div style="font-family:var(--mono);font-size:11px">'+(t.created?fmtDDMMYY(t.created):'—')+'</div>'
+      +'<div style="font-size:11px">'+(t.due?dueBadge(t):'<span style="color:var(--text3)">—</span>')+'</div>'
+      +(estabTab==='activas'
+        ?'<div><span class="pill '+t.status+'" style="font-size:10px">'+statusLabel(t.status)+'</span></div>'
+        :'<div style="font-family:var(--mono);font-size:11px">'+(t.approvedDate?fmtDDMMYY(t.approvedDate):'—')+'</div>')
+      +'<div><span class="pill '+(t.priority||'Normal').toLowerCase()+'" style="font-size:10px">'+(t.priority||'Normal')+'</span></div>'
+      +'</div>';
+  }).join('');
+
+  return'<div class="sec">🧪 Estabilidades</div>'
+    +tabs+searchBar
+    +(list.length===0
+      ?'<div class="empty">'+(allEE.length===0?'No hay muestras clasificadas como EE aún. Para agregar: crear o editar un análisis y elegir tipo EE.':'Sin resultados para "'+escH(_eq)+'"')+'</div>'
+      :'<div class="tbl">'+hdr+rows+'</div>');
+}
+
+// ── LIMPIEZAS & VALIDACIONES ──
+function renderLimpVal(){
+  var sup=isSupRole();
+  var allLV=tasks.filter(function(t){return t.tipo==='Limp'||t.tipo==='Val';});
+  var activas=sortTasks(allLV.filter(function(t){return t.status!=='approved';}),taskSort,taskSortDir);
+  var aprobadas=sortTasks(allLV.filter(function(t){return t.status==='approved';}),taskSort,taskSortDir);
+
+  if(typeof window.limpvalSearch==='undefined')window.limpvalSearch='';
+  var _lq=(window.limpvalSearch||'').toLowerCase().trim();
+
+  var tabs='<div style="display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid var(--border)">'
+    +'<button onclick="limpvalTab=\'activas\';render()" style="padding:8px 18px;border:none;border-bottom:'+(limpvalTab==='activas'?'2px solid var(--blue);font-weight:700;color:var(--blue)':'2px solid transparent;color:var(--text2)')+';background:transparent;cursor:pointer;font-size:13px">Activas ('+activas.length+')</button>'
+    +'<button onclick="limpvalTab=\'aprobadas\';render()" style="padding:8px 18px;border:none;border-bottom:'+(limpvalTab==='aprobadas'?'2px solid var(--blue);font-weight:700;color:var(--blue)':'2px solid transparent;color:var(--text2)')+';background:transparent;cursor:pointer;font-size:13px">Aprobadas ('+aprobadas.length+')</button>'
+    +'</div>';
+
+  var searchBar='<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">'
+    +'<input id="srch-limpval" type="text" placeholder="Buscar producto o lote…" value="'+escH(window.limpvalSearch||'')+'"'
+    +' oninput="_srch(\'limpvalSearch\',this.value,\'srch-limpval\')"'
+    +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+    +(_lq?'<button class="btn sm" onclick="window.limpvalSearch=\'\';render()">✕ Limpiar</button>':'')
+    +(sup?'<button class="btn sm" onclick="exportTipoXLSX([\'Limp\',\'Val\'],\'limpiezas_validaciones\')">↓ Excel</button>':'')
+    +'</div>';
+
+  // Tipo filter chips
+  var tipoChips='<div style="display:flex;gap:5px;margin-bottom:10px">'
+    +'<button onclick="window._lvTipoFilter=\'\';render()" style="padding:3px 12px;border:1px solid var(--border);border-radius:20px;font-size:11px;cursor:pointer;background:'+(!(window._lvTipoFilter||'')?'var(--blue);color:#fff':'var(--surface);color:var(--text2)')+';font-weight:'+(!(window._lvTipoFilter||'')?'700':'400')+'">Todos</button>'
+    +'<button onclick="window._lvTipoFilter=\'Limp\';render()" style="padding:3px 12px;border:1px solid var(--border);border-radius:20px;font-size:11px;cursor:pointer;background:'+((window._lvTipoFilter||'')==='Limp'?'#fef3c7;color:#92400e':'var(--surface);color:var(--text2)')+';font-weight:'+((window._lvTipoFilter||'')==='Limp'?'700':'400')+'">Limp</button>'
+    +'<button onclick="window._lvTipoFilter=\'Val\';render()" style="padding:3px 12px;border:1px solid var(--border);border-radius:20px;font-size:11px;cursor:pointer;background:'+((window._lvTipoFilter||'')==='Val'?'#f3e8ff;color:#6b21a8':'var(--surface);color:var(--text2)')+';font-weight:'+((window._lvTipoFilter||'')==='Val'?'700':'400')+'">Val</button>'
+    +'</div>';
+
+  var list=(limpvalTab==='activas'?activas:aprobadas).filter(function(t){
+    var lvf=window._lvTipoFilter||'';
+    if(lvf&&t.tipo!==lvf)return false;
+    return !_lq||t.producto.toLowerCase().includes(_lq)||(t.lote||'').toLowerCase().includes(_lq);
+  });
+
+  var cols='grid-template-columns:1.6fr 0.5fr 0.9fr 0.8fr 0.8fr 0.7fr 0.7fr';
+  var hdr='<div class="thead" style="'+cols+'">'
+    +sortHdr('producto','Producto / Lote')
+    +'<div>Tipo</div>'
+    +'<div>Analistas</div>'
+    +sortHdr('created','Ingreso')
+    +sortHdr('due','F. límite')
+    +(limpvalTab==='activas'?sortHdr('status','Estado'):'<div>F. aprobación</div>')
+    +sortHdr('priority','Prioridad')
+    +'</div>';
+
+  var rows=list.map(function(t){
+    var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
+    var anaAv=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':'';}).join('');
+    return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
+      +'<div><div class="cell-trunc" style="font-weight:500">'+escH(t.producto)+'</div>'
+      +'<div class="cell-sub cell-trunc">'+escH(t.lote)+'</div></div>'
+      +'<div>'+sampleTypeBadge(t.tipo)+'</div>'
+      +'<div style="display:flex;gap:2px;flex-wrap:wrap">'+(anaAv||'—')+'</div>'
+      +'<div style="font-family:var(--mono);font-size:11px">'+(t.created?fmtDDMMYY(t.created):'—')+'</div>'
+      +'<div style="font-size:11px">'+(t.due?dueBadge(t):'<span style="color:var(--text3)">—</span>')+'</div>'
+      +(limpvalTab==='activas'
+        ?'<div><span class="pill '+t.status+'" style="font-size:10px">'+statusLabel(t.status)+'</span></div>'
+        :'<div style="font-family:var(--mono);font-size:11px">'+(t.approvedDate?fmtDDMMYY(t.approvedDate):'—')+'</div>')
+      +'<div><span class="pill '+(t.priority||'Normal').toLowerCase()+'" style="font-size:10px">'+(t.priority||'Normal')+'</span></div>'
+      +'</div>';
+  }).join('');
+
+  return'<div class="sec">✔ Limpiezas &amp; Validaciones</div>'
+    +tabs+searchBar+tipoChips
+    +(list.length===0
+      ?'<div class="empty">'+(allLV.length===0?'No hay muestras clasificadas como Limp o Val aún. Para agregar: crear o editar un análisis y elegir tipo Limp o Val.':'Sin resultados para "'+escH(_lq||window._lvTipoFilter||'')+'"')+'</div>'
+      :'<div class="tbl">'+hdr+rows+'</div>');
+}
+
+// Helper export for tipo-filtered views
+function exportTipoXLSX(tipos, filename){
+  _lazyXLSX(function(){
+    var filter=Array.isArray(tipos)?tipos:[tipos];
+    var list=tasks.filter(function(t){return filter.includes(t.tipo||'');});
+    var rows=list.map(function(t){
+      var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
+      var realH=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
+      var tipoSt=SAMPLE_TYPES.find(function(s){return s.id===t.tipo;});
+      return{
+        'Producto':t.producto,'Lote':t.lote,
+        'Tipo':t.tipo||'',
+        'Descripción':tipoSt?tipoSt.title:'',
+        'Estado':statusLabel(t.status),
+        'Analistas':assigns.map(function(a){var u=getU(a.analyst);return u?u.name:'?';}).join(', '),
+        'F. Ingreso':t.created?fmtDF(t.created):'',
+        'F. límite':t.due?fmtDF(t.due):'',
+        'F. Aprobación':t.approvedDate?fmtDF(t.approvedDate):'',
+        'Prioridad':t.priority||'Normal',
+        'Horas reales':realH||'',
+        'Aprobado por':_approverName(t),
+        'Notas':t.notes||''
+      };
+    });
+    var ws=XLSX.utils.json_to_sheet(rows);
+    ws['!cols']=[{wch:24},{wch:14},{wch:6},{wch:20},{wch:16},{wch:28},{wch:12},{wch:14},{wch:14},{wch:10},{wch:10},{wch:18},{wch:30}];
+    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Datos');
+    xlsxDownload(wb,filename+'_'+today()+'.xlsx');
+  });
 }
 
 function recalcLateStatus(){
@@ -4453,9 +4764,12 @@ async function doLogin(){
 }
 
 function renderReview(){
+  if(typeof window.reviewSearch==='undefined') window.reviewSearch='';
+  var _rvq=(window.reviewSearch||'').toLowerCase().trim();
+  function _rvMatch(t){return !_rvq||t.producto.toLowerCase().includes(_rvq)||(t.lote||'').toLowerCase().includes(_rvq);}
   // Tasks completed or observed - awaiting review
-  const pending=tasks.filter(function(t){return t.status==='done'||t.status==='observed';});
-  const done=tasks.filter(function(t){return t.status==='reviewed';});
+  const pending=tasks.filter(function(t){return (t.status==='done'||t.status==='observed')&&_rvMatch(t);});
+  const done=tasks.filter(function(t){return t.status==='reviewed'&&_rvMatch(t);});
   const cols='grid-template-columns:1.5fr 1fr 1fr .7fr .65fr .5fr';
 
   function reviewRow(t,canAct){
@@ -4470,7 +4784,7 @@ function renderReview(){
     const lastCmpCmt=t.completionComments&&t.completionComments.length?t.completionComments[t.completionComments.length-1]:null;
     return'<div class="trow" style="'+cols+'">'
       +'<div class="cell-trunc" style="font-weight:500">'+escH(t.producto)+'</div>'
-      +'<div class="cell-sub cell-trunc">'+escH(t.lote)+'</div>'
+      +'<div class="cell-sub cell-trunc" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+'<span>'+escH(t.lote)+'</span></div>'
       +'<div style="display:flex;align-items:center;gap:3px">'+analStacks+'</div>'
       +'<div style="font-family:var(--mono);font-size:12px;font-weight:700;text-align:right;color:'+hColor+'">'+(realH?realH.toFixed(1)+'h':'—')+'</div>'
       +'<div><span class="pill '+t.status+'">'+statusLabel(t.status)+'</span>'
@@ -4492,10 +4806,15 @@ function renderReview(){
     +'<div>Estado</div><div>Acc.</div>'
     +'</div>';
 
-  var html='<div style="display:flex;justify-content:flex-end;gap:5px;margin-bottom:10px">'
+  var html='<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">'
+    +'<input id="srch-review" type="text" placeholder="Buscar producto o lote…" value="'+escH(window.reviewSearch||'')+'"'
+    +' oninput="_srch(\'reviewSearch\',this.value,\'srch-review\')"'
+    +' style="flex:1;min-width:180px;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+    +(_rvq?'<button class="btn sm" onclick="window.reviewSearch=\'\';render()">✕ Limpiar</button>':'')
+    +'<div style="margin-left:auto;display:flex;gap:5px">'
     +'<button class="btn sm" onclick="copyRevision(this)">📋 Copiar</button>'
     +'<button class="btn sm" onclick="exportRevisionXLSX()">↓ Excel</button>'
-    +'</div>';
+    +'</div></div>';
 
   // Pending review section
   html+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
@@ -4537,7 +4856,7 @@ function renderRevision(){
     return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
       +'<div class="cell-trunc">'
       +'<div style="font-weight:600">'+escH(t.producto)+'</div>'
-      +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3)">'+escH(t.lote||'')+'</div>'
+      +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3);display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+'<span>'+escH(t.lote||'')+'</span></div>'
       +(lastObs.comment?'<div style="font-size:10px;color:var(--amber-text);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escH(lastObs.comment)+'">⚑ '+escH(lastObs.comment.slice(0,35))+'</div>':'')
       +'</div>'
       +'<div><div style="display:flex;gap:2px">'+anas+'</div></div>'
@@ -4547,8 +4866,8 @@ function renderRevision(){
       +'</div>';
   }
   var searchHtml='<div style="position:relative;margin-bottom:16px">'
-    +'<input type="text" placeholder="Buscar por producto o lote…" value="'+escH(window.revSearch||'')+'"'
-    +' oninput="window.revSearch=this.value;render()"'
+    +'<input id="srch-revision" type="text" placeholder="Buscar por producto o lote…" value="'+escH(window.revSearch||'')+'"'
+    +' oninput="_srch(\'revSearch\',this.value,\'srch-revision\')"'
     +' style="width:100%;padding:8px 36px 8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text);box-sizing:border-box">'
     +(window.revSearch?'<span onclick="window.revSearch=\'\';render()" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:var(--text3);font-size:20px;line-height:1;user-select:none">×</span>':'')
     +'</div>';
@@ -4617,8 +4936,8 @@ function renderSugerencias(){
       recent=recent.filter(function(s){return s.producto.toLowerCase().includes(q)||s.lote.toLowerCase().includes(q)||s.suggestedByName.toLowerCase().includes(q);});
     }
     var html='<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap">'
-      +'<input type="text" placeholder="Buscar por producto, lote o usuario…" value="'+escH(window.suggSearch||'')+'"'
-      +' oninput="window.suggSearch=this.value;render()"'
+      +'<input id="srch-sugg" type="text" placeholder="Buscar por producto, lote o usuario…" value="'+escH(window.suggSearch||'')+'"'
+      +' oninput="_srch(\'suggSearch\',this.value,\'srch-sugg\')"'
       +' style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
       +(window.suggSearch?'<button class="btn sm" onclick="window.suggSearch=\'\';render()">✕ Limpiar</button>':'')
       +'</div>';
@@ -5220,7 +5539,10 @@ function quickActivateDay(dateStr, analystId) {
 
 function renderNotificaciones(){
   var isSup=isSupRole();
+  if(typeof window.notifSearch==='undefined') window.notifSearch='';
+  var _nq=(window.notifSearch||'').toLowerCase().trim();
   var allReqs=[...scheduleRequests].sort(function(a,b){return b.ts-a.ts;});
+  if(_nq){allReqs=allReqs.filter(function(r){var u=getU(r.analystId);return (u.name||'').toLowerCase().includes(_nq)||(r.reason||'').toLowerCase().includes(_nq)||(r.dateStr||'').includes(_nq);});}
   var pending=allReqs.filter(function(r){return r.status==='pending';});
   var history=allReqs.filter(function(r){return r.status!=='pending';});
 
@@ -5312,12 +5634,18 @@ function renderNotificaciones(){
       +'</div>';
   }
 
-  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">'
+  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">'
     +'<div class="sec" style="margin-bottom:0">Solicitudes de cambio de horario ('+allReqs.length+')</div>'
     +'<div style="display:flex;gap:5px">'
     +'<button id="btn-copy-sol" class="btn sm" onclick="window._ltCopyTsv&&window._ltCopyTsv()">📋 Copiar</button>'
     +'<button class="btn sm" onclick="exportNotificacionesXLSX()">↓ Excel</button>'
     +'</div>'
+    +'</div>'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">'
+    +'<input id="srch-notif" type="text" placeholder="Buscar por analista, motivo o fecha…" value="'+escH(window.notifSearch||'')+'"'
+    +' oninput="_srch(\'notifSearch\',this.value,\'srch-notif\')"'
+    +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+    +(_nq?'<button class="btn sm" onclick="window.notifSearch=\'\';render()">✕ Limpiar</button>':'')
     +'</div>';
 
   html+='<div style="font-size:12px;font-weight:600;color:var(--amber);margin-bottom:8px">Pendientes ('+pending.length+')</div>';
@@ -5729,6 +6057,8 @@ function renderShell(){
     {id:'historial',label:'Historial notificaciones',icon:'🕐'},
     {id:'admin',label:'Administración',icon:'⚙'},
     {id:'aprobados',label:'Aprobados',icon:'✅'},
+    {id:'estabilidades',label:'Estabilidades',icon:'🧪',badge:(()=>{const c=tasks.filter(t=>t.tipo==='EE'&&t.status!=='approved').length;return c>0?c:'';})()},
+    {id:'limpval',label:'Limp & Validaciones',icon:'✔',badge:(()=>{const c=tasks.filter(t=>(t.tipo==='Limp'||t.tipo==='Val')&&t.status!=='approved').length;return c>0?c:'';})()},
     {id:'audittrail',label:'Audit Trail',icon:'📋'},
   ]:isReviewer?[
     {id:'dashboard',label:'Mi día',icon:'▪'},
@@ -5738,6 +6068,9 @@ function renderShell(){
     {id:'sugerencias',label:'Sugerencias de ingreso',icon:'📦',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
     {id:'week',label:'Calendario equipo',icon:'▦'},
     {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
+    {id:'aprobados',label:'Aprobados',icon:'✅'},
+    {id:'estabilidades',label:'Estabilidades',icon:'🧪'},
+    {id:'limpval',label:'Limp & Validaciones',icon:'✔'},
   ]:isSamplerRole()?[
     {id:'dashboard',label:'Mi día',icon:'▪'},
     {id:'sampler',label:'A ingresar',icon:'📦',badge:(()=>{const myS=tasks.filter(t=>(t.status==='a-ingresar'||t.status==='muestra-ok')&&(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&!s.done));return myS.length>0?myS.length:'';})(),bc:'w'},
@@ -5757,8 +6090,8 @@ function renderShell(){
     {id:'sugerencias',label:'Sugerencias de ingreso',icon:'📦',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
     {id:'cronograma',label:'Mi cronograma',icon:'▦',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ];
-  const titles={dashboard:sup?'Panel general':'Mi día',tasks:sup?'Análisis por lote':'Mis análisis',pendientes:'Ensayos pendientes',review:'Revisión de análisis',revision:'Revisión y Aprobación',sugerencias:'Sugerencias de ingreso',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',audittrail:'Audit Trail',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración',historial:'Historial de notificaciones',sampler:'A ingresar — Muestreo',freeTasks:'Mis tareas libres'};
-  const content=({dashboard:renderDashboard,aprobados:renderAprobados,tasks:renderTasks,pending:renderPending,pendientes:renderPendientesList,week:renderWeek,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderReview,revision:renderRevision,sugerencias:renderSugerencias,informes:renderInformes,notificaciones:renderNotificaciones,historial:renderHistorialNotif,admin:renderAdmin,audittrail:renderAuditTrail,sampler:renderSamplerView,freeTasks:renderStaffFreeTasks}[currentView]||renderDashboard)();
+  const titles={dashboard:sup?'Panel general':'Mi día',tasks:sup?'Análisis por lote':'Mis análisis',pendientes:'Ensayos pendientes',review:'Revisión de análisis',revision:'Revisión y Aprobación',sugerencias:'Sugerencias de ingreso',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',audittrail:'Audit Trail',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración',historial:'Historial de notificaciones',sampler:'A ingresar — Muestreo',freeTasks:'Mis tareas libres',estabilidades:'Estabilidades',limpval:'Limpiezas & Validaciones'};
+  const content=({dashboard:renderDashboard,aprobados:renderAprobados,tasks:renderTasks,pending:renderPending,pendientes:renderPendientesList,week:renderWeek,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderReview,revision:renderRevision,sugerencias:renderSugerencias,informes:renderInformes,notificaciones:renderNotificaciones,historial:renderHistorialNotif,admin:renderAdmin,audittrail:renderAuditTrail,sampler:renderSamplerView,freeTasks:renderStaffFreeTasks,estabilidades:renderEstabilidades,limpval:renderLimpVal}[currentView]||renderDashboard)();
   return`<div class="shell">
     <div class="sidebar">
       <div class="sb-header">
@@ -6122,7 +6455,7 @@ function tRowSupLote(t){
   var row='<div class="trow-sup" onclick="openEdit('+t.id+')">';
   // C1 Producto/Lote
   row+='<div style="min-width:0"><div class="cell-trunc" style="font-weight:500">'+escH(t.producto)+'</div>'
-      +'<div class="cell-sub cell-trunc">'+escH(t.lote)+'</div></div>';
+      +'<div class="cell-sub cell-trunc" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+'<span>'+escH(t.lote)+'</span></div></div>';
   // C2 Analistas
   row+='<div style="display:flex;gap:2px;flex-wrap:wrap;align-items:center">'
       +assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" title="'+escH(u.name)+'" style="width:20px;height:20px;font-size:8px">'+escH(u.avInit)+'</div>':''}).join('')
@@ -6175,7 +6508,8 @@ function tRowSupAnalista(t){
     // C1 Producto/Lote
     row+='<div style="min-width:0">'
         +'<div class="cell-trunc" style="font-weight:'+(isFirst?'600':'400')+';color:'+(isFirst?'inherit':'var(--text3)')+'">'+escH(t.producto)+'</div>'
-        +'<div class="cell-sub cell-trunc" style="color:'+(isFirst?'var(--text3)':'var(--border)')+'">'+escH(t.lote)+'</div>'
+        +'<div class="cell-sub cell-trunc" style="display:flex;align-items:center;gap:4px;color:'+(isFirst?'var(--text3)':'var(--border)')+'">'+
+          (isFirst?sampleTypeBadge(t.tipo)+' ':'')+'<span>'+escH(t.lote)+'</span></div>'
         +'</div>';
     // C2 Analista (this row)
     row+='<div style="display:flex;align-items:center;gap:5px">'
@@ -6280,7 +6614,7 @@ function tRowAna(t,maOverride){
 
   return'<div>'
     +'<div class="trow" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr'+(showOverdueWarn?';border-left:3px solid var(--amber)':'')+'">'
-    +'<div><div class="cell-trunc">'+escH(t.producto)+'</div><div class="cell-sub">'+escH(t.lote)+'</div></div>'
+    +'<div><div class="cell-trunc">'+escH(t.producto)+'</div><div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+'<span>'+escH(t.lote)+'</span></div></div>'
     +'<div style="font-family:var(--mono);font-size:12px">'+fmtD(md)+(replanLabel?'<br>'+replanLabel:'')+'</div>'
     +'<div>'+hoursCol+'</div>'
     +'<div>'
@@ -6330,6 +6664,21 @@ function _doSearchRender(){
     if(inp){const v=filterSearch;inp.focus();inp.value=v;inp.setSelectionRange(v.length,v.length);}
   },80);
 }
+// Función genérica para search inputs fuera del main search bar:
+// actualiza la variable, re-renderiza con debounce y restaura el foco al input por su id.
+let _srchTimer=null;
+function _srch(varName,value,inputId){
+  window[varName]=value;
+  if(_srchTimer)clearTimeout(_srchTimer);
+  _srchTimer=setTimeout(function(){
+    const app=document.getElementById('app');
+    if(!app)return;
+    const html=renderShell();
+    if(html!==_lastHtml){_lastHtml=html;app.innerHTML=html;attachLogin&&attachLogin();}
+    const el=document.getElementById(inputId);
+    if(el){const v=window[varName]||'';el.focus();el.value=v;el.setSelectionRange(v.length,v.length);}
+  },60);
+}
 function renderTasks(){
   const sup=isSupRole();
   const aOpts=ANALYSTS.map(function(a){return'<option value="'+a.id+'">'+escH(a.name)+'</option>';}).join('');
@@ -6352,6 +6701,7 @@ function renderTasks(){
   let f=sup?sortTasks([...tasks],taskSort,taskSortDir):sortTasks(tasks.filter(function(t){return isMyTask(t)&&t.status!=='a-ingresar'&&t.status!=='muestra-ok';}),taskSort,taskSortDir);
   if(filterAnalyst)f=f.filter(function(t){return getAssignees(t).includes(filterAnalyst);});
   if(filterStatus)f=f.filter(function(t){return filterStatus==='late'?t._dueStatus==='late':t.status===filterStatus;});
+  if(filterTipo){if(filterTipo==='none')f=f.filter(function(t){return !(t.tipo||'');});else f=f.filter(function(t){return (t.tipo||'')===filterTipo;});}
   if(filterSearch){var fs2=filterSearch.toLowerCase();f=f.filter(function(t){return t.producto.toLowerCase().includes(fs2)||t.lote.toLowerCase().includes(fs2);});}
   if(!sup){
     // ── Historial de tareas libres (todos los estados, orden cronológico) ──
@@ -6439,6 +6789,11 @@ function renderTasks(){
     +'<option value="approved"'+(filterStatus==='approved'?' selected':'')+'>Aprobado</option>'
     +'<option value="observed"'+(filterStatus==='observed'?' selected':'')+'>Observado</option>'
     +'</select>'
+    +(sup?'<select onchange="setFTipo(this.value)">'
+    +'<option value=""'+(filterTipo===''?' selected':'')+'>Todos los tipos</option>'
+    +SAMPLE_TYPES.map(function(st){return'<option value="'+st.id+'"'+(filterTipo===st.id?' selected':'')+'>'+st.label+' — '+st.title+'</option>';}).join('')
+    +'<option value="none"'+(filterTipo==='none'?' selected':'')+'>Sin clasificar</option>'
+    +'</select>':'')
     +viewToggle
     +'<span class="count-lbl">'+f.length+' lote'+(f.length!==1?'s':'')+(filterSearch?' — «'+escH(filterSearch)+'»':'')+'</span>'
     +(sup?'<button id="copybtn-tbl-tasks" class="btn sm" onclick="copyTableToClipboard(\'tbl-tasks\')" style="margin-left:auto">📋 Copiar</button>':'')
@@ -7233,9 +7588,24 @@ function renderHistorialNotif(){
 
   events.sort(function(a,b){return (b.ts||0)-(a.ts||0);});
 
+  if(typeof window.historialSearch==='undefined') window.historialSearch='';
+  var _hq=(window.historialSearch||'').toLowerCase().trim();
+  if(_hq) events=events.filter(function(ev){
+    return ev.task.producto.toLowerCase().includes(_hq)
+      ||(ev.task.lote||'').toLowerCase().includes(_hq)
+      ||ev.by.toLowerCase().includes(_hq)
+      ||(ev.comment||'').toLowerCase().includes(_hq);
+  });
+
   if(events.length===0){
     return'<div class="sec">Historial de proceso</div>'
-      +'<div class="empty" style="padding:32px">Sin eventos registrados ✓</div>';
+      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">'
+      +'<input id="srch-historial" type="text" placeholder="Buscar por producto, lote o analista…" value="'+escH(window.historialSearch||'')+'"'
+      +' oninput="_srch(\'historialSearch\',this.value,\'srch-historial\')"'
+      +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+      +(_hq?'<button class="btn sm" onclick="window.historialSearch=\'\';render()">✕ Limpiar</button>':'')
+      +'</div>'
+      +'<div class="empty" style="padding:32px">'+((_hq)?'Sin resultados para "'+escH(_hq)+'"':'Sin eventos registrados ✓')+'</div>';
   }
 
   // Summary chips (abreviados)
@@ -7274,7 +7644,15 @@ function renderHistorialNotif(){
   var thead='<div style="display:grid;grid-template-columns:110px 130px 1fr 160px;gap:0;padding:7px 12px;background:var(--bg2);border-bottom:2px solid var(--border);font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.03em">'
     +'<div>Fecha/Hora</div><div>Evento</div><div>Análisis / Comentario</div><div>Por / Estado</div></div>';
 
+  var _hSearchBar='<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">'
+    +'<input id="srch-historial" type="text" placeholder="Buscar por producto, lote o analista…" value="'+escH(window.historialSearch||'')+'"'
+    +' oninput="_srch(\'historialSearch\',this.value,\'srch-historial\')"'
+    +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+    +(_hq?'<button class="btn sm" onclick="window.historialSearch=\'\';render()">✕ Limpiar</button>':'')
+    +'</div>';
+
   return'<div class="sec">Historial de proceso</div>'
+    +_hSearchBar
     +summaryHtml
     +'<div class="tbl">'+thead+rows+'</div>';
 }
@@ -7296,10 +7674,19 @@ function renderAdmin(){
   };
   const roleLabel=function(r){return(roleOpts.find(function(x){return x.id===r;})||{label:r}).label;};
 
+  if(typeof window.adminSearch==='undefined') window.adminSearch='';
+  var _aq=(window.adminSearch||'').toLowerCase().trim();
+
   // Header row
   var html='<div class="admin-wrap">'
     +'<h4>Usuarios del sistema</h4>'
-    +'<div class="sub" style="margin-bottom:14px">Editá nombre, contraseña y rol. Los cambios de rol toman efecto en el próximo inicio de sesión.</div>'
+    +'<div class="sub" style="margin-bottom:10px">Editá nombre, contraseña y rol. Los cambios de rol toman efecto en el próximo inicio de sesión.</div>'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">'
+    +'<input id="srch-admin" type="text" placeholder="Buscar por nombre o rol…" value="'+escH(window.adminSearch||'')+'"'
+    +' oninput="_srch(\'adminSearch\',this.value,\'srch-admin\')"'
+    +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+    +(_aq?'<button class="btn sm" onclick="window.adminSearch=\'\';render()">✕ Limpiar</button>':'')
+    +'</div>'
 
     // Column headers
     +'<div style="display:grid;grid-template-columns:100px 1fr 130px 180px 160px 80px;gap:8px;align-items:center;padding:0 10px 6px;border-bottom:2px solid var(--border)">'
@@ -7312,7 +7699,7 @@ function renderAdmin(){
     +'</div>'
 
     // User rows
-    +[...USERS].sort(function(a,b){return a.name.localeCompare(b.name,'es');}).map(function(u){
+    +[...USERS].sort(function(a,b){return a.name.localeCompare(b.name,'es');}).filter(function(u){return !_aq||u.name.toLowerCase().includes(_aq)||roleLabel(u.role).toLowerCase().includes(_aq);}).map(function(u){
       // Build 9 color swatches (av0..av8)
       var AV_NAMES=['Azul','Esmeralda','Dorado','Rojo','Violeta','Naranja','Rosa','Cian','Índigo'];
       var swatches=AV_CLASSES.map(function(cls,ci){
@@ -7810,6 +8197,7 @@ function renderTaskModal(){
       +'<h3 style="margin-bottom:4px">'+escH(t.producto)+'</h3>'
       +'<div style="font-size:12px;color:var(--text3);font-family:var(--mono);margin-bottom:16px">'+escH(t.lote)+'</div>'
       +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px;margin-bottom:16px;font-size:12px">'
+      +'<div><span style="color:var(--text3)">Tipo </span>'+sampleTypeBadge(t.tipo)+'</div>'
       +'<div><span style="color:var(--text3)">Estado </span><span class="pill '+t.status+'" style="font-size:10px">'+statusLabel(t.status)+'</span></div>'
       +'<div><span style="color:var(--text3)">Prioridad </span><span class="pill '+(t.priority||'Normal').toLowerCase()+'" style="font-size:10px">'+(t.priority||'Normal')+'</span></div>'
       +'<div><span style="color:var(--text3)">Ingreso </span><span style="font-family:var(--mono)">'+(t.created?fmtDF(t.created):'—')+'</span></div>'
@@ -7851,6 +8239,7 @@ function renderTaskModal(){
     +'<h3>'+(isEdit?'Editar análisis de lote':(newTaskPrefill.suggId?'Confirmar ingreso sugerido':'Nuevo análisis de lote'))+'</h3>'
     +_suggBanner
     +'<div class="form-grid">'
+    +'<div class="frow"><label>Tipo de muestra</label>'+renderTipoPillsHtml(t.tipo||'')+'</div>'
     +'<div class="frow"><label>Producto</label><input type="text" id="f-prod" value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg"></div>'
     +'<div class="frow"><label>N° de Lote</label><input type="text" id="f-lote" value="'+escH(t.lote||'')+'" placeholder="Ej: L-2024-001"></div>'
     +'<div class="frow"><label>Fecha de creación</label><input type="date" id="f-created" value="'+(t.created||today())+'"></div>'
@@ -8087,7 +8476,7 @@ function renderImportModal(){
       <div class="tab${modalTab==='file'?' active':''}" onclick="setMTab('file')">Archivo Excel</div>
       <div class="tab${modalTab==='template'?' active':''}" onclick="setMTab('template')">Descargar plantilla</div>
     </div>
-    ${modalTab==='paste'?`<div><p style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.6">Copiá desde Excel o Google Sheets y pegá acá. Columnas: <b>Producto · Lote · Analista · Fecha análisis · Fecha entrega · Prioridad · Notas</b></p>
+    ${modalTab==='paste'?`<div><p style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.6">Copiá desde Excel o Google Sheets y pegá acá. Columnas: <b>Producto · Lote · Tipo · Analista · Fecha análisis · Fecha entrega · Prioridad · Notas</b></p>
     <textarea class="paste-area" id="paste-in" placeholder="Pegá aquí el contenido copiado de Excel..." oninput="parsePaste(this.value)"></textarea>${renderPreview()}</div>`
     :modalTab==='file'?`<div><div class="import-area" onclick="document.getElementById('file-in').click()"><div style="font-size:28px;margin-bottom:8px">📄</div><div style="font-weight:500;color:var(--text);margin-bottom:3px">Seleccioná un archivo .xlsx o .csv</div><div>Hacé clic para buscar en tu computadora</div></div><input type="file" id="file-in" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleFile(this)">${renderPreview()}</div>`
     :`<div>
@@ -8109,11 +8498,12 @@ function renderImportModal(){
       </div>
       <table style="width:100%;font-size:11px;border-collapse:collapse">
         <tr style="background:var(--bg2)">
-          ${['Producto','Lote','Analista','Fecha análisis','Fecha entrega','Prioridad','Notas'].map(h=>`<th style="padding:5px 8px;border:1px solid var(--border);text-align:left;font-weight:600">${h}</th>`).join('')}
+          ${['Producto','Lote','Tipo','Analista','Fecha análisis','Fecha entrega','Prioridad','Notas'].map(h=>`<th style="padding:5px 8px;border:1px solid var(--border);text-align:left;font-weight:600">${h}</th>`).join('')}
         </tr>
         <tr>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Amoxicilina 500mg</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">L-2024-011</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">PT</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${ANALYSTS[0]?ANALYSTS[0].name:'Ana López'}</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${today()}</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${_relDate(3)}</td>
@@ -8123,6 +8513,7 @@ function renderImportModal(){
         <tr style="background:var(--bg)">
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Amoxicilina 500mg</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">L-2024-011</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">PT</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${ANALYSTS[1]?ANALYSTS[1].name:'Luis Ramírez'}</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${_relDate(1)}</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${_relDate(3)}</td>
@@ -8132,6 +8523,7 @@ function renderImportModal(){
       </table>
     </div>
     <p style="font-size:11px;color:var(--text3);line-height:1.6">
+      ⚠ <b>Tipo:</b> PT / MP / Limp / Val / EE (dejar vacío si no corresponde).<br>
       ⚠ <b>Analista:</b> usar exactamente el nombre como aparece en el sistema.<br>
       ⚠ <b>Fechas:</b> formato AAAA-MM-DD (ej: 2026-04-25) o DD/MM/AAAA.<br>
       ⚠ <b>Prioridad:</b> Normal / Alta / Urgente.<br>
@@ -8154,7 +8546,7 @@ function renderImportModal(){
 function renderPreview(){
   if(!pastePreview.length)return'';
   return`<div style="margin-top:10px"><div style="font-size:12px;font-weight:500;color:var(--green);margin-bottom:6px">✓ ${pastePreview.length} registro${pastePreview.length>1?'s':''} detectado${pastePreview.length>1?'s':''}</div>
-  <div style="overflow-x:auto"><table class="preview-tbl"><tr><th>Producto</th><th>Lote</th><th>Analista</th><th>F. análisis</th><th>F. entrega</th><th>Prioridad</th><th>Notas</th></tr>${pastePreview.slice(0,5).map(r=>`<tr><td>${escH(r.producto)}</td><td>${escH(r.lote)}</td><td>${escH(r.analista)}</td><td>${escH(r.fechaAnalisis)}</td><td>${escH(r.due)}</td><td>${escH(r.priority||"Normal")}</td><td>${escH(r.notes||"")}</td></tr>`).join("")}${pastePreview.length>5?`<tr><td colspan="7" style="text-align:center;color:var(--text3)">... y ${pastePreview.length-5} más</td></tr>`:""}</table></div></div>`;
+  <div style="overflow-x:auto"><table class="preview-tbl"><tr><th>Producto</th><th>Lote</th><th>Tipo</th><th>Analista</th><th>F. análisis</th><th>F. entrega</th><th>Prioridad</th><th>Notas</th></tr>${pastePreview.slice(0,5).map(r=>`<tr><td>${escH(r.producto)}</td><td>${escH(r.lote)}</td><td>${escH(r.tipo||"")}</td><td>${escH(r.analista)}</td><td>${escH(r.fechaAnalisis)}</td><td>${escH(r.due)}</td><td>${escH(r.priority||"Normal")}</td><td>${escH(r.notes||"")}</td></tr>`).join("")}${pastePreview.length>5?`<tr><td colspan="8" style="text-align:center;color:var(--text3)">... y ${pastePreview.length-5} más</td></tr>`:""}</table></div></div>`;
 }
 
 // ── CHANGE PWD MODAL ──
@@ -8174,7 +8566,7 @@ function nameToId(n){const nl=n.trim().toLowerCase();return ANALYSTS.find(a=>a.n
 function parsePaste(text){
   const lines=text.trim().split('\n').filter(l=>l.trim());
   if(lines.length<2){pastePreview=[];render();return;}
-  pastePreview=lines.slice(1).map(r=>{const c=r.split('\t');return{producto:c[0]||'',lote:c[1]||'',analista:c[2]||'',fechaAnalisis:c[3]||'',due:c[4]||'',priority:c[5]||'Normal',notes:c[6]||''};}).filter(r=>r.producto&&r.lote);
+  pastePreview=lines.slice(1).map(r=>{const c=r.split('\t');return{producto:c[0]||'',lote:c[1]||'',tipo:c[2]||'',analista:c[3]||'',fechaAnalisis:c[4]||'',due:c[5]||'',priority:c[6]||'Normal',notes:c[7]||''};}).filter(r=>r.producto&&r.lote);
   render();
 }
 function handleFile(input){
@@ -8193,6 +8585,7 @@ function handleFile(input){
       pastePreview=rows.map(r=>({
         producto:String(r['Producto']||r['producto']||'').trim(),
         lote:String(r['Lote']||r['lote']||'').trim(),
+        tipo:String(r['Tipo']||r['tipo']||'').trim(),
         analista:String(r['Analista']||r['analista']||'').trim(),
         fechaAnalisis:String(r['Fecha análisis']||r['FechaAnalisis']||r['Fecha_análisis']||'').trim(),
         due:String(r['Fecha entrega']||r['Vence']||r['fecha_entrega']||'').trim(),
@@ -8236,7 +8629,7 @@ function confirmImport(){
         if(!duplicates.includes(prod+' / Lote: '+lote))duplicates.push(prod+' / Lote: '+lote);
         return;
       }
-      if(!grouped[key]){grouped[key]={producto:prod,lote:lote,rows:[]};groupOrder.push(key);}
+      if(!grouped[key]){grouped[key]={producto:prod,lote:lote,tipo:(r.tipo||'').trim(),rows:[]};groupOrder.push(key);}
       grouped[key].rows.push(r);
     });
     groupOrder.forEach(function(k){toImport.push(grouped[k]);});
@@ -8284,7 +8677,9 @@ function confirmImport(){
         var fechaAna0=normDate(r0.fechaAnalisis);
         assignments=[{analyst:'',date:fechaAna0||due}];
       }
-      return{id:nextId++,producto:prod,lote,created:today(),assignments,due,priority,status:'pending',notes};
+      var tipoRaw=(group.tipo||'').trim();
+      var tipoVal=SAMPLE_TYPES.find(function(s){return s.id===tipoRaw;})?tipoRaw:'';
+      return{id:nextId++,producto:prod,lote,created:today(),assignments,due,priority,status:'pending',notes,tipo:tipoVal};
     }).filter(Boolean);
     tasks=tasks.concat(newTasks);
     if(duplicates&&duplicates.length>0&&newTasks.length>0)alert('Importacion completada. '+newTasks.length+' registro(s) importados. '+duplicates.length+' duplicado(s) omitido(s).');
@@ -8328,7 +8723,7 @@ function xlsxDownload(wb, filename){
   }
 }
 function copyHeadersNow(btn){
-  const text='Producto\tLote\tAnalista\tFecha análisis\tFecha entrega\tPrioridad\tNotas';
+  const text='Producto\tLote\tTipo\tAnalista\tFecha análisis\tFecha entrega\tPrioridad\tNotas';
   const done=function(){if(btn){btn.textContent='✓ Copiado';btn.style.background='var(--green)';btn.style.color='#fff';setTimeout(function(){btn.textContent='📋 Copiar encabezados';btn.style.background='';btn.style.color='';},2500);}};
   if(navigator.clipboard&&navigator.clipboard.writeText){
     navigator.clipboard.writeText(text).then(done).catch(function(){fallbackCopy(text);done();});
@@ -8346,11 +8741,11 @@ function fallbackCopy(text){
 function downloadTemplate(){
   function go(){
     const ws=XLSX.utils.aoa_to_sheet([
-      ['Producto','Lote','Analista','Fecha análisis','Fecha entrega','Prioridad','Notas'],
-      ['Amoxicilina 500mg','L-2024-011',ANALYSTS[0]?ANALYSTS[0].name:'Analista 1',today(),_relDate(3),'Normal','Control fisicoquímico'],
-      ['Ibuprofeno 400mg','L-2024-012',ANALYSTS[1]?ANALYSTS[1].name:'Analista 2',_relDate(1),_relDate(5),'Alta','Microbiológico + fisicoquímico'],
+      ['Producto','Lote','Tipo','Analista','Fecha análisis','Fecha entrega','Prioridad','Notas'],
+      ['Amoxicilina 500mg','L-2024-011','PT',ANALYSTS[0]?ANALYSTS[0].name:'Analista 1',today(),_relDate(3),'Normal','Control fisicoquímico'],
+      ['Ibuprofeno 400mg','L-2024-012','MP',ANALYSTS[1]?ANALYSTS[1].name:'Analista 2',_relDate(1),_relDate(5),'Alta','Microbiológico + fisicoquímico'],
     ]);
-    ws['!cols']=[{wch:24},{wch:14},{wch:18},{wch:16},{wch:16},{wch:12},{wch:30}];
+    ws['!cols']=[{wch:24},{wch:14},{wch:8},{wch:18},{wch:16},{wch:16},{wch:12},{wch:30}];
     const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,'Análisis',ws);
     xlsxDownload(wb,'plantilla_labtrack.xlsx');
   }
@@ -8364,6 +8759,7 @@ function doExportXLSX(){
     return{
       'Producto':t.producto,
       'Lote':t.lote,
+      'Tipo':t.tipo||'',
       'Estado':statusLabel(t.status),
       'Prioridad':t.priority||'Normal',
       'Analistas':asigs,
@@ -8410,12 +8806,12 @@ function copyPendientes(btn){
   var list=tasks.filter(function(t){return _cpStatuses.includes(t.status);})
     .filter(function(t){return !pq||t.producto.toLowerCase().includes(pq)||t.lote.toLowerCase().includes(pq);})
     .filter(function(t){if(psf==='all')return true;if(psf==='late')return t._dueStatus==='late';return t.status===psf;});
-  var HDR='Producto\tLote\tAnalistas\tF. Ingreso\tF. Planificado\tF. Aprobación límite\tPrioridad\tEstado';
+  var HDR='Producto\tLote\tTipo\tAnalistas\tF. Ingreso\tF. Planificado\tF. Aprobación límite\tPrioridad\tEstado';
   var rows=list.map(function(t){
     var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
     var anas=assigns.map(function(a){return getU(a.analyst).name;}).join(', ');
     var firstDate=assigns.reduce(function(mn,a){return !mn||a.date<mn?a.date:mn;},null);
-    return[t.producto,t.lote,anas,t.created||'',firstDate||'',t.due||'',t.priority||'Normal',statusLabel(t.status)].join('\t');
+    return[t.producto,t.lote,t.tipo||'',anas,t.created||'',firstDate||'',t.due||'',t.priority||'Normal',statusLabel(t.status)].join('\t');
   });
   _clipCopy(HDR+'\n'+rows.join('\n'),btn,'📋 Copiar');
 }
@@ -8432,7 +8828,7 @@ function exportPendientesXLSX(){
       var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
       var anas=assigns.map(function(a){return getU(a.analyst).name;}).join(', ');
       var firstDate=assigns.reduce(function(mn,a){return !mn||a.date<mn?a.date:mn;},null);
-      var row={'Producto':t.producto,'Lote':t.lote,'Analistas':anas,'F. Ingreso':t.created||'','F. Planificado':firstDate||'','F. Aprobación límite':t.due||'','Prioridad':t.priority||'Normal','Estado':statusLabel(t.status)};
+      var row={'Producto':t.producto,'Lote':t.lote,'Tipo':t.tipo||'','Analistas':anas,'F. Ingreso':t.created||'','F. Planificado':firstDate||'','F. Aprobación límite':t.due||'','Prioridad':t.priority||'Normal','Estado':statusLabel(t.status)};
       if(t.status==='a-ingresar'){row['F. Llegada esperada']=t.expectedArrival||'';row['Comentarios ingreso']=t.arrivalNotes||'';}
       return row;
     });
@@ -8613,12 +9009,12 @@ function copyHistorial(btn){
 // Aprobados
 function copyAprobados(btn){
   var list=tasks.filter(function(t){return t.status==='approved';});
-  var HDR='Producto\tLote\tAnalistas\tF. límite aprobación\tF. Aprobación\tPrioridad\tH. Reales\tAprobado por';
+  var HDR='Producto\tLote\tTipo\tAnalistas\tF. límite aprobación\tF. Aprobación\tPrioridad\tH. Reales\tAprobado por';
   var rows=list.map(function(t){
     var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
     var anas=assigns.map(function(a){return getU(a.analyst).name;}).join(', ');
     var realH=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
-    return[t.producto,t.lote,anas,t.due||'',t.approvedDate||'',t.priority||'Normal',realH?realH.toFixed(1):'',_approverName(t)].join('\t');
+    return[t.producto,t.lote,t.tipo||'',anas,t.due||'',t.approvedDate||'',t.priority||'Normal',realH?realH.toFixed(1):'',_approverName(t)].join('\t');
   });
   _clipCopy(HDR+'\n'+rows.join('\n'),btn,'📋 Copiar');
 }
@@ -10471,6 +10867,8 @@ function saveTask(){
   const priority=document.getElementById('f-prio').value;
   const status=document.getElementById('f-status').value;
   const notes=document.getElementById('f-notes').value;
+  const tipoEl=document.getElementById('f-tipo');
+  const tipo=(tipoEl?tipoEl.value.trim():'');
   const _expectedArrivalEl=document.getElementById('f-expected-arrival');
   const _arrivalNotesEl=document.getElementById('f-arrival-notes');
   const expectedArrival=_expectedArrivalEl?_expectedArrivalEl.value:'';
@@ -10574,7 +10972,7 @@ function saveTask(){
       const finalAssignments=mergedAssignments;
       // Aplicar solo campos de planificación
       t.producto=prod;t.lote=lote;t.created=created;t.due=due;
-      t.priority=priority;t.notes=notes;
+      t.priority=priority;t.notes=notes;t.tipo=tipo||'';
       t.assignments=finalAssignments;
       // Arrival fields for a-ingresar
       if(_autoStatus==='a-ingresar'||t.status==='a-ingresar'||t.status==='muestra-ok'){
@@ -10605,7 +11003,7 @@ function saveTask(){
       }
     }
   }
-  else{var _newT={id:nextId++,producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes,samplerAssignments:[]};if(_autoStatus==='a-ingresar'){if(expectedArrival)_newT.expectedArrival=expectedArrival;if(arrivalNotes)_newT.arrivalNotes=arrivalNotes;}tasks.push(_newT);
+  else{var _newT={id:nextId++,producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes,tipo:tipo||'',samplerAssignments:[]};if(_autoStatus==='a-ingresar'){if(expectedArrival)_newT.expectedArrival=expectedArrival;if(arrivalNotes)_newT.arrivalNotes=arrivalNotes;}tasks.push(_newT);
     // If created from a suggestion, mark suggestion confirmed and notify suggester
     if(newTaskPrefill.suggId){
       var _pfSug=productSuggestions.find(function(s){return s.id===newTaskPrefill.suggId;});
