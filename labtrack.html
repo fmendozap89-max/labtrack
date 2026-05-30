@@ -74,6 +74,8 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 .sb-user-name{font-size:12px;font-weight:500;margin-bottom:2px}
 .sb-link{font-size:10px;color:var(--text3);cursor:pointer;text-decoration:underline}
 .sb-link:hover{color:var(--text2)}
+/* Botón de usuario móvil (visible solo en mobile) */
+.mob-user-btn{display:none;align-items:center;justify-content:center;width:34px;height:34px;border-radius:50%;border:2px solid rgba(255,255,255,.35);cursor:pointer;padding:0;flex-shrink:0;font-size:11px;font-weight:700;font-family:var(--mono);text-transform:uppercase;-webkit-tap-highlight-color:transparent;transition:opacity .15s,transform .1s}
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
 .topbar{padding:8px 18px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0;box-shadow:0 1px 4px rgba(0,0,0,.04)}
 .topbar-title{font-size:14px;font-weight:600;flex:1;letter-spacing:-.01em}
@@ -237,7 +239,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
   .main{order:1;overflow:auto;-webkit-overflow-scrolling:touch;flex:1;min-height:0;}
   /* Topbar */
   .topbar{padding:8px 10px;gap:5px;}
-  .topbar-title{font-size:13px;}
+  .topbar-title{font-size:13px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
   .topbar .btn{font-size:10px;padding:5px 7px;min-height:32px;}
   .topbar .btn-txt{display:none;}
   /* Content */
@@ -259,6 +261,9 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
   /* Filter row */
   .filter-row{flex-wrap:wrap;gap:6px;}
   .filter-row select{font-size:14px;}
+  /* Botón de usuario en topbar (mobile only) */
+  .mob-user-btn{display:inline-flex;}
+  .mob-user-btn:active{opacity:.75;transform:scale(.9);}
 }
 
 /* Teléfonos muy pequeños: ≤ 374px */
@@ -6366,6 +6371,7 @@ function renderShell(){
         ${currentUser?renderNotifBtn():''}
         <div id="sp-status-badge" style="margin-right:4px"></div>
         ${sup&&currentView!=='admin'?`<button class="btn amb" onclick="showImportModal=true;modalTab='paste';pastePreview=[];render()">↑ <span class="btn-txt">Importar</span></button><button class="btn pri" onclick="openNewTask()">+ <span class="btn-txt">Nuevo Producto</span></button>`:''}
+        ${currentUser?`<button class="mob-user-btn av ${currentUser.av}" onclick="openMobUserMenu()" aria-label="Perfil de usuario">${escH(currentUser.avInit)}</button>`:''}
       </div>
       <div class="content">${content}</div>
     </div>
@@ -9417,6 +9423,29 @@ function logout(){
   currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';loginShowSync=false;loginShowLabSwitch=false;
   try{localStorage.removeItem('lt9-session');localStorage.removeItem('lt9-lastView');}catch(e){}
   render();
+}
+function openMobUserMenu(){
+  if(!currentUser)return;
+  var roleLabel=currentUser.role==='supervisor'?'Supervisor':currentUser.role==='reviewer'?'Revisor':currentUser.role==='staff'?'Personal':currentUser.role==='sampler'?'Muestreador':'Analista';
+  var overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;z-index:800;background:rgba(0,0,0,.45);display:flex;flex-direction:column;justify-content:flex-end';
+  var guideLink=workdayConfig&&workdayConfig.guideUrl?'<a href="'+escH(workdayConfig.guideUrl)+'" target="_blank" rel="noopener" class="btn" style="width:100%;text-align:left;padding:13px 16px;font-size:14px;min-height:48px;text-decoration:none;display:flex;align-items:center;gap:8px;box-sizing:border-box">📖 Guía de usuario</a>':'';
+  overlay.innerHTML='<div style="background:var(--surface);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:0 0 0 0;box-shadow:0 -4px 28px rgba(0,0,0,.18)" onclick="event.stopPropagation()">'
+    +'<div style="display:flex;justify-content:center;padding:10px 0 4px"><div style="width:36px;height:4px;background:var(--border2);border-radius:4px;opacity:.5"></div></div>'
+    +'<div style="padding:16px 20px 14px;display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--border)">'
+    +'<div class="av av-xl '+currentUser.av+'">'+escH(currentUser.avInit)+'</div>'
+    +'<div><div style="font-size:15px;font-weight:600;letter-spacing:-.01em">'+escH(currentUser.name)+'</div>'
+    +'<div style="font-size:12px;color:var(--text3);margin-top:2px">'+roleLabel+'</div></div></div>'
+    +'<div style="padding:10px 16px;display:flex;flex-direction:column;gap:6px">'
+    +'<button class="btn" style="width:100%;text-align:left;padding:13px 16px;font-size:14px;min-height:48px;display:flex;align-items:center;gap:8px;box-sizing:border-box" onclick="window._closeMobMenu();openChangePwd()">🔑 Cambiar contraseña</button>'
+    +guideLink
+    +'<button class="btn dan" style="width:100%;text-align:left;padding:13px 16px;font-size:14px;min-height:48px;display:flex;align-items:center;gap:8px;box-sizing:border-box;margin-top:4px" onclick="window._closeMobMenu();logout()">⏻ Salir de LabTrack</button>'
+    +'</div>'
+    +'<div style="height:calc(env(safe-area-inset-bottom) + 8px)"></div>'
+    +'</div>';
+  window._closeMobMenu=function(){try{document.body.removeChild(overlay);}catch(e){}};
+  overlay.addEventListener('click',function(e){if(e.target===overlay)window._closeMobMenu();});
+  document.body.appendChild(overlay);
 }
 function openNewTask(){editingTask=null;selectedAnalysts=[];analystDates={};multiAssigns=[];newTaskPrefill={};showModal=true;render();}
 function openNewTaskFromSuggestion(suggId){
