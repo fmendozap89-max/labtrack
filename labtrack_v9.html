@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Humanova LabTrack</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.20.3/xlsx.full.min.js" defer></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js" defer></script>
 <style>
 
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
@@ -309,6 +309,7 @@ function stableAvIdx(uid){var s=String(uid),h=0;for(var k=0;k<s.length;k++)h=(h*
 // ── STATE ──
 let USERS=[];
 let passwords={};
+let passwords_ts={};
 let tasks=[];
 let freeTasks=[]; // tareas libres sin producto: {id,analystId,description,hours,date,category,notes,status,confirmedBy,confirmedTs,_ts}
 let nextFreeTaskId=1;
@@ -323,6 +324,7 @@ let nextAbsId=1;
 let nextMgmtId=1;
 let currentUser=null,currentView='dashboard';
 let showSamplingModal=false,samplingTaskId=null;
+let _pendingSamplerAuditLogs=[];
 let showModal=false,editingTask=null;
 let selectedAnalysts=[],analystDates={};
 let showNotifPanel=false;
@@ -347,6 +349,7 @@ let modalTab='paste',pastePreview=[];
 let replanNotifs=[];
 let showReplanModal=false,replanTaskId=null;
 let absences={};
+let absences_ts={};
 let workdayConfig={weekdays:{1:true,2:true,3:true,4:true,5:true,0:false,6:false},extra:[],off:[],guideUrl:''};
 let mgmtTasks=[];
 let editingMgmt=null;
@@ -435,11 +438,11 @@ function getSnapshot(){
   var _labRegistry=labProfiles.filter(function(l){return l.gistId;}).map(function(l){return{id:l.id,name:l.name,gistId:l.gistId};});
   return JSON.stringify({
     savedAt:Date.now(),
-    v:6,
+    v:7,
     tasks,nextId,nextUid,nextNotifId,nextAbsId,nextMgmtId,
     freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,
     users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{})})),
-    passwords,replanNotifs,absences,workdayConfig,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
+    passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
     auditTrail,
     labRegistry:_labRegistry
   });
@@ -450,9 +453,11 @@ function applySnapshot(json){
     if(!d||!d.tasks)return false;
     USERS=d.users.map(u=>({...u}));
     passwords=d.passwords||{};
+    passwords_ts=d.passwords_ts||{};
     replanNotifs=d.replanNotifs||[];
     nextNotifId=d.nextNotifId||replanNotifs.length+1;
     absences=d.absences||{};
+    absences_ts=d.absences_ts||{};
     nextAbsId=d.nextAbsId||1;
     mgmtTasks=d.mgmtTasks||[];
     nextMgmtId=d.nextMgmtId||1;
@@ -488,8 +493,8 @@ function applySnapshot(json){
     // Normalize status: pending↔scheduled based on active assignments
     tasks.forEach(function(t){
       var activeA=(t.assignments||[]).length; // ya sin _removed tras migración
-      if(t.status==='pending'&&activeA>0) t.status='scheduled';
-      if(t.status==='scheduled'&&activeA===0) t.status='pending';
+      if(t.status==='pending'&&activeA>0){t.status='scheduled';t._ts=Date.now();}
+      if(t.status==='scheduled'&&activeA===0){t.status='pending';t._ts=Date.now();}
       // Ensure samplerAssignments array exists
       if(!t.samplerAssignments)t.samplerAssignments=[];
     });
@@ -1392,10 +1397,10 @@ function isViewAllowed(view, user){
   if(!user||!view)return false;
   var role=user.role;
   // Views restricted to supervisor only
-  var supOnly=['admin','audittrail','historial','informes','rrhh','notificaciones','aprobados'];
+  var supOnly=['admin','audittrail','historial','informes','rrhh','aprobados'];
   if(supOnly.includes(view)&&role!=='supervisor')return false;
   // Views restricted to supervisor + reviewer
-  var supRevOnly=['especiales','revision'];
+  var supRevOnly=['especiales','revision','notificaciones'];
   if(supRevOnly.includes(view)&&role!=='supervisor'&&role!=='reviewer')return false;
   return true;
 }
@@ -1842,19 +1847,25 @@ function saveExtraWorkday(dateStr, analystIds, note){
   workdayConfig.extra=workdayConfig.extra.filter(e=>(e.date||e)!==dateStr);
   workdayConfig.extra.push({date:dateStr,analysts:analystIds,note:note||''});
   workdayConfig.extra.sort((a,b)=>(a.date||a).localeCompare(b.date||b));
-  workdayConfig._ts=Date.now();saveLS();render();
+  workdayConfig._ts=Date.now();
+  auditLog('CREATE','WORKDAY_CONFIG',dateStr,{description:'Día extra laborable: '+dateStr,analysts:analystIds,note:note||''},'');
+  saveLS();render();
 }
 function saveOffDay(dateStr, note){
   workdayConfig.extra=workdayConfig.extra.filter(e=>(e.date||e)!==dateStr);
   workdayConfig.off=workdayConfig.off.filter(o=>(o.date||o)!==dateStr);
   workdayConfig.off.push({date:dateStr,note:note||''});
   workdayConfig.off.sort((a,b)=>(a.date||a).localeCompare(b.date||b));
-  workdayConfig._ts=Date.now();saveLS();render();
+  workdayConfig._ts=Date.now();
+  auditLog('CREATE','WORKDAY_CONFIG',dateStr,{description:'Día no laborable: '+dateStr,note:note||''},'');
+  saveLS();render();
 }
 function removeWorkdayOverride(dateStr){
   workdayConfig.extra=workdayConfig.extra.filter(e=>(e.date||e)!==dateStr);
   workdayConfig.off=workdayConfig.off.filter(o=>(o.date||o)!==dateStr);
-  workdayConfig._ts=Date.now();saveLS();render();
+  workdayConfig._ts=Date.now();
+  auditLog('DELETE','WORKDAY_CONFIG',dateStr,{description:'Excepción de calendario eliminada: '+dateStr},'');
+  saveLS();render();
 }
 function getAnalystScheduleDefault(analystId){
   const stored=analystSchedules[analystId];
@@ -1895,7 +1906,7 @@ function setAnalystDayOverride(analystId,dateStr,sched){
   saveLS();render();
 }
 function removeAnalystDayOverride(analystId,dateStr){
-  ifanalystSchedules[analystId]?.overrides
+  if(analystSchedules[analystId]?.overrides)
     delete analystSchedules[analystId].overrides[dateStr];
   saveLS();render();
 }
@@ -1925,13 +1936,26 @@ function saveAbsenceEdit(analystId, absId){
   if(end<start){alert('La fecha fin no puede ser anterior al inicio.');return;}
   const list=absences[analystId]||[];
   const ab=list.find(a=>a.id===absId);
-  if(ab){ab.type=type;ab.startDate=start;ab.endDate=end;ab.note=note;}
+  if(ab){
+    const prev={type:ab.type,startDate:ab.startDate,endDate:ab.endDate,note:ab.note};
+    ab.type=type;ab.startDate=start;ab.endDate=end;ab.note=note;ab._ts=Date.now();
+    auditLog('EDIT','ABSENCE',absId,{
+      analystId:analystId,analystName:getU(analystId).name,
+      oldVal:JSON.stringify(prev),newVal:JSON.stringify({type,startDate:start,endDate:end,note}),
+      description:'Edición de ausencia: '+getU(analystId).name+' '+start+' al '+end
+    },'');
+  }
   checkAbsenceConflicts();saveLS();render();
 }
 function deleteAbsence(analystId,absId){
   if(!confirm('¿Eliminar esta ausencia? Esta acción no se puede deshacer.'))return;
   if(!absences[analystId])return;
+  const ab=absences[analystId].find(a=>a.id===absId);
   absences[analystId]=absences[analystId].filter(a=>a.id!==absId);
+  auditLog('DELETE','ABSENCE',absId,{
+    analystId:analystId,analystName:getU(analystId).name,
+    description:'Eliminación de ausencia: '+getU(analystId).name+(ab?' '+ab.startDate+' al '+ab.endDate:'')
+  },'');
   saveLS();render();
 }
 function checkAbsenceConflicts(){
@@ -2174,7 +2198,7 @@ function renderSchedulesWeek(isSup,rows,pendTotal){
     const absent=getAbsenceOnDate(analystId,d);
     const isWork=isWorkdayFor(analystId,d);
     const pendReq=scheduleRequests.find(r=>r.analystId===analystId&&r.dateStr===d&&r.status==='pending');
-    const myTasks=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===analystId&&x.date===d));
+    const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===analystId&&x.date===d));
     const mgmtOccs=(_dayMgmtCache[d]||[]).filter(o=>(o.analysts||[]).includes(analystId));
     const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,analystId,d),0);
     const extraH=Math.max(0,workH-h);
@@ -2340,7 +2364,7 @@ function renderSchedulesMonth(isSup,rows){
             const absent=getAbsenceOnDate(analyst.id,d);
             const isWork=isWorkdayFor(analyst.id,d);
             const pendReq=scheduleRequests.find(r=>r.analystId===analyst.id&&r.dateStr===d&&r.status==='pending');
-            const myTasks=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===analyst.id&&x.date===d));
+            const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===analyst.id&&x.date===d));
             const mgmtOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,d,d)).filter(o=>(o.analysts||[]).includes(analyst.id));
             const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,analyst.id,d),0);
             const approvedOT=scheduleRequests.find(r=>r.analystId===analyst.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime');
@@ -2445,7 +2469,9 @@ function saveAbsType(key){
   const input=document.getElementById('abstype-'+key);
   const val=input?.value.trim();
   if(!val){showAbsTypeMsg('El nombre no puede estar vacío.','var(--red)');return;}
+  const oldLabel=absenceTypesDef[key]?absenceTypesDef[key].label:'';
   if(absenceTypesDef[key])absenceTypesDef[key].label=val;
+  auditLog('EDIT','ABSENCE_TYPE',key,{description:'Tipo de ausencia renombrado: "'+oldLabel+'" → "'+val+'"'},'');
   saveLS();render();
   showAbsTypeMsg('Tipo actualizado: "'+val+'"','var(--green)');
 }
@@ -2459,7 +2485,9 @@ function cycleAbsColor(key){
 function deleteAbsType(key){
   const used=Object.values(absences).flat().filter(a=>a.type===key).length;
   if(used>0){alert('No se puede eliminar: hay '+used+' ausencia(s) con este tipo. Primero editá o eliminá esas ausencias.');return;}
-  if(!confirm('¿Eliminar el tipo "'+absenceTypesDef[key]?.label+'"?'))return;
+  const delLabel=absenceTypesDef[key]?.label||key;
+  if(!confirm('¿Eliminar el tipo "'+delLabel+'"?'))return;
+  auditLog('DELETE','ABSENCE_TYPE',key,{description:'Tipo de ausencia eliminado: "'+delLabel+'"'},'');
   delete absenceTypesDef[key];
   saveLS();render();
 }
@@ -2471,6 +2499,7 @@ function addAbsType(){
   const key='custom_'+label.toLowerCase().replace(/[^a-z0-9]/g,'_').slice(0,20)+'_'+Date.now().toString(36).slice(-4);
   if(absenceTypesDef[key]){showNewAbsTypeMsg('Ya existe un tipo con ese nombre.','var(--red)');return;}
   absenceTypesDef[key]={label,color:pal.color,text:pal.text};
+  auditLog('CREATE','ABSENCE_TYPE',key,{description:'Tipo de ausencia creado: "'+label+'"',color:pal.color},'');
   saveLS();
   const inp=document.getElementById('newabstype-label');
   if(inp)inp.value='';
@@ -3252,7 +3281,7 @@ function renderMgmtWeek(isSup, wd, weekOccs){
     html+='<div class="wcell-name"><div class="av '+a.av+'" style="flex-shrink:0">'+escH(a.avInit)+'</div>'+escH(a.name.split(' ')[0])+'</div>';
     wd.forEach(function(d){
       var dayOccs=weekOccs.filter(function(o){return o.occDate===d&&(o.analysts||[]).includes(a.id);});
-      var analysisOccs=tasks.filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===a.id&&x.date===d;});});
+      var analysisOccs=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===a.id&&x.date===d;});});
       var analysisH=analysisOccs.reduce(function(s,t){return s+getAssignHours(t,a.id,d);},0);
       var totalH=analysisH;
       var pct=Math.min(totalH/WORKDAY_HOURS*100,100);
@@ -3448,7 +3477,7 @@ function renderCronogramaWeek(a, def){
     const pendSched=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime';});
     const pendOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime';});
     const approvedOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime';});
-    const myTasks=tasks.filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===d;});});
+    const myTasks=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===d;});});
     const mgmtOccs=(mgmtCache[d]||[]).filter(function(o){return(o.analysts||[]).includes(currentUser.id);});
     const workH=myTasks.reduce(function(acc,t){return acc+getAssignHours(t,currentUser.id,d);},0);
     const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
@@ -3586,7 +3615,7 @@ function renderCronogramaMonth(a, def){
       const pendSched=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime';});
       const pendOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime';});
       const approvedOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='approved'&&r.proposed.type==='overtime';});
-      const myTasks=tasks.filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===dateStr;});});
+      const myTasks=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===dateStr;});});
       const dayMgmt=mgmtOccsByDay[dateStr]||[];
       const workH=myTasks.reduce(function(acc,t){return acc+getAssignHours(t,currentUser.id,dateStr);},0);
       const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
@@ -3715,7 +3744,7 @@ function renderMySchedWeek(a, def){
     const pendSched=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime');
     const pendOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime');
     const approvedOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime');
-    const myTasks=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===d));
+    const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===d));
     const mgmtOccs=(cache[d]||[]).filter(o=>(o.analysts||[]).includes(currentUser.id));
     const workH=myTasks.reduce((acc,t)=>acc+getAssignHours(t,currentUser.id,d),0);
     const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
@@ -3825,9 +3854,9 @@ function renderMySchedMonth(a, def){
       const pendSched=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime');
       const pendOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime');
       const approvedOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='approved'&&r.proposed.type==='overtime');
-      const myTasks=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===dateStr));
+      const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===dateStr));
       const mgmtOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,dateStr,dateStr)).filter(o=>(o.analysts||[]).includes(currentUser.id));
-      const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,currentUser.id,d||dateStr||''),0);
+      const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,currentUser.id,dateStr||''),0);
       const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
       const absTyp=absent?getABSTypes()[absent.type]||{color:'#fdeee4',text:'#8a3c10',label:'Aus.'}:null;
       const schedTyp=hasOv?SCHED_TYPES.find(t=>t.id===ov.type)||null:null;
@@ -4048,8 +4077,14 @@ function saveMgmt(){
     analysts,
     notes:document.getElementById('mg-notes')?.value||''
   };
-  if(editingMgmt!==null){const idx=mgmtTasks.findIndex(m=>m.id===editingMgmt);if(idx>=0)mgmtTasks[idx]=obj;else mgmtTasks.push(obj);}
+  const isEditMgmt=editingMgmt!==null;
+  if(isEditMgmt){const idx=mgmtTasks.findIndex(m=>m.id===editingMgmt);if(idx>=0)mgmtTasks[idx]=obj;else mgmtTasks.push(obj);}
   else mgmtTasks.push(obj);
+  const cat=getMgmtCat(obj.category);
+  auditLog(isEditMgmt?'EDIT':'CREATE','MGMT',obj.id,{
+    description:(isEditMgmt?'Edición':'Creación')+' de tarea de gestión: '+(cat?cat.label:obj.category)+' — '+obj.startDate,
+    frequency:obj.frequency,analysts:obj.analysts
+  },'');
   showMgmtModal=false;editingMgmt=null;saveLS('counters');
   render();
 }
@@ -4184,7 +4219,14 @@ function removeMgmtExc(){
 
 function openMgmtModal(id){editingMgmt=id;showMgmtModal=true;render();}
 function closeMgmtModal(){showMgmtModal=false;editingMgmt=null;render();}
-function deleteMgmt(id){if(!confirm('¿Eliminar esta actividad?'))return;mgmtTasks=mgmtTasks.filter(m=>m.id!==id);saveLS();render();}
+function deleteMgmt(id){
+  if(!confirm('¿Eliminar esta actividad de gestión?'))return;
+  const mt=mgmtTasks.find(m=>m.id===id);
+  const cat=mt?getMgmtCat(mt.category):null;
+  auditLog('DELETE','MGMT',id,{description:'Eliminación de tarea de gestión: '+(cat?cat.label:(mt?mt.category:'?'))+(mt?' — '+mt.startDate:'')},'');
+  mgmtTasks=mgmtTasks.filter(m=>m.id!==id);
+  saveLS();render();
+}
 
 function getTableData(tableId){
   // Returns {headers:[], rows:[[]]} built from data model, not DOM
@@ -4197,9 +4239,11 @@ function getTableData(tableId){
   }
   let taskList=[];
   if(tableId==='tbl-tasks'){
-    let f=currentUser.role==='supervisor'?sortTasks([...tasks],taskSort,taskSortDir):sortTasks(tasks.filter(t=>isMyTask(t)),taskSort,taskSortDir);
+    let f=currentUser.role==='supervisor'?sortTasks(activeTasks(),taskSort,taskSortDir):sortTasks(activeTasks().filter(t=>isMyTask(t)),taskSort,taskSortDir);
     if(filterAnalyst)f=f.filter(t=>getAssignees(t).includes(filterAnalyst));
-    if(filterStatus)f=f.filter(t=>t.status===filterStatus);
+    if(filterStatus)f=f.filter(t=>filterStatus==='late'?t._dueStatus==='late':t.status===filterStatus);
+    if(filterSearch){const fs2=filterSearch.toLowerCase();f=f.filter(t=>t.producto.toLowerCase().includes(fs2)||t.lote.toLowerCase().includes(fs2));}
+    if(filterTipo){if(filterTipo==='none')f=f.filter(t=>!(t.tipo||''));else f=f.filter(t=>(t.tipo||'')===filterTipo);}
     // 'Por analista' view: one row per assignment
     if(tasksView==='analista'){
       var analRows=[];
@@ -4220,11 +4264,11 @@ function getTableData(tableId){
     }
     taskList=f;
   } else if(tableId==='tbl-dash'){
-    taskList=(dashFilter&&dashFilter!=='all')?tasks.filter(t=>t.status===dashFilter):[...tasks].reverse();
+    taskList=(dashFilter&&dashFilter!=='all')?activeTasks().filter(t=>t.status===dashFilter):[...activeTasks()].reverse();
   } else if(tableId==='tbl-late'){
-    taskList=tasks.filter(t=>t._dueStatus==='late'&&t.status!=='approved');
+    taskList=activeTasks().filter(t=>t._dueStatus==='late'&&t.status!=='approved');
   } else if(tableId==='tbl-pend'){
-    taskList=tasks.filter(t=>t.status==='pending');
+    taskList=activeTasks().filter(t=>t.status==='pending');
   }
   return{headers:HEADERS,rows:taskList.map(taskToRow)};
 }
@@ -4329,7 +4373,7 @@ function sortTasks(arr,sortCol,dir){
 }
 
 function renderAprobados(){
-  var approved=sortTasks(tasks.filter(function(t){return t.status==='approved';}),taskSort,taskSortDir);
+  var approved=sortTasks(activeTasks().filter(function(t){return t.status==='approved';}),taskSort,taskSortDir);
   if(typeof window.aprobSearch==='undefined')window.aprobSearch='';
   var q=window.aprobSearch.toLowerCase().trim();
   if(q)approved=approved.filter(function(t){return t.producto.toLowerCase().includes(q)||t.lote.toLowerCase().includes(q);});
@@ -4394,7 +4438,7 @@ function renderAprobados(){
 function doExportAprobados(){
   if(!isSupRole()&&!isReviewerRole()){showToast('Solo supervisores y revisores pueden exportar.','warn');return;}
   _lazyXLSX(function(){
-  var approved=tasks.filter(function(t){return t.status==='approved';});
+  var approved=activeTasks().filter(function(t){return t.status==='approved';});
   var rows=approved.map(function(t){
     var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
     var realH=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
@@ -4435,7 +4479,7 @@ function renderEspeciales(){
 // ── ESTABILIDADES ──
 function renderEstabilidades(){
   var sup=isSupRole();
-  var allEE=tasks.filter(function(t){return (t.tipo||'')==='EE';});
+  var allEE=activeTasks().filter(function(t){return (t.tipo||'')==='EE';});
   var activas=sortTasks(allEE.filter(function(t){return t.status!=='approved';}),taskSort,taskSortDir);
   var aprobadas=sortTasks(allEE.filter(function(t){return t.status==='approved';}),taskSort,taskSortDir);
 
@@ -4504,7 +4548,7 @@ function renderEstabilidades(){
 // ── LIMPIEZAS & VALIDACIONES ──
 function renderLimpVal(){
   var sup=isSupRole();
-  var allLV=tasks.filter(function(t){return t.tipo==='Limp'||t.tipo==='Val';});
+  var allLV=activeTasks().filter(function(t){return t.tipo==='Limp'||t.tipo==='Val';});
   var activas=sortTasks(allLV.filter(function(t){return t.status!=='approved';}),taskSort,taskSortDir);
   var aprobadas=sortTasks(allLV.filter(function(t){return t.status==='approved';}),taskSort,taskSortDir);
 
@@ -4586,7 +4630,7 @@ function exportTipoXLSX(tipos, filename){
   if(!isSupRole()&&!isReviewerRole()){showToast('Solo supervisores y revisores pueden exportar.','warn');return;}
   _lazyXLSX(function(){
     var filter=Array.isArray(tipos)?tipos:[tipos];
-    var list=tasks.filter(function(t){return filter.includes(t.tipo||'');});
+    var list=activeTasks().filter(function(t){return filter.includes(t.tipo||'');});
     var rows=list.map(function(t){
       var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
       var realH=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
@@ -4865,6 +4909,10 @@ async function doLogin(){
   if(!selectedLoginUser){loginError='Seleccioná un usuario.';render();return;}
   const v=(document.getElementById('login-pwd')||{}).value||'';
   const uid=selectedLoginUser.id||selectedLoginUser;
+  // 21 CFR Part 11: bloqueo de cuenta por intentos fallidos
+  if(checkLoginLockout(uid)){
+    loginError='Cuenta bloqueada por intentos fallidos. Esperá 15 minutos.';render();return;
+  }
   const stored=passwords[uid]||'';
   let ok=false;
   if(stored.startsWith('$sha256$')){
@@ -4874,6 +4922,8 @@ async function doLogin(){
     if(ok){
       hashPassword(v).then(function(h){
         passwords[uid]=h;
+        if(!passwords_ts)passwords_ts={};
+        passwords_ts[uid]=Date.now();
         saveLS();saveNow().catch(function(e){console.error('pwd-upgrade:',e);});
       });
     }
@@ -4883,10 +4933,21 @@ async function doLogin(){
     loginStep=1;loginError='';selectedLoginUser=null;
     currentView=firstViewForRole(currentUser);
     recordLoginSuccess(uid);
-    try{localStorage.setItem('lt9-session',JSON.stringify({uid:uid,ts:Date.now()}));}catch(e){}
-    render();
+    auditLog('LOGIN','USER',uid,{description:'Inicio de sesión: '+currentUser.name},'');
+    // Forzar cambio de contraseña si nunca fue cambiada (default)
+    if(currentUser._mustChangePwd){
+      try{localStorage.setItem('lt9-session',JSON.stringify({uid:uid,ts:Date.now()}));}catch(e){}
+      render();
+      setTimeout(function(){showChangePwd=true;render();},200);
+    } else {
+      try{localStorage.setItem('lt9-session',JSON.stringify({uid:uid,ts:Date.now()}));}catch(e){}
+      render();
+    }
   } else {
-    loginError='Contraseña incorrecta. Intentá de nuevo.';
+    recordLoginFailure(uid,(uMap[uid]||{}).name||uid);
+    auditLog('LOGIN_FAIL','USER',uid,{description:'Intento fallido de login: '+(uMap[uid]?uMap[uid].name:uid)},'');
+    const rem=MAX_LOGIN_ATTEMPTS-(loginAttempts[uid]?loginAttempts[uid].count:0);
+    loginError='Contraseña incorrecta.'+(rem>0?' Intentos restantes: '+rem:' Cuenta bloqueada 15 min.');
     render();
   }
 }
@@ -4896,8 +4957,8 @@ function renderReview(){
   var _rvq=(window.reviewSearch||'').toLowerCase().trim();
   function _rvMatch(t){return !_rvq||t.producto.toLowerCase().includes(_rvq)||(t.lote||'').toLowerCase().includes(_rvq);}
   // Tasks completed or observed - awaiting review
-  const pending=tasks.filter(function(t){return (t.status==='done'||t.status==='observed')&&_rvMatch(t);});
-  const done=tasks.filter(function(t){return t.status==='reviewed'&&_rvMatch(t);});
+  const pending=activeTasks().filter(function(t){return (t.status==='done'||t.status==='observed')&&_rvMatch(t);});
+  const done=activeTasks().filter(function(t){return t.status==='reviewed'&&_rvMatch(t);});
   const cols='grid-template-columns:1.5fr 1fr 1fr .7fr .65fr .5fr';
 
   function reviewRow(t,canAct){
@@ -4973,7 +5034,7 @@ function renderRevision(){
   if(!_isSup&&!_isRev) return '<div class="empty">Acceso restringido</div>';
   if(typeof window.revisionTab==='undefined') window.revisionTab='revision';
   var _tab=window.revisionTab;
-  var aprobCount=tasks.filter(function(t){return t.status==='approved';}).length;
+  var aprobCount=activeTasks().filter(function(t){return t.status==='approved';}).length;
   var tabBar='<div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:2px solid var(--border);padding-bottom:0">'
     +'<button onclick="window.revisionTab=\'revision\';render()" style="padding:8px 16px;border:none;background:none;cursor:pointer;font-size:13px;font-weight:600;border-bottom:2px solid '+(_tab==='revision'?'var(--blue)':'transparent')+';color:'+(_tab==='revision'?'var(--blue)':'var(--text2)')+';margin-bottom:-2px">📋 En revisión</button>'
     +(_isSup?'<button onclick="window.revisionTab=\'aprobados\';render()" style="padding:8px 16px;border:none;background:none;cursor:pointer;font-size:13px;font-weight:600;border-bottom:2px solid '+(_tab==='aprobados'?'var(--blue)':'transparent')+';color:'+(_tab==='aprobados'?'var(--blue)':'var(--text2)')+';margin-bottom:-2px">✅ Aprobados <span style="font-size:11px;font-weight:400;color:var(--text3)">('+aprobCount+')</span></button>':'')
@@ -4982,9 +5043,9 @@ function renderRevision(){
   if(typeof window.revSearch==='undefined') window.revSearch='';
   var q=(window.revSearch||'').toLowerCase().trim();
   function mQ(t){return !q||t.producto.toLowerCase().includes(q)||(t.lote||'').toLowerCase().includes(q);}
-  var doneT=tasks.filter(function(t){return t.status==='done'&&mQ(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
-  var reviewedT=tasks.filter(function(t){return t.status==='reviewed'&&mQ(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
-  var observedT=tasks.filter(function(t){return t.status==='observed'&&mQ(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
+  var doneT=activeTasks().filter(function(t){return t.status==='done'&&mQ(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
+  var reviewedT=activeTasks().filter(function(t){return t.status==='reviewed'&&mQ(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
+  var observedT=activeTasks().filter(function(t){return t.status==='observed'&&mQ(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
   var cols='grid-template-columns:1.6fr 0.9fr 0.7fr 0.65fr 1fr';
   function tRow(t,actions){
     var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
@@ -5270,27 +5331,33 @@ function markObservedAll(){
   if(currentUser.role!=='supervisor'&&currentUser.role!=='reviewer'){
     alert('Solo el Supervisor o el Revisor pueden observar análisis.');return;
   }
-  var pending=tasks.filter(function(t){return t.status==='done';});
+  var pending=activeTasks().filter(function(t){return t.status==='done';});
   if(!pending.length){alert('No hay análisis pendientes.');return;}
   var comment=prompt('Observación general para los '+pending.length+' análisis pendientes:','');
   if(comment===null)return;
   if(!comment.trim()){alert('La observación no puede estar vacía.');return;}
-  pending.forEach(function(t){
-    if(!t.observations)t.observations=[];
-    t.observations.push({by:currentUser.id,byName:currentUser.name,byRole:currentUser.role,
-      ts:Date.now(),comment:comment.trim(),fromStatus:t.status});
-    t.status='observed';t.observedBy=currentUser.id;t.observedTs=Date.now();
-    // Notificar analistas
-    const assignees=[...new Set((t.assignments||[]).map(function(a){return a.analyst;}))];
-    assignees.forEach(function(analystId){
-      replanNotifs.push({id:nextNotifId++,type:'observation',taskId:t.id,analystId:analystId,forUserId:analystId,
-        status:'pending',ts:Date.now(),fromUser:currentUser.id,fromName:currentUser.name,
-        fromRole:currentUser.role,comment:comment.trim(),producto:t.producto,lote:t.lote});
-    });
-    auditLog('OBSERVE','TASK',t.id,{field:'status',oldVal:'done',newVal:'observed',
-      description:'Observación masiva: '+t.producto+' '+t.lote},comment);
-  });
-  saveLS();render();
+  requireSignature(
+    'Observación masiva ('+pending.length+' análisis)',
+    'Observar '+pending.length+' análisis completados: '+comment.trim().slice(0,60),
+    function(reason){
+      pending.forEach(function(t){
+        if(!t.observations)t.observations=[];
+        t.observations.push({by:currentUser.id,byName:currentUser.name,byRole:currentUser.role,
+          ts:Date.now(),comment:comment.trim(),fromStatus:t.status});
+        t.status='observed';t.observedBy=currentUser.id;t.observedTs=Date.now();
+        // Notificar analistas
+        const assignees=[...new Set((t.assignments||[]).map(function(a){return a.analyst;}))];
+        assignees.forEach(function(analystId){
+          replanNotifs.push({id:nextNotifId++,type:'observation',taskId:t.id,analystId:analystId,forUserId:analystId,
+            status:'pending',ts:Date.now(),fromUser:currentUser.id,fromName:currentUser.name,
+            fromRole:currentUser.role,comment:comment.trim(),producto:t.producto,lote:t.lote});
+        });
+        auditLog('OBSERVE','TASK',t.id,{field:'status',oldVal:'done',newVal:'observed',
+          description:'Observación masiva: '+t.producto+' '+t.lote},comment.trim()+' | Motivo firma: '+reason);
+      });
+      saveLS();render();
+    }
+  );
 }
 
 function renderInformes(){
@@ -5320,7 +5387,7 @@ function renderInformes(){
   }
 
   // ── filters ──
-  var filtered=[...tasks];
+  var filtered=activeTasks();
   if(informeFilterStatus) filtered=filtered.filter(function(t){return t.status===informeFilterStatus;});
   if(informeFilterTipo){if(informeFilterTipo==='none')filtered=filtered.filter(function(t){return !(t.tipo||'');});else filtered=filtered.filter(function(t){return (t.tipo||'')===informeFilterTipo;});}
   if(filterSearch){var q=filterSearch.toLowerCase();filtered=filtered.filter(function(t){return t.producto.toLowerCase().includes(q)||t.lote.toLowerCase().includes(q);});}
@@ -5567,12 +5634,12 @@ function mergeSnapshot(local, remote) {
     });
     merged.scheduleRequests = Object.values(srMap);
 
-    // ── Replan notifs: merge by id ──
+    // ── Replan notifs: merge by id, usando 'ts' (no '_ts' que nunca existe en estos objetos) ──
     var rnMap = {};
     (R.replanNotifs||[]).forEach(function(n){ rnMap[n.id] = n; });
     (L.replanNotifs||[]).forEach(function(n){
       var rn = rnMap[n.id];
-      if(!rn || (n._ts||0) > (rn._ts||0)) rnMap[n.id] = n;
+      if(!rn || (n.ts||0) > (rn.ts||0)) rnMap[n.id] = n;
     });
     merged.replanNotifs = Object.values(rnMap);
 
@@ -5879,7 +5946,7 @@ function exportAuditCSV(){
   var rows=[['Fecha','Hora','Usuario','Rol','Accion','Entidad','ID','Descripcion','Motivo']];
   [...auditTrail].sort(function(a,b){return a.ts-b.ts;}).forEach(function(e){
     var dt=new Date(e.ts);var u=getU(e.userId||e.user);
-    rows.push([dt.toLocaleDateString('es'),dt.toLocaleTimeString('es'),u?u.name:(e.userName||e.userId||''),u?u.role:(e.userRole||''),,e.action,e.entity,String(e.entityId||''),(e.details&&e.details.description)||'',e.reason||'']);
+    rows.push([dt.toLocaleDateString('es'),dt.toLocaleTimeString('es'),u?u.name:(e.userName||e.userId||''),u?u.role:(e.userRole||''),e.action,e.entity,String(e.entityId||''),(e.details&&e.details.description)||'',e.reason||'']);
   });
   var csv=rows.map(function(r){return r.map(function(c){return'"'+String(c||'').replace(/"/g,'""')+'"';}).join(',');}).join('\n');
   var blob=new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'});
@@ -5994,27 +6061,37 @@ function copyAuditTrail() {
 }
 
 // ── 21 CFR Part 11: Failed login tracking ──
-let loginAttempts = {};  // {uid: {count, lastTs}}
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCKOUT_MS = 15 * 60 * 1000; // 15 min
 
+function _loadLoginAttempts(){
+  try{var s=sessionStorage.getItem('lt9-loginAttempts');return s?JSON.parse(s):{};}catch(e){return {};}
+}
+function _saveLoginAttempts(att){
+  try{sessionStorage.setItem('lt9-loginAttempts',JSON.stringify(att));}catch(e){}
+}
+let loginAttempts = _loadLoginAttempts();  // {uid: {count, lastTs}} — persiste en sessionStorage
+
 function checkLoginLockout(uid) {
+  loginAttempts = _loadLoginAttempts(); // recargar siempre desde sessionStorage
   const att = loginAttempts[uid];
   if(!att) return false;
-  if(Date.now() - att.lastTs > LOGIN_LOCKOUT_MS) { loginAttempts[uid] = null; return false; }
+  if(Date.now() - att.lastTs > LOGIN_LOCKOUT_MS) { loginAttempts[uid] = null; _saveLoginAttempts(loginAttempts); return false; }
   return att.count >= MAX_LOGIN_ATTEMPTS;
 }
 function recordLoginFailure(uid, name) {
+  loginAttempts = _loadLoginAttempts();
   if(!loginAttempts[uid]) loginAttempts[uid] = {count:0, lastTs:0};
   loginAttempts[uid].count++;
   loginAttempts[uid].lastTs = Date.now();
-  /* LOGIN_FAIL no se registra en audit trail */
+  _saveLoginAttempts(loginAttempts);
   if(loginAttempts[uid].count >= MAX_LOGIN_ATTEMPTS) {
-    /* ACCOUNT_LOCKED no se registra en audit trail */
+    auditLog('ACCOUNT_LOCKED','USER',uid,{description:'Cuenta bloqueada por '+MAX_LOGIN_ATTEMPTS+' intentos fallidos: '+name},'');
   }
 }
 function recordLoginSuccess(uid) {
-  loginAttempts[uid] = null; // reset on success
+  loginAttempts[uid] = null;
+  _saveLoginAttempts(loginAttempts);
 }
 
 // ── 21 CFR Part 11: Session inactivity timeout ──
@@ -6031,7 +6108,7 @@ function startSessionWatchdog() {
     if(!currentUser) return;
     const idle = Date.now() - _lastActivityTs;
     if(idle >= SESSION_TIMEOUT_MS) {
-      /* SESSION_TIMEOUT no se registra en audit trail */
+          auditLog('SESSION_TIMEOUT','USER',currentUser.id,{description:'Cierre de sesión por inactividad (30 min): '+currentUser.name},'');
       currentUser = null;
       selectedLoginUser = null;
       loginStep = 1;
@@ -6056,6 +6133,10 @@ function softDeleteTask(id, reason) {
   }, reason);
   closeModal(); saveLS(); render();
 }
+
+// Helper: tasks visible in normal views (soft-deleted records excluded per ALCOA+)
+// Deleted tasks are preserved in `tasks` array for audit trail but hidden from UI.
+function activeTasks(){return tasks.filter(function(t){return !t._deleted;});}
 
 // ── GLP/ISO 17025: Record versioning — save snapshot before each edit ──
 function saveTaskVersion(t) {
@@ -6110,6 +6191,9 @@ function renderTaskHistory(taskId) {
 // ── 21 CFR Part 11: Data integrity hash ──
 function computeIntegrityHash(t) {
   // Simple deterministic checksum of critical fields
+  // NOTE: Uses DJB2 (non-cryptographic) for synchronous convenience — adequate for
+  // detecting accidental data corruption, NOT for adversarial tamper-proofing.
+  // Cryptographic integrity (SHA-256 via auditLog + _history) is handled separately.
   const str = [t.id, t.producto, t.lote, t.status,
     t.reviewedBy||'', t.reviewedDate||'', t.approvedBy||'', t.approvedDate||'',
     (t.assignments||[]).map(function(a){return a.analyst+':'+a.date;}).join(',')
@@ -6178,14 +6262,14 @@ function showTaskHistoryModal(taskId) {
 function renderShell(){
   const sup=isSupRole();
   const isReviewer=isReviewerRole();
-  const myT=sup?tasks:tasks.filter(t=>isMyTask(t));
+  const myT=sup?activeTasks():activeTasks().filter(t=>isMyTask(t));
   const lateC=myT.filter(t=>t._dueStatus==='late').length;
   const pendC=myT.filter(t=>t.status==='pending').length;
   // Tareas con acción pendiente del analista actual (dentro de ventana de 3 días)
   const actionC=(()=>{
     if(sup)return 0;
     const _myId=currentUser.id,_todStr=today(),_todDate=new Date(_todStr+'T12:00:00');
-    return tasks.filter(function(t){
+    return activeTasks().filter(function(t){
       if(['a-ingresar','muestra-ok','done','reviewed','approved'].includes(t.status))return false;
       var myA=(t.assignments||[]).filter(function(a){return a.analyst===_myId&&!a._removed;});
       if(!myA.length)return false;
@@ -6199,14 +6283,14 @@ function renderShell(){
       });
     }).length;
   })();
-  const reviewPendC=(isReviewer||sup)?tasks.filter(t=>t.status==='done').length:0;
+  const reviewPendC=(isReviewer||sup)?activeTasks().filter(t=>t.status==='done').length:0;
   const navs=sup?[
     {id:'dashboard',label:'Panel general',icon:'▪'},
     {id:'tasks',label:'Análisis',icon:'≡',badge:pendC>0?pendC:'',bc:'w'},
-    {id:'pending',label:'Pendientes',icon:'▲',badge:(()=>{const pc=tasks.filter(t=>t.status==='pending-confirm').length;const sc=productSuggestions.filter(s=>s.status==='pending').length;return lateC>0||pc>0||sc>0?(lateC+pc+sc):'';})(),bc:'d'},
-    {id:'revision',label:'Revisión',icon:'📝',badge:(()=>{const d=tasks.filter(t=>t.status==='done').length,r=tasks.filter(t=>t.status==='reviewed').length,o=tasks.filter(t=>t.status==='observed').length;const tot=d+r+o;return tot>0?tot:'';})(),bc:'w'},
+    {id:'pending',label:'Pendientes',icon:'▲',badge:(()=>{const pc=activeTasks().filter(t=>t.status==='pending-confirm').length;const sc=productSuggestions.filter(s=>s.status==='pending').length;return lateC>0||pc>0||sc>0?(lateC+pc+sc):'';})(),bc:'d'},
+    {id:'revision',label:'Revisión',icon:'📝',badge:(()=>{const d=activeTasks().filter(t=>t.status==='done').length,r=activeTasks().filter(t=>t.status==='reviewed').length,o=activeTasks().filter(t=>t.status==='observed').length;const tot=d+r+o;return tot>0?tot:'';})(),bc:'w'},
     {id:'sugerencias',label:'Sugerencias de ingreso',icon:'📦',badge:(()=>{const sc=productSuggestions.filter(s=>s.status==='pending').length;return sc>0?sc:'';})(),bc:'w'},
-    {id:'especiales',label:'Especiales',icon:'🧪',badge:(()=>{const c=tasks.filter(t=>(t.tipo==='EE'||t.tipo==='Limp'||t.tipo==='Val')&&t.status!=='approved').length;return c>0?c:'';})()},
+    {id:'especiales',label:'Especiales',icon:'🧪',badge:(()=>{const c=activeTasks().filter(t=>(t.tipo==='EE'||t.tipo==='Limp'||t.tipo==='Val')&&t.status!=='approved').length;return c>0?c:'';})()},
     {id:'mgmt',label:'Gestión',icon:'📋'},
     {id:'week',label:'Calendario',icon:'▦'},
     {id:'informes',label:'Informes',icon:'📊'},
@@ -6224,9 +6308,10 @@ function renderShell(){
     {id:'week',label:'Calendario equipo',icon:'▦'},
     {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
     {id:'especiales',label:'Especiales',icon:'🧪'},
+    {id:'notificaciones',label:'Solicitudes',icon:'🔔',badge:(()=>{const p=scheduleRequests.filter(r=>r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ]:isSamplerRole()?[
     {id:'dashboard',label:'Mi día',icon:'▪'},
-    {id:'sampler',label:'A ingresar',icon:'📦',badge:(()=>{const myS=tasks.filter(t=>(t.status==='a-ingresar'||t.status==='muestra-ok')&&(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&!s.done));return myS.length>0?myS.length:'';})(),bc:'w'},
+    {id:'sampler',label:'A ingresar',icon:'📦',badge:(()=>{const myS=activeTasks().filter(t=>(t.status==='a-ingresar'||t.status==='muestra-ok')&&(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&!s.done));return myS.length>0?myS.length:'';})(),bc:'w'},
     {id:'freeTasks',label:'Tareas libres',icon:'✏'},
     {id:'sugerencias',label:'Sugerencias de ingreso',icon:'📦',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
     {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
@@ -6350,7 +6435,7 @@ function renderStaffFreeTasks(){
 
 // ── Vista principal del muestreador ──
 function renderSamplerView(){
-  var all=tasks.filter(function(t){return t.status==='a-ingresar'||t.status==='muestra-ok';});
+  var all=activeTasks().filter(function(t){return t.status==='a-ingresar'||t.status==='muestra-ok';});
   var myAssigned=all.filter(function(t){return(t.samplerAssignments||[]).some(function(s){return s.sampler===currentUser.id;});});
   var others=all.filter(function(t){return!(t.samplerAssignments||[]).some(function(s){return s.sampler===currentUser.id;});});
 
@@ -6399,19 +6484,20 @@ function renderSamplerView(){
 function renderDashboard(){
   const sup=currentUser.role==='supervisor';
   if(sup){
-    const late=tasks.filter(t=>t._dueStatus==='late'&&t.status!=='approved').length;
-    const prog=tasks.filter(t=>t.status==='progress'||t.status==='pending-confirm').length;
-    const done=tasks.filter(t=>['done','reviewed','approved'].includes(t.status)).length;
-    const pend=tasks.filter(t=>t.status==='pending'||t.status==='scheduled').length;
-    const toConfirm=tasks.filter(t=>t.status==='pending-confirm').length;
-    const aIngresar=tasks.filter(t=>t.status==='a-ingresar').length;
-    const aIngresarOverdue=tasks.filter(t=>t.status==='a-ingresar'&&t.expectedArrival&&t.expectedArrival<today()).length;
-    let filtered=((dashFilter&&dashFilter!=='all')?tasks.filter(t=>dashFilter==='late'?t._dueStatus==='late'&&t.status!=='approved':dashFilter==='done'?['done','reviewed','approved'].includes(t.status):dashFilter==='progress'?(t.status==='progress'||t.status==='pending-confirm'):t.status===dashFilter):sortTasks([...tasks],taskSort,taskSortDir)).filter(t=>!filterSearch||t.producto.toLowerCase().includes(filterSearch.toLowerCase())||t.lote.toLowerCase().includes(filterSearch.toLowerCase()));
-    const filterLabel={'':`Todos (${tasks.length})`,'pending':`Pendientes (${pend})`,'progress':`En curso (${prog})`,'late':`Vencidos (${late})`,'done':`Completados p/revisar (${done})`};
+    const _at=activeTasks();
+    const late=_at.filter(t=>t._dueStatus==='late'&&t.status!=='approved').length;
+    const prog=_at.filter(t=>t.status==='progress'||t.status==='pending-confirm').length;
+    const done=_at.filter(t=>['done','reviewed','approved'].includes(t.status)).length;
+    const pend=_at.filter(t=>t.status==='pending'||t.status==='scheduled').length;
+    const toConfirm=_at.filter(t=>t.status==='pending-confirm').length;
+    const aIngresar=_at.filter(t=>t.status==='a-ingresar').length;
+    const aIngresarOverdue=_at.filter(t=>t.status==='a-ingresar'&&t.expectedArrival&&t.expectedArrival<today()).length;
+    let filtered=((dashFilter&&dashFilter!=='all')?_at.filter(t=>dashFilter==='late'?t._dueStatus==='late'&&t.status!=='approved':dashFilter==='done'?['done','reviewed','approved'].includes(t.status):dashFilter==='progress'?(t.status==='progress'||t.status==='pending-confirm'):t.status===dashFilter):sortTasks([..._at],taskSort,taskSortDir)).filter(t=>!filterSearch||t.producto.toLowerCase().includes(filterSearch.toLowerCase())||t.lote.toLowerCase().includes(filterSearch.toLowerCase()));
+    const filterLabel={'':`Todos (${_at.length})`,'pending':`Pendientes (${pend})`,'progress':`En curso (${prog})`,'late':`Vencidos (${late})`,'done':`Completados p/revisar (${done})`};
     return`
       <div class="stats-row">
         <div class="scard" onclick="dashFilter='';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter===''?';box-shadow:0 0 0 2px var(--navy,#1a4f8a)':''}">
-          <div class="scard-lbl">LOTES TOTALES</div><div class="scard-val">${tasks.length}</div></div>
+          <div class="scard-lbl">LOTES TOTALES</div><div class="scard-val">${_at.length}</div></div>
         ${aIngresar>0?`<div class="scard" onclick="currentView='pending';window.pendingStatusFilter='a-ingresar';render()" style="cursor:pointer;transition:box-shadow .15s;border-color:#d8b4fe">
           <div class="scard-lbl" style="color:#5b21b6">A INGRESAR</div><div class="scard-val" style="color:#5b21b6">${aIngresar}${aIngresarOverdue>0?`<span style="font-size:12px;color:var(--red);margin-left:4px">⚠${aIngresarOverdue}</span>`:''}
           </div></div>`:''}
@@ -6443,8 +6529,8 @@ function renderDashboard(){
   }
   // Sampler dashboard
   if(isSamplerRole()){
-    const myPending=tasks.filter(t=>(t.status==='a-ingresar'||t.status==='muestra-ok')&&(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&!s.done));
-    const myDoneS=tasks.filter(t=>(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&s.done));
+    const myPending=activeTasks().filter(t=>(t.status==='a-ingresar'||t.status==='muestra-ok')&&(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&!s.done));
+    const myDoneS=activeTasks().filter(t=>(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&s.done));
     const myFT=freeTasks.filter(ft=>ft.analystId===currentUser.id&&ft.status!=='done').slice(0,5);
     return`<div class="dash-grid" style="margin-bottom:16px">
       <div class="stat-card"><div class="stat-n" style="color:var(--amber)">${myPending.length}</div><div class="stat-l">Pendientes muestreo</div></div>
@@ -6474,9 +6560,9 @@ function renderDashboard(){
   }
   // ── Revisor: banner de análisis pendientes de revisión ──
   if(isReviewerRole()){
-    var _revPend=tasks.filter(function(t){return t.status==='done';});
-    var _revObs=tasks.filter(function(t){return t.status==='observed';});
-    var _revRev=tasks.filter(function(t){return t.status==='reviewed';});
+    var _revPend=activeTasks().filter(function(t){return t.status==='done';});
+    var _revObs=activeTasks().filter(function(t){return t.status==='observed';});
+    var _revRev=activeTasks().filter(function(t){return t.status==='reviewed';});
     var _revBanner='<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">'
       +'<div class="scard" onclick="currentView=\'review\';render()" style="cursor:pointer;border-top:3px solid var(--amber)">'
         +'<div class="scard-lbl">PARA REVISAR</div>'
@@ -6502,7 +6588,7 @@ function renderDashboard(){
     var _revRet=_revBanner;
     // Si el revisor también tiene tareas asignadas, las mostramos abajo
     var _myId2=currentUser.id;
-    var _myRevTasks=tasks.filter(function(t){return (t.assignments||[]).some(function(a){return a.analyst===_myId2&&!a._removed;});});
+    var _myRevTasks=activeTasks().filter(function(t){return (t.assignments||[]).some(function(a){return a.analyst===_myId2&&!a._removed;});});
     if(_myRevTasks.length>0){
       _revRet+='<div class="sec">Mis análisis asignados</div>';
       _revRet+='<div class="tbl"><div class="thead" style="grid-template-columns:2fr 1fr 1fr 1fr"><div>Producto / Lote</div><div>F. límite</div><div>Estado</div><div>Prioridad</div></div>';
@@ -6541,7 +6627,7 @@ function renderDashboard(){
     return pend.map(function(a){return a.date||'9999';}).sort()[0];
   }
 
-  var myTasks=tasks.filter(function(t){
+  var myTasks=activeTasks().filter(function(t){
     return t.status!=='a-ingresar'&&t.status!=='muestra-ok'
       &&(t.assignments||[]).some(function(a){return a.analyst===_myId&&!a._removed;});
   });
@@ -6749,18 +6835,28 @@ function tRowSupAnalista(t){
 }
 
 function openReplanSuper(taskId){
-  // If multiple analysts, open picker; if one, go direct
+  // If multiple analysts, open picker modal; if one, go direct
   const t=tasks.find(x=>x.id===taskId);if(!t)return;
   const assignees=getAssignees(t);
-  if(assignees.length===1){openReplan(taskId,assignees[0]);}
-  else if(assignees.length>1){
-    const names=assignees.map(id=>getU(id).name).join(', ');
-    const pick=prompt('Analistas asignados:\n'+names+'\n\nEscribí las primeras letras del nombre del analista a replanificar:');
-    if(!pick)return;
-    const found=assignees.find(id=>getU(id).name.toLowerCase().includes(pick.toLowerCase()));
-    if(found){openReplan(taskId,found);}
-    else{alert('No se encontró ese analista.');}
-  }
+  if(assignees.length===0)return;
+  if(assignees.length===1){openReplan(taskId,assignees[0]);return;}
+  // Multiple analysts — show inline picker modal
+  var pickDiv=document.createElement('div');
+  var btns=assignees.map(function(aid){
+    var u=getU(aid);if(!u)return'';
+    return'<button class="btn" style="width:100%;text-align:left;padding:10px 14px;margin-bottom:6px;font-size:13px" onclick="_replanPickClose();openReplan('+taskId+',\''+aid+'\')">'
+      +'<span class="av '+u.av+'" style="width:22px;height:22px;font-size:9px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;font-weight:700;margin-right:8px">'+escH(u.avInit)+'</span>'
+      +escH(u.name)+'</button>';
+  }).join('');
+  pickDiv.innerHTML='<div style="position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center">'
+    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px;width:320px;box-shadow:0 8px 32px rgba(0,0,0,.25)">'
+    +'<h4 style="margin:0 0 4px">Replanificar</h4>'
+    +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(t.producto)+' — '+escH(t.lote)+'<br>Seleccioná el analista a replanificar:</p>'
+    +btns
+    +'<button class="btn" style="width:100%;margin-top:2px" onclick="_replanPickClose()">Cancelar</button>'
+    +'</div></div>';
+  document.body.appendChild(pickDiv);
+  window._replanPickClose=function(){try{document.body.removeChild(pickDiv);}catch(e){}};
 }
 // Expand a task to one row per assignment for the current analyst (independent per-date)
 function tRowsAna(t){
@@ -6904,7 +7000,7 @@ function renderTasks(){
     +'<div>Acciones</div>'
     +'</div>';
   let rows='';
-  let f=sup?sortTasks([...tasks],taskSort,taskSortDir):sortTasks(tasks.filter(function(t){return isMyTask(t)&&t.status!=='a-ingresar'&&t.status!=='muestra-ok';}),taskSort,taskSortDir);
+  let f=sup?sortTasks(activeTasks(),taskSort,taskSortDir):sortTasks(activeTasks().filter(function(t){return isMyTask(t)&&t.status!=='a-ingresar'&&t.status!=='muestra-ok';}),taskSort,taskSortDir);
   if(filterAnalyst)f=f.filter(function(t){return getAssignees(t).includes(filterAnalyst);});
   if(filterStatus)f=f.filter(function(t){return filterStatus==='late'?t._dueStatus==='late':t.status===filterStatus;});
   if(filterTipo){if(filterTipo==='none')f=f.filter(function(t){return !(t.tipo||'');});else f=f.filter(function(t){return (t.tipo||'')===filterTipo;});}
@@ -7052,7 +7148,7 @@ function renderPendientesList(){
     return t.status===psf;
   }
 
-  var allActive=tasks.filter(function(t){
+  var allActive=activeTasks().filter(function(t){
     return (t.status==='pending'||t.status==='scheduled'||t.status==='progress')&&matchQ(t);
   });
   var filtered=allActive.filter(matchS);
@@ -7064,7 +7160,7 @@ function renderPendientesList(){
 
   var chips=renderPendStatusChips(psf,allActive.length,nIngresado,nProgramado,nAnalisis);
   // Pending-confirm own (completed, awaiting supervisor)
-  var misPendConfirm=tasks.filter(function(t){
+  var misPendConfirm=activeTasks().filter(function(t){
     return t.status==='pending-confirm'&&t.completedBy===currentUser.id&&matchQ(t);
   });
 
@@ -7125,8 +7221,8 @@ function renderPendientesResults(filtered,pc){
       if(psf2==='all') return t.status==='pending'||t.status==='scheduled'||t.status==='progress';
       return t.status===psf2;
     }
-    filtered=tasks.filter(function(t){return mS2(t)&&mQ2(t);});
-    pc=tasks.filter(function(t){return t.status==='pending-confirm'&&t.completedBy===currentUser.id&&mQ2(t);});
+    filtered=activeTasks().filter(function(t){return mS2(t)&&mQ2(t);});
+    pc=activeTasks().filter(function(t){return t.status==='pending-confirm'&&t.completedBy===currentUser.id&&mQ2(t);});
   }
   function alreadyReq(taskId){
     return replanNotifs.some(function(n){return n.type==='planification_request'&&n.taskId===taskId&&n.analystId===currentUser.id&&n.status==='pending';});
@@ -7179,14 +7275,14 @@ function renderPending(){
   const pq=(window.pendingSearch||'').toLowerCase().trim();
   function mPQ(t){return !pq||t.producto.toLowerCase().includes(pq)||t.lote.toLowerCase().includes(pq);}
 
-  const lateT=tasks.filter(t=>t._dueStatus==='late'&&t.status!=='approved'&&mPQ(t));
-  const toConfirmT=isSupRole()?tasks.filter(t=>t.status==='pending-confirm'&&mPQ(t)):[];
-  const observedT=isSupRole()?tasks.filter(t=>t.status==='observed'&&mPQ(t)):[];
+  const lateT=activeTasks().filter(t=>t._dueStatus==='late'&&t.status!=='approved'&&mPQ(t));
+  const toConfirmT=isSupRole()?activeTasks().filter(t=>t.status==='pending-confirm'&&mPQ(t)):[];
+  const observedT=isSupRole()?activeTasks().filter(t=>t.status==='observed'&&mPQ(t)):[];
   // needsReviewT — calculado pero renderizado en renderReview(); se mantiene por si se quiere usar como sección futura
-  const needsApprovalT=isSupRole()?tasks.filter(t=>t.status==='reviewed'&&mPQ(t)):[];
-  const pendT=tasks.filter(t=>t.status==='pending'&&mPQ(t));
+  const needsApprovalT=isSupRole()?activeTasks().filter(t=>t.status==='reviewed'&&mPQ(t)):[];
+  const pendT=activeTasks().filter(t=>t.status==='pending'&&mPQ(t));
   // productos sin asignar visibles solo para analistas (no para revisor ni supervisor)
-  const unassignedT=(!isSupRole()&&!isReviewerRole())?tasks.filter(function(t){
+  const unassignedT=(!isSupRole()&&!isReviewerRole())?activeTasks().filter(function(t){
     return (t.status==='pending'||t.status==='scheduled')&&
       !(t.assignments||[]).some(function(a){return !a._removed;});
   }):[];
@@ -7256,7 +7352,7 @@ function renderPendingContent(){
   var psf=window.pendingStatusFilter||'all';
 
   // Unified task list — estados "pendientes" (previos a completado p/ revisar)
-  var allT=sortTasks(tasks.filter(function(t){
+  var allT=sortTasks(activeTasks().filter(function(t){
     var visibleStatuses=['pending','scheduled','progress','pending-confirm'];
     if(isSupRole()){visibleStatuses.unshift('a-ingresar');visibleStatuses.unshift('muestra-ok');}
     return visibleStatuses.indexOf(t.status)>=0&&mQ2(t);
@@ -7441,13 +7537,13 @@ function renderCalWeek(sup){
       <div class="whead" style="${cols}"><div>Usuario</div>${dayLbls.map((d,i)=>`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
       ${rows.map(a=>`<div class="wrow" style="${cols}">
         <div class="wcell-name"><div class="av ${a.av}" style="flex-shrink:0">${escH(a.avInit)}</div>${escH(a.name.split(' ')[0])}</div>
-        ${wd.map(d=>{const dt=tasks.filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=tasks.filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>{const _canDrag=sup&&d>=_tomorrowStr&&t.status==='scheduled';return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ ':''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`;}).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
+        ${wd.map(d=>{const dt=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=activeTasks().filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>{const _canDrag=sup&&d>=_tomorrowStr&&t.status==='scheduled';return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ ':''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`;}).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
       </div>`).join('')}
     </div>
   </div>
   ${!sup?`<div class="sec" style="margin-top:16px">Mis análisis de esta semana</div><div class="tbl">
     <div class="thead" style="grid-template-columns:1.4fr .8fr .7fr .7fr .9fr"><div>Producto / Lote</div><div>Fecha asig.</div><div>Prioridad</div><div>Estado</div><div></div></div>
-    ${tasks.filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))).map(t=>tRowsAna(t)).join('')||'<div class="empty">Sin análisis esta semana</div>'}
+    ${activeTasks().filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))).map(t=>tRowsAna(t)).join('')||'<div class="empty">Sin análisis esta semana</div>'}
   </div>`:''}
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text2)">
     ${sup?'<span style="display:flex;align-items:center;gap:4px;background:var(--bg2);padding:2px 7px;border-radius:10px">✋ Arrastrá un análisis programado a otro día u analista</span>':''}
@@ -7519,7 +7615,7 @@ function renderCalMonth(sup){
       const isWE=dt2.getDay()===0||dt2.getDay()===6;
 
       // Collect content for this day filtered by selected analyst
-      const dayTasks=tasks.filter(function(t){
+      const dayTasks=activeTasks().filter(function(t){
         return(t.assignments||[]).some(function(a){
           return a.date===dateStr&&rows.some(function(r){return r.id===a.analyst;});
         });
@@ -7710,7 +7806,7 @@ function renderAnalysts(){
   const isSup=isSupRole();
   if(!ANALYSTS.length) return '<div class="empty">Sin analistas registrados</div>';
   return ANALYSTS.map(function(a){
-    const myT=tasks.filter(function(t){return (t.assignments||[]).some(function(x){return x.analyst===a.id;});});
+    const myT=activeTasks().filter(function(t){return (t.assignments||[]).some(function(x){return x.analyst===a.id;});});
     const pend=myT.filter(function(t){return t.status==='pending'||t.status==='scheduled'||t._dueStatus==='late';}).length;
     const prog=myT.filter(function(t){return t.status==='progress'||t.status==='pending-confirm';}).length;
     const done=myT.filter(function(t){return ['done','reviewed','approved'].includes(t.status);}).length;
@@ -8122,12 +8218,19 @@ function saveUserRole(uid){
   setTimeout(function(){if(msg)msg.textContent='';},3000);}
 }
 
-function saveUserPwd(uid){
+async function saveUserPwd(uid){
   const v=document.getElementById('upwd-'+uid)?.value;
   if(!v||v.length<4){alert('La contraseña debe tener al menos 4 caracteres.');return;}
-  passwords[uid]=v;
+  const h=await hashPassword(v);
+  passwords[uid]=h;
+  if(!passwords_ts)passwords_ts={};
+  passwords_ts[uid]=Date.now();
+  // Limpiar flag de primer-login si existía
+  const u=USERS.find(function(x){return x.id===uid;});
+  if(u)u._mustChangePwd=false;
+  auditLog('EDIT','USER',uid,{description:'Contraseña restablecida por supervisor para: '+(u?u.name:uid)},'Restablecimiento administrativo de contraseña');
   document.getElementById('upwd-'+uid).value='';
-  saveLS();
+  saveLS();saveNow().catch(function(e){console.error('saveNow saveUserPwd:',e);});
   const msg=document.getElementById('new-user-msg');
   if(msg){msg.style.color='var(--green)';msg.textContent='Contraseña actualizada.';setTimeout(function(){if(msg)msg.textContent='';},2000);}
 }
@@ -8145,14 +8248,16 @@ function saveGuideUrl(){
 
 function deleteUser(uid){
   const u=uMap[uid];if(!u)return;
+  if(!isSupRole()){alert('Solo el supervisor puede eliminar usuarios.');return;}
   if(!confirm('¿Eliminar a '+u.name+'? Sus tareas asignadas quedarán sin ese analista.'))return;
+  auditLog('DELETE','USER',uid,{description:'Eliminación de usuario: '+u.name,role:u.role},'Eliminación administrativa');
   USERS=USERS.filter(x=>x.id!==uid);
   delete passwords[uid];
   rebuildDerived();
-  saveLS();
+  saveLS();saveNow().catch(function(e){console.error('saveNow deleteUser:',e);});
   render();
 }
-function addUser(){
+async function addUser(){
   const name=(document.getElementById('nu-name')||{}).value||'';
   const role=(document.getElementById('nu-role')||{}).value||'analyst';
   const pwd=(document.getElementById('nu-pwd')||{}).value||'';
@@ -8160,14 +8265,19 @@ function addUser(){
   if(name.trim().length<2){msg.style.color='var(--red)';msg.textContent='El nombre debe tener al menos 2 caracteres.';return;}
   if(pwd.length<4){msg.style.color='var(--red)';msg.textContent='La contraseña debe tener al menos 4 caracteres.';return;}
   const uid='U'+nextUid++;
-  USERS.push({id:uid,name:name.trim(),role});
-  passwords[uid]=pwd;
+  const newUser={id:uid,name:name.trim(),role,_mustChangePwd:true};
+  USERS.push(newUser);
+  const h=await hashPassword(pwd);
+  passwords[uid]=h;
+  if(!passwords_ts)passwords_ts={};
+  passwords_ts[uid]=0; // marca como "nunca cambiada por el usuario"
+  auditLog('CREATE','USER',uid,{description:'Nuevo usuario creado: '+name.trim(),role:role},'Alta administrativa');
   rebuildDerived();
-  saveLS();
-  msg.style.color='var(--green)';msg.textContent=name.trim()+' fue creado correctamente.';
+  saveLS();saveNow().catch(function(e){console.error('saveNow addUser:',e);});
+  msg.style.color='var(--green)';msg.textContent=name.trim()+' fue creado correctamente. Deberá cambiar su contraseña en el primer ingreso.';
   document.getElementById('nu-name').value='';
   document.getElementById('nu-pwd').value='';
-  setTimeout(()=>{const m=document.getElementById('new-user-msg');if(m)m.textContent='';render();},1500);
+  setTimeout(()=>{const m=document.getElementById('new-user-msg');if(m)m.textContent='';render();},2000);
 }
 
 function doLabReset(labId){
@@ -8396,6 +8506,10 @@ function saveTimeEntry(){
   else{ma.timeLog.push({date:todayStr,start,end,notes,hours});}
   // Update legacy realHours for compat
   ma.realHours=ma.timeLog.reduce((s,e)=>s+(e.hours||0),0);
+  t._ts=Date.now();
+  auditLog('EDIT','TASK',timeLogTaskId,{
+    field:'timeLog',description:'Registro de tiempo: '+start+'–'+end+' ('+hours+'h) en '+todayStr+' — '+t.producto+' '+t.lote
+  },'');
   showTimeLogModal=false;saveLS();render();
 }
 
@@ -8403,8 +8517,12 @@ function deleteTimeEntry(taskId,dateStr){
   if(!confirm('¿Eliminar esta entrada de tiempo? Esta acción no se puede deshacer.'))return;
   const t=tasks.find(x=>x.id===taskId);if(!t)return;
   const ma=(t.assignments||[]).find(a=>a.analyst===currentUser.id);if(!ma||!ma.timeLog)return;
+  auditLog('DELETE','TASK',taskId,{
+    field:'timeLog',description:'Eliminación de entrada de tiempo del '+dateStr+' — '+t.producto+' '+t.lote
+  },'');
   ma.timeLog=ma.timeLog.filter(e=>e.date!==dateStr);
   ma.realHours=ma.timeLog.reduce((s,e)=>s+(e.hours||0),0);
+  t._ts=Date.now();
   saveLS();render();
 }
 
@@ -8827,7 +8945,7 @@ function handleFile(input){
   }
   if(window.XLSX){doRead();}else{
     var s=document.createElement('script');
-    s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.20.3/xlsx.full.min.js';
+    s.src='https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
     s.onload=doRead;
     s.onerror=function(){alert('No se pudo cargar la librería Excel. Verificá tu conexión a internet.');};
     document.head.appendChild(s);
@@ -8990,15 +9108,15 @@ function doExportXLSX(){
   });
   const ws=xlsxSheet(rows);
   ws['!cols']=[{wch:24},{wch:14},{wch:16},{wch:10},{wch:28},{wch:30},{wch:14},{wch:12},{wch:18},{wch:14},{wch:18},{wch:10},{wch:14},{wch:35},{wch:40}];
-  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,'Análisis',ws);
-  const res=ANALYSTS.map(a=>{const mt=tasks.filter(t=>getAssignees(t).includes(a.id));return{'Analista':a.name,'Total':mt.length,'Completados':mt.filter(t=>t.status==='done').length,'En curso':mt.filter(t=>t.status==='progress').length,'Pendientes':mt.filter(t=>t.status==='pending').length,'Vencidos':mt.filter(t=>t._dueStatus==='late'&&t.status!=='approved').length};});
-  XLSX.utils.book_append_sheet(wb,'Resumen analistas',xlsxSheet(res));
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Análisis');
+  const res=ANALYSTS.map(a=>{const mt=activeTasks().filter(t=>getAssignees(t).includes(a.id));return{'Analista':a.name,'Total':mt.length,'Completados':mt.filter(t=>t.status==='done').length,'En curso':mt.filter(t=>t.status==='progress').length,'Pendientes':mt.filter(t=>t.status==='pending').length,'Vencidos':mt.filter(t=>t._dueStatus==='late'&&t.status!=='approved').length};});
+  XLSX.utils.book_append_sheet(wb,xlsxSheet(res),'Resumen analistas');
   xlsxDownload(wb,'labtrack_reporte_'+today()+'.xlsx');
 }
 function exportXLSX(){
   if(!isSupRole()&&!isReviewerRole()){showToast('Solo supervisores y revisores pueden exportar.','warn');return;}
   if(window.XLSX){doExportXLSX();}
-  else{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.20.3/xlsx.full.min.js';s.onload=doExportXLSX;document.head.appendChild(s);}
+  else{const s=document.createElement('script');s.src='https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';s.onload=doExportXLSX;document.head.appendChild(s);}
 }
 
 // ── EXPORT / COPY HELPERS ──
@@ -9009,7 +9127,7 @@ function _clipCopy(text,btn,label){
 function _lazyXLSX(fn,onErr){
   if(window.XLSX){fn();return;}
   if(document.querySelector('script[data-xlsx-loading]')){setTimeout(function(){_lazyXLSX(fn,onErr);},300);return;}
-  var s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.20.3/xlsx.full.min.js';
+  var s=document.createElement('script');s.src='https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
   s.setAttribute('data-xlsx-loading','1');
   s.onload=function(){s.removeAttribute('data-xlsx-loading');fn();};
   s.onerror=function(){s.remove();if(onErr)onErr();else alert('No se pudo cargar la librería Excel.\nVerificá tu conexión a internet e intentá de nuevo.');};
@@ -9032,7 +9150,7 @@ function copyPendientes(btn){
   var psf=window.pendingStatusFilter||'all';
   var _cpStatuses=['pending','scheduled','progress','pending-confirm','done','observed'];
   if(isSupRole())_cpStatuses.unshift('a-ingresar');
-  var list=tasks.filter(function(t){return _cpStatuses.includes(t.status);})
+  var list=activeTasks().filter(function(t){return _cpStatuses.includes(t.status);})
     .filter(function(t){return !pq||t.producto.toLowerCase().includes(pq)||t.lote.toLowerCase().includes(pq);})
     .filter(function(t){if(psf==='all')return true;if(psf==='late')return t._dueStatus==='late';return t.status===psf;});
   var HDR='Producto\tLote\tTipo\tAnalistas\tF. Ingreso\tF. Planificado\tF. Aprobación límite\tPrioridad\tEstado';
@@ -9051,7 +9169,7 @@ function exportPendientesXLSX(){
     var psf=window.pendingStatusFilter||'all';
     var _expStatuses=['pending','scheduled','progress','pending-confirm','done','observed'];
     if(isSupRole())_expStatuses.unshift('a-ingresar');
-    var list=tasks.filter(function(t){return _expStatuses.includes(t.status);})
+    var list=activeTasks().filter(function(t){return _expStatuses.includes(t.status);})
       .filter(function(t){return !pq||t.producto.toLowerCase().includes(pq)||t.lote.toLowerCase().includes(pq);})
       .filter(function(t){if(psf==='all')return true;if(psf==='late')return t._dueStatus==='late';return t.status===psf;});
     var data=list.map(function(t){
@@ -9064,7 +9182,7 @@ function exportPendientesXLSX(){
     });
     var ws=xlsxSheet(data);
     ws['!cols']=[{wch:24},{wch:14},{wch:22},{wch:12},{wch:14},{wch:18},{wch:10},{wch:16}];
-    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,'Pendientes',ws);
+    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Pendientes');
     xlsxDownload(wb,'pendientes_'+today()+'.xlsx');
   });
 }
@@ -9072,7 +9190,7 @@ function exportPendientesXLSX(){
 // Revisión
 function copyRevision(btn){
   if(!isSupRole()&&!isReviewerRole()){showToast('Solo supervisores y revisores pueden exportar.','warn');return;}
-  var list=tasks.filter(function(t){return['done','observed','reviewed'].includes(t.status);});
+  var list=activeTasks().filter(function(t){return['done','observed','reviewed'].includes(t.status);});
   var HDR='Producto\tLote\tAnalistas\tH. Real\tEstado\tÚltimo comentario\tÚltima observación\tRevisado por\tF. Revisión';
   var rows=list.map(function(t){
     var assigns=t.assignments||[];
@@ -9087,7 +9205,7 @@ function copyRevision(btn){
 function exportRevisionXLSX(){
   if(!isSupRole()&&!isReviewerRole()){showToast('Solo supervisores y revisores pueden exportar.','warn');return;}
   _lazyXLSX(function(){
-    var list=tasks.filter(function(t){return['done','observed','reviewed'].includes(t.status);});
+    var list=activeTasks().filter(function(t){return['done','observed','reviewed'].includes(t.status);});
     var data=list.map(function(t){
       var assigns=t.assignments||[];
       var anas=assigns.map(function(a){return getU(a.analyst).name;}).join(', ');
@@ -9098,7 +9216,7 @@ function exportRevisionXLSX(){
     });
     var ws=xlsxSheet(data);
     ws['!cols']=[{wch:24},{wch:14},{wch:22},{wch:8},{wch:14},{wch:30},{wch:30},{wch:16},{wch:12}];
-    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,'Revisión',ws);
+    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Revisión');
     xlsxDownload(wb,'revision_'+today()+'.xlsx');
   });
 }
@@ -9143,7 +9261,7 @@ function exportMgmtListXLSX(){
     });
     var ws=xlsxSheet(data);
     ws['!cols']=[{wch:16},{wch:12},{wch:24},{wch:14},{wch:16},{wch:28}];
-    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,'Actividades gestión',ws);
+    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Actividades gestión');
     xlsxDownload(wb,'gestion_'+today()+'.xlsx');
   });
 }
@@ -9173,7 +9291,7 @@ function exportFreeTasksXLSX(){
     });
     var ws=xlsxSheet(data);
     ws['!cols']=[{wch:12},{wch:18},{wch:28},{wch:12},{wch:10},{wch:28},{wch:18},{wch:16}];
-    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,'Actividades libres',ws);
+    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Actividades libres');
     xlsxDownload(wb,'actividades_libres_'+today()+'.xlsx');
   });
 }
@@ -9192,7 +9310,7 @@ function exportAusenciasXLSX(){
     });
     var ws=xlsxSheet(data);
     ws['!cols']=[{wch:18},{wch:16},{wch:12},{wch:12},{wch:28}];
-    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,'Ausencias',ws);
+    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Ausencias');
     xlsxDownload(wb,'ausencias_'+today()+'.xlsx');
   });
 }
@@ -9219,8 +9337,8 @@ function exportNotificacionesXLSX(){
     var ws2=xlsxSheet(schedData);
     ws2['!cols']=[{wch:18},{wch:14},{wch:14},{wch:16},{wch:12}];
     var wb=XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb,'Solicitudes',ws1);
-    XLSX.utils.book_append_sheet(wb,'Horarios base',ws2);
+    XLSX.utils.book_append_sheet(wb,ws1,'Solicitudes');
+    XLSX.utils.book_append_sheet(wb,ws2,'Horarios base');
     xlsxDownload(wb,'horarios_'+today()+'.xlsx');
   });
 }
@@ -9251,7 +9369,7 @@ function copyHistorial(btn){
 // Aprobados
 function copyAprobados(btn){
   if(!isSupRole()&&!isReviewerRole()){showToast('Solo supervisores y revisores pueden exportar.','warn');return;}
-  var list=tasks.filter(function(t){return t.status==='approved';});
+  var list=activeTasks().filter(function(t){return t.status==='approved';});
   var HDR='Producto\tLote\tTipo\tAnalistas\tF. límite aprobación\tF. Aprobación\tPrioridad\tH. Reales\tAprobado por';
   var rows=list.map(function(t){
     var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
@@ -9280,11 +9398,17 @@ function printCalendar(){
 // ── GENERAL ACTIONS ──
 function setView(v){
   if(!isViewAllowed(v,currentUser)){return;}
+  if(v!==currentView){filterSearch='';}  // limpiar búsqueda al cambiar de vista
   currentView=v;
   try{localStorage.setItem('lt9-lastView',v);}catch(e){}
   render();
 }
-function logout(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';loginShowSync=false;loginShowLabSwitch=false;try{localStorage.removeItem('lt9-session');localStorage.removeItem('lt9-lastView');}catch(e){}render();}
+function logout(){
+  if(currentUser){auditLog('LOGOUT','USER',currentUser.id,{description:'Cierre de sesión: '+currentUser.name},'');}
+  currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';loginShowSync=false;loginShowLabSwitch=false;
+  try{localStorage.removeItem('lt9-session');localStorage.removeItem('lt9-lastView');}catch(e){}
+  render();
+}
 function openNewTask(){editingTask=null;selectedAnalysts=[];analystDates={};multiAssigns=[];newTaskPrefill={};showModal=true;render();}
 function openNewTaskFromSuggestion(suggId){
   var sug=productSuggestions.find(function(s){return s.id===suggId;});
@@ -9306,7 +9430,7 @@ function setFSearch(v){filterSearch=v;render();}
 function setFS(v){filterStatus=v;render();}
 function markDone(id,assignDate){
   const t=tasks.find(x=>x.id===id);if(!t)return;
-  if(currentUser.role==='analyst'||currentUser.role==='reviewer'){
+  if(currentUser.role==='analyst'){
     if(t.status==='observed'){
       // Re-envío tras observación
       // Modal inline para comentario + checkbox replanificar
@@ -9318,10 +9442,10 @@ function markDone(id,assignDate){
         +'<label style="display:flex;align-items:center;gap:8px;margin:10px 0;font-size:13px"><input type="checkbox" id="rsub-replan"> Solicitar replanificación de fechas</label>'
         +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
         +'<button onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
-        +'<button onclick="window._doResubmit('+id+')" class="btn pri">↩ Re-enviar</button>'
+        +'<button onclick="window[\'_doResubmit_\'+'+id+']('+id+')" class="btn pri">↩ Re-enviar</button>'
         +'</div></div></div>';
       document.body.appendChild(resubDiv);
-      window._doResubmit=function(tid){
+      window['_doResubmit_'+id]=function(tid){
         var cmt=(document.getElementById('rsub-cmt')||{}).value||'';
         var wantsReplan=(document.getElementById('rsub-replan')||{}).checked||false;
         if(!cmt.trim()){alert('El comentario es requerido.');return;}
@@ -9365,7 +9489,7 @@ function markDone(id,assignDate){
         var ma=myAssigns[0];
         if(ma){showNotifPanel=false;openReplan(id,currentUser.id);}
       }
-      }; // end _doResubmit
+      }; // end _doResubmit_<id>
       return; // wait for modal
     } else {
       // Completar: pedir horas dedicadas
@@ -9384,10 +9508,10 @@ function markDone(id,assignDate){
         +'<textarea id="complete-cmt" rows="2" placeholder="Observaciones del análisis, condiciones especiales, resultados relevantes…" style="width:100%;resize:vertical;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:12px"></textarea></div>'
         +'<div style="display:flex;gap:8px;justify-content:flex-end">'
         +'<button onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
-        +'<button onclick="window._doComplete('+id+',\''+( assignDate||'')+'\')'+'" class="btn pri">✓ Confirmar</button>'
+        +'<button onclick="window[\'_doComplete_\'+'+id+']('+id+',\''+( assignDate||'')+'\')'+'" class="btn pri">✓ Confirmar</button>'
         +'</div></div></div>';
       document.body.appendChild(hDiv);
-      window._doComplete=function(tid,_assignDate){
+      window['_doComplete_'+id]=function(tid,_assignDate){
         var hVal=parseFloat((document.getElementById('hrs-input')||{}).value||0);
         var completeCmt=((document.getElementById('complete-cmt')||{}).value||'').trim();
         if(isNaN(hVal)||hVal<=0){alert('Ingresá un valor de horas válido (mayor a 0).');return;}
@@ -9437,7 +9561,7 @@ function markDone(id,assignDate){
         }
         saveLS();render();
         saveNow().catch(function(e){console.error('saveNow complete:',e);});
-      }; // end _doComplete
+      }; // end _doComplete_<id>
       return; // wait for modal
     }
   } else {
@@ -9470,10 +9594,10 @@ function markReviewed(id){
     +'<input type="date" id="rv-date" value="'+today()+'" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
     +'<button onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
-    +'<button onclick="window._doReviewed('+id+')" class="btn pri">✓ Revisar</button>'
+    +'<button onclick="window[\'_doReviewed_\'+'+id+']('+id+')" class="btn pri">✓ Revisar</button>'
     +'</div></div></div>';
   document.body.appendChild(rvDiv);
-  window._doReviewed=function(tid){
+  window['_doReviewed_'+id]=function(tid){
     var dateStr=((document.getElementById('rv-date')||{}).value||today());
     document.body.removeChild(rvDiv);
     requireSignature(
@@ -9589,6 +9713,7 @@ function _supervisorForceTerminalStatus(taskId,targetStatus){
   };
 }
 function markApproved(id){
+  if(!isSupRole()){alert('Solo el Supervisor puede aprobar análisis.');return;}
   const t=tasks.find(function(x){return x.id===id;});
   if(!t)return;
   if(t.status!=='reviewed'){alert('Solo se pueden aprobar análisis revisados.');return;}
@@ -9601,10 +9726,10 @@ function markApproved(id){
     +'<input type="date" id="ap-date" value="'+today()+'" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
     +'<button onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
-    +'<button onclick="window._doApproved('+id+')" class="btn pri">✓ Aprobar</button>'
+    +'<button onclick="window[\'_doApproved_\'+'+id+']('+id+')" class="btn pri">✓ Aprobar</button>'
     +'</div></div></div>';
   document.body.appendChild(apDiv);
-  window._doApproved=function(tid){
+  window['_doApproved_'+id]=function(tid){
     var _aDate=((document.getElementById('ap-date')||{}).value||today());
     document.body.removeChild(apDiv);
     if(t.due&&_aDate>t.due){
@@ -9640,6 +9765,9 @@ function markObserved(id){
   const t=tasks.find(x=>x.id===id);if(!t)return;
   if(currentUser.role!=='supervisor'&&currentUser.role!=='reviewer'){
     alert('Solo el Supervisor o el Revisor pueden observar un análisis.');return;
+  }
+  if(!['done','reviewed'].includes(t.status)){
+    alert('Solo se pueden observar análisis completados o revisados.');return;
   }
   // Build modal with comment + analyst selector
   const assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
@@ -9694,6 +9822,7 @@ document.body.appendChild(obsDiv);
       targetAnalyst:selAnalyst||'all'},comment);
     saveLS();render();
     showToast('⚑ Marcado con observación','warn');
+    saveNow().catch(function(e){console.error('saveNow markObserved:',e);});
 }
 
 }
@@ -9812,22 +9941,28 @@ function getNotifEventLabel(n){
 }
 
 function confirmDone(id){
-  // Delegates to confirmAssignment for all pending assignments of this task
   var t=tasks.find(function(x){return x.id===id;});if(!t)return;
-  var assigns=(t.assignments||[]).filter(function(a){return !a._removed&&a._pendingConfirm&&!a._supervisorConfirmed;});
-  if(assigns.length===0){
-    // No pending — if all have hours, just advance
-    var allH=(t.assignments||[]).filter(function(a){return !a._removed;}).every(function(a){
-      return (a.realHours>0)||(a.sessions&&a.sessions.length>0);
-    });
-    if(allH&&t.status==='pending-confirm'){
-      t.status='done';t.confirmedBy=currentUser.id;t.confirmedTs=Date.now();
-      auditLog('CONFIRM','TASK',id,{field:'status',oldVal:'pending-confirm',newVal:'done',description:t.producto+' '+t.lote},'');
-      saveLS();render();saveNow().catch(function(e){console.error(e);});
+  requireSignature(
+    'Confirmar análisis completado',
+    'Confirmación: '+t.producto+' — '+t.lote,
+    function(reason){
+      // Delegates to confirmAssignment for all pending assignments of this task
+      var assigns=(t.assignments||[]).filter(function(a){return !a._removed&&a._pendingConfirm&&!a._supervisorConfirmed;});
+      if(assigns.length===0){
+        // No pending — if all have hours, just advance
+        var allH=(t.assignments||[]).filter(function(a){return !a._removed;}).every(function(a){
+          return (a.realHours>0)||(a.sessions&&a.sessions.length>0);
+        });
+        if(allH&&t.status==='pending-confirm'){
+          t.status='done';t.confirmedBy=currentUser.id;t.confirmedTs=Date.now();
+          auditLog('CONFIRM','TASK',id,{field:'status',oldVal:'pending-confirm',newVal:'done',description:t.producto+' '+t.lote},reason);
+          saveLS();render();saveNow().catch(function(e){console.error(e);});
+        }
+        return;
+      }
+      assigns.forEach(function(a){confirmAssignment(id,a.analyst,a.date);});
     }
-    return;
-  }
-  assigns.forEach(function(a){confirmAssignment(id,a.analyst,a.date);});
+  );
 }
 function markSampleReceived(id){
   var t=tasks.find(function(x){return x.id===id;});
@@ -10018,6 +10153,12 @@ function approveSchedule(reqId){
   }
   req.status='approved';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();
   req._ts=Date.now(); // CRÍTICO: garantiza que el merge preserve la aprobación ante saves concurrentes
+  const uSched=getU(req.analystId);
+  auditLog('APPROVE','SCHEDULE',req.id,{
+    analystId:req.analystId,analystName:uSched?uSched.name:'?',
+    dateStr:req.dateStr||'(horario base)',proposed:JSON.stringify(req.proposed),
+    description:'Aprobación de cambio de horario: '+(uSched?uSched.name:'?')+' — '+(req.dateStr||'horario base')
+  },'');
   saveLS();render();
   saveNow().catch(e=>console.error('saveNow approve:',e));
 }
@@ -10028,6 +10169,12 @@ function rejectSchedule(reqId){
   if(reason===null)return;
   req.status='rejected';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();req.rejectionReason=reason||'';
   req._ts=Date.now(); // CRÍTICO: garantiza que el merge preserve el rechazo ante saves concurrentes
+  const uSrej=getU(req.analystId);
+  auditLog('REJECT','SCHEDULE',req.id,{
+    analystId:req.analystId,analystName:uSrej?uSrej.name:'?',
+    dateStr:req.dateStr||'(horario base)',reason:reason||'',
+    description:'Rechazo de cambio de horario: '+(uSrej?uSrej.name:'?')+' — '+(req.dateStr||'horario base')+(reason?' | '+reason:'')
+  },reason||'');
   replanNotifs.push({id:nextNotifId++,type:'schedule_rejected',
     analystId:req.analystId,forUserId:req.analystId,
     reason:reason||'',rejectedByName:currentUser.name,rejectedById:currentUser.id,
@@ -10042,8 +10189,13 @@ function openDaySchedule(analystId,dateStr){
   schedModalAnalyst=analystId;schedModalDate=dateStr;showSchedModal=true;render();
 }
 function rejectDone(id){
+  if(!isSupRole()){alert('Solo el Supervisor puede rechazar una confirmación pendiente.');return;}
   const t=tasks.find(x=>x.id===id);if(!t)return;
+  const prevStatus=t.status;
   t.status='progress';delete t.completedBy;delete t.completedTs;
+  t._ts=Date.now();
+  auditLog('STATUS_CHANGE','TASK',id,{field:'status',oldVal:prevStatus,newVal:'progress',
+    description:'Rechazo de confirmación pendiente: '+t.producto+' '+t.lote},'Rechazado por supervisor');
   saveLS();render();
 }
 function markProg(id,assignDate){
@@ -10141,29 +10293,43 @@ function completeTaskForAnalyst(taskId,analystId,assignDate){
 function deleteTask(id){
   const t=tasks.find(function(x){return x.id===id;});
   if(!t)return;
-  if(!isSupRole()){alert('Solo el supervisor puede eliminar análisis.');return;}
-  if(t.status==='approved'){alert('No se puede eliminar un análisis aprobado (ALCOA+).');return;}
-  requireSignature('Eliminar análisis','Eliminar: '+t.producto+' | Lote: '+t.lote,function(reason){
-    auditLog('DELETE','TASK',id,{
-      description:'Eliminación: '+t.producto+' | Lote: '+t.lote
-        +' | Estado: '+statusLabel(t.status)+' | Vto: '+fmtDF(t.due),
-      producto:t.producto,lote:t.lote,status:t.status
-    },reason);
-    tasks=tasks.filter(function(x){return x.id!==id;});
+  if(!isSupRole()){alert('Solo el supervisor puede anular análisis.');return;}
+  if(t.status==='approved'){alert('No se puede anular un análisis aprobado (ALCOA+).');return;}
+  requireSignature('Anular análisis','Anular: '+t.producto+' | Lote: '+t.lote,function(reason){
+    // Borrado lógico (ALCOA+: los registros analíticos no se destruyen, se anulan)
+    softDeleteTask(id, reason);
     showModal=false;editingTask=null;
-    saveLS();render();
+    saveNow().catch(function(e){console.error('saveNow deleteTask:',e);});
   });
 }
 
-function doChangePwd(){
+async function doChangePwd(){
   const old=document.getElementById('cp-old').value;
   const nw=document.getElementById('cp-new').value;
   const rep=document.getElementById('cp-rep').value;
   const msg=document.getElementById('cp-msg');
-  if(old!==passwords[currentUser.id]){msg.style.color='var(--red)';msg.textContent='Contraseña actual incorrecta.';return;}
   if(nw.length<4){msg.style.color='var(--red)';msg.textContent='Mínimo 4 caracteres.';return;}
   if(nw!==rep){msg.style.color='var(--red)';msg.textContent='Las contraseñas no coinciden.';return;}
-  passwords[currentUser.id]=nw;saveLS();showChangePwd=false;render();
+  // Verificar contraseña actual soportando tanto texto plano como hash SHA-256
+  const stored=passwords[currentUser.id]||'';
+  let oldOk=false;
+  if(stored.startsWith('$sha256$')){
+    oldOk=(await hashPassword(old))===stored;
+  } else {
+    oldOk=(old===stored);
+  }
+  if(!oldOk){msg.style.color='var(--red)';msg.textContent='Contraseña actual incorrecta.';return;}
+  // Guardar nueva contraseña como hash SHA-256
+  const newHash=await hashPassword(nw);
+  passwords[currentUser.id]=newHash;
+  if(!passwords_ts)passwords_ts={};
+  passwords_ts[currentUser.id]=Date.now();
+  // Limpiar flag de contraseña pendiente de cambio
+  if(currentUser._mustChangePwd){currentUser._mustChangePwd=false;const u=USERS.find(function(x){return x.id===currentUser.id;});if(u)u._mustChangePwd=false;}
+  auditLog('EDIT','USER',currentUser.id,{description:'Cambio de contraseña: '+currentUser.name},'Cambio de contraseña propio');
+  saveLS();saveNow().catch(function(e){console.error('saveNow changePwd:',e);});
+  showChangePwd=false;render();
+  showToast('✓ Contraseña actualizada','success');
 }
 // ── REPLAN MODAL ──
 function openReplan(taskId, analystId){
@@ -11090,14 +11256,21 @@ function setSamplerAssign(taskId, samplerId){
   }
 
   if(!t.samplerAssignments)t.samplerAssignments=[];
+  var _prevSamplers=t.samplerAssignments.filter(function(s){return !s.done&&!s.removed;}).map(function(s){return s.sampler;});
   if(samplerId===null){
     // Remove all sampler assignments that aren't done
     t.samplerAssignments=t.samplerAssignments.filter(function(s){return s.done;});
+    if(_prevSamplers.length>0){
+      var _prevNames=_prevSamplers.map(function(id){var u=getU(id);return u?u.name:id;}).join(', ');
+      _pendingSamplerAuditLogs.push({taskId:taskId,action:'DELETE',detail:'Muestreador(es) desasignado(s): '+_prevNames});
+    }
   } else {
     var existing=t.samplerAssignments.find(function(s){return s.sampler===samplerId&&!s.done&&!s.removed;});
     if(existing){
       // Toggle off: remove undone assignment
       existing.removed=true;
+      var _uName=(getU(samplerId)||{}).name||samplerId;
+      _pendingSamplerAuditLogs.push({taskId:taskId,action:'DELETE',detail:'Muestreador desasignado: '+_uName});
     } else {
       // Remove other non-done assignments and add this one
       t.samplerAssignments=t.samplerAssignments.filter(function(s){return s.done;});
@@ -11107,18 +11280,24 @@ function setSamplerAssign(taskId, samplerId){
         done:false,doneAt:null,realArrivalDate:null,lotNotes:null,
         assignedNote:'',_ts:Date.now()
       });
+      var _uName2=(getU(samplerId)||{}).name||samplerId;
+      _pendingSamplerAuditLogs.push({taskId:taskId,action:'CREATE',detail:'Muestreador asignado: '+_uName2});
     }
   }
   t._ts=Date.now();
   render();
 }
 function saveTask(){
-  var _needsTerminalDialog=false,_terminalTargetStatus='';
+  var _needsTerminalDialog=false,_terminalTargetStatus='',_taskAuditDone=false;
   const prod=document.getElementById('f-prod').value.trim();
   const lote=document.getElementById('f-lote').value.trim();
   if(!prod||!lote){alert('El producto y el lote son obligatorios.');return;}
   const created=document.getElementById('f-created').value;
   const due=document.getElementById('f-due').value;
+  // S-2: Warn when due date is in the past (new tasks only)
+  if(!editingTask&&due&&due<today()){
+    if(!confirm('⚠️ La fecha límite ('+fmtDF(due)+') es anterior a hoy.\n\n¿Deseás guardar el análisis con esa fecha?'))return;
+  }
   const priority=document.getElementById('f-prio').value;
   const status=document.getElementById('f-status').value;
   const notes=document.getElementById('f-notes').value;
@@ -11269,14 +11448,22 @@ function saveTask(){
         replanNotifs.push({id:nextNotifId++,type:'product_suggestion_response',
           suggId:_pfSug.id,forUserId:_pfSug.suggestedBy,response:'confirmed',taskId:_newT.id,
           status:'pending',_ts:Date.now()});
-        auditLog('CREATE','TASK',_newT.id,{source:'suggestion',suggestedBy:_pfSug.suggestedByName},'Ingreso confirmado — sugerido por '+_pfSug.suggestedByName);
+        auditLog('CREATE','TASK',_newT.id,{source:'suggestion',suggestedBy:_pfSug.suggestedByName,description:'Nuevo análisis: '+prod+' '+lote},'Ingreso confirmado — sugerido por '+_pfSug.suggestedByName);
+        _taskAuditDone=true;
       }
       newTaskPrefill={};
     }
   }
   const _eid2=editingTask;
+  // Emit pending sampler audit logs accumulated from setSamplerAssign calls
+  _pendingSamplerAuditLogs.forEach(function(entry){
+    if(entry.taskId===_eid2){
+      auditLog(entry.action==='CREATE'?'EDIT':'EDIT','TASK',entry.taskId,{description:entry.detail},'');
+    }
+  });
+  _pendingSamplerAuditLogs=[];
   showModal=false;editingTask=null;newTaskPrefill={};
-  auditLog(_eid2?'EDIT':'CREATE','TASK',_eid2||nextId-1,{description:(_eid2?'Edicion':'Nuevo analisis')+': '+prod+' '+lote},'');
+  if(!_taskAuditDone) auditLog(_eid2?'EDIT':'CREATE','TASK',_eid2||nextId-1,{description:(_eid2?'Edicion':'Nuevo analisis')+': '+prod+' '+lote},'');
   saveLS('counters');
   render();
   saveNow().catch(e=>console.error('saveNow task:',e));
