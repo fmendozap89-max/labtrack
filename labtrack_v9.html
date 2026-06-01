@@ -1342,7 +1342,7 @@ function loadSpConfig() {
 }
 
 // Cambiar al laboratorio seleccionado
-function switchLab(labId){
+async function switchLab(labId){
   if(labId===activeLabId){loginShowLabSwitch=false;render();return;}
   saveLS();
   // Cancel pending timers from the outgoing lab before changing GIST_CONFIG.
@@ -1350,6 +1350,12 @@ function switchLab(labId){
   // GIST_CONFIG already pointing to the new lab's Gist, corrupting it.
   if(_saveDebounce){clearTimeout(_saveDebounce);_saveDebounce=null;}
   if(_syncTimer){clearInterval(_syncTimer);_syncTimer=null;}
+  // Flush audit buffer to the OUTGOING lab before switching GIST_CONFIG,
+  // so pending entries land in the correct lab's Gist and are not lost.
+  if(_auditDebounce){clearTimeout(_auditDebounce);_auditDebounce=null;}
+  if(_auditBuffer.length){try{await _flushAuditBuffer();}catch(e){}}
+  _auditBuffer=[];
+  auditTrail=[];
   _lastRemoteTs=0;
   activeLabId=labId;
   localStorage.setItem('lt9-active-lab',labId);
@@ -9682,6 +9688,7 @@ function doSystemReset(){
       scheduleRequests=[];nextSchedReqId=1;
       mgmtTasks=[];nextMgmtId=1;
       absences={};absences_ts=Date.now();
+      interLabRequests=[];
       USERS=_users;
       passwords=_passwords;
       workdayConfig=_workdayConfig;
