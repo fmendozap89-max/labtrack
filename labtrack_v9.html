@@ -1506,6 +1506,7 @@ function setFTipo(v){filterTipo=v;render();}
 function renderTipoPillsHtml(currentTipo){
   var html='<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">';
   SAMPLE_TYPES.forEach(function(st){
+    if(st.id==='IL')return;
     var active=currentTipo===st.id;
     html+='<button type="button" class="tipo-pill-btn" data-val="'+st.id+'" data-bg="'+st.bg+'" data-color="'+st.color+'"'
       +' onclick="selectTipoPill(\''+st.id+'\')"'
@@ -9392,13 +9393,68 @@ function adminDeleteExternalLab(labId){
   render();
 }
 
-function adminClearAllILR(){
+async function adminClearAllILR(){
   var n=interLabRequests.length;
   if(!n){alert('No hay solicitudes inter-lab almacenadas.');return;}
-  if(!confirm('¿Eliminar las '+n+' solicitudes inter-laboratorio?\n\nEsta acción limpia el historial de pruebas. No se puede deshacer.'))return;
+  if(!confirm('¿Eliminar las '+n+' solicitudes inter-laboratorio y las tareas IL generadas en laboratorios receptores?\n\nEsta acción no se puede deshacer.'))return;
+
+  // Agrupar por lab destino configurado (con gistId+token) que tenga tarea local creada
+  var byDest={};
+  interLabRequests.forEach(function(r){
+    if(!r.localTaskId)return;
+    var destLab=labProfiles.find(function(l){return l.id===r.destLabId&&l.gistId&&l.token;});
+    if(!destLab)return;
+    if(!byDest[r.destLabId])byDest[r.destLabId]={lab:destLab,taskIds:[]};
+    byDest[r.destLabId].taskIds.push(r.localTaskId);
+  });
+
+  // Para cada lab receptor: fetch → marcar tareas IL como _deleted → PATCH
+  var cleaned=0,errors=[];
+  for(var labId in byDest){
+    var entry=byDest[labId];
+    try{
+      var r=await fetch(GIST_API+'/'+entry.lab.gistId,{
+        headers:{'Authorization':'Bearer '+entry.lab.token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+      });
+      if(!r.ok){errors.push(entry.lab.name||labId);continue;}
+      var gist=await r.json();
+      var content=gist.files&&gist.files[GIST_FILE_STATE]&&gist.files[GIST_FILE_STATE].content;
+      if(!content){errors.push(entry.lab.name||labId);continue;}
+      var pdata=JSON.parse(content);
+      var changed=false;
+      (pdata.tasks||[]).forEach(function(t){
+        if(entry.taskIds.indexOf(t.id)>=0&&!t._deleted){
+          t._deleted=true;t._ts=Date.now();changed=true;cleaned++;
+        }
+      });
+      // Limpiar también el array de ILRs en el Gist del receptor (evitar referencias huérfanas)
+      if(pdata.interLabRequests){
+        pdata.interLabRequests=pdata.interLabRequests.filter(function(req){
+          return entry.taskIds.indexOf(req.localTaskId)<0;
+        });
+        changed=true;
+      }
+      if(changed){
+        var patch=await fetch(GIST_API+'/'+entry.lab.gistId,{
+          method:'PATCH',
+          headers:{'Authorization':'Bearer '+entry.lab.token,'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},
+          body:JSON.stringify({files:{[GIST_FILE_STATE]:{content:JSON.stringify(pdata)}}})
+        });
+        if(!patch.ok)errors.push(entry.lab.name||labId);
+        else _partnerLabCache[labId]=null;
+      }
+    }catch(e){errors.push(entry.lab.name||labId);console.error('adminClearAllILR partner patch:',e);}
+  }
+
+  // Limpiar ILRs propios
   interLabRequests=[];
   saveLS();saveNow().catch(function(e){console.error('adminClearAllILR:',e);});
   render();
+
+  var msg='✓ Solicitudes IL eliminadas.';
+  if(cleaned>0)msg+='\n'+cleaned+' tarea(s) eliminadas en laboratorios receptores.';
+  if(errors.length)msg+='\n⚠ No se pudo actualizar: '+errors.join(', ')+'. Verificar token/conexión.';
+  alert(msg);
 }
 
 function toggleColorPicker(panelId){
@@ -9875,7 +9931,7 @@ function renderTaskModal(){
     +'<h3>'+(isEdit?'Editar análisis de lote':(newTaskPrefill.suggId?'Confirmar ingreso sugerido':'Nuevo análisis de lote'))+'</h3>'
     +_ilBanner+_suggBanner
     +'<div class="form-grid">'
-    +'<div class="frow"><label>Tipo de muestra</label>'+renderTipoPillsHtml(t.tipo||'')+'</div>'
+    +'<div class="frow"><label>Tipo de muestra</label>'+(t.tipo==='IL'?'<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 11px;border:1px solid #1d4ed8;border-radius:20px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8">🔗 IL · Inter-laboratorio</span><input type="hidden" id="f-tipo" value="IL">':renderTipoPillsHtml(t.tipo||''))+'</div>'
     +'<div class="frow"><label>Producto</label><input type="text" id="f-prod" value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg"></div>'
     +'<div class="frow"><label>N° de Lote</label><input type="text" id="f-lote" value="'+escH(t.lote||'')+'" placeholder="Ej: L-2024-001"></div>'
     +'<div class="frow"><label>Fecha de creación</label><input type="date" id="f-created" value="'+(t.created||today())+'"></div>'
