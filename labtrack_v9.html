@@ -74,6 +74,10 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 .sb-user-name{font-size:12px;font-weight:500;margin-bottom:2px}
 .sb-link{font-size:10px;color:var(--text3);cursor:pointer;text-decoration:underline}
 .sb-link:hover{color:var(--text2)}
+/* Botón de usuario móvil (visible solo en mobile) */
+.mob-user-btn{display:none;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;border:2px solid var(--border2);box-shadow:0 1px 4px rgba(0,0,0,.12);cursor:pointer;padding:0;flex-shrink:0;font-size:11px;font-weight:700;font-family:var(--mono);text-transform:uppercase;-webkit-tap-highlight-color:transparent;transition:opacity .15s,transform .1s}
+/* Tab de perfil en nav móvil (visible solo en mobile) */
+.mob-user-navitem{display:none}
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
 .topbar{padding:8px 18px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0;box-shadow:0 1px 4px rgba(0,0,0,.04)}
 .topbar-title{font-size:14px;font-weight:600;flex:1;letter-spacing:-.01em}
@@ -237,7 +241,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
   .main{order:1;overflow:auto;-webkit-overflow-scrolling:touch;flex:1;min-height:0;}
   /* Topbar */
   .topbar{padding:8px 10px;gap:5px;}
-  .topbar-title{font-size:13px;}
+  .topbar-title{font-size:13px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
   .topbar .btn{font-size:10px;padding:5px 7px;min-height:32px;}
   .topbar .btn-txt{display:none;}
   /* Content */
@@ -259,6 +263,14 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
   /* Filter row */
   .filter-row{flex-wrap:wrap;gap:6px;}
   .filter-row select{font-size:14px;}
+  /* Botón de usuario en topbar (mobile only) */
+  .mob-user-btn{display:inline-flex;}
+  .mob-user-btn:active{opacity:.75;transform:scale(.9);}
+  /* Tab perfil en bottom nav (mobile only) — sticky al borde derecho */
+  .mob-user-navitem{display:flex;flex-shrink:0;position:sticky;right:0;background:var(--sidebar-bg);border-left:2px solid var(--border2);z-index:2;}
+  /* Sync badge: compacto en mobile */
+  #sp-status-badge{max-width:68px;overflow:hidden;flex-shrink:1;}
+  #sp-status-badge span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 }
 
 /* Teléfonos muy pequeños: ≤ 374px */
@@ -340,6 +352,9 @@ let mgmtListPeriod='week';
 let showImportModal=false,showChangePwd=false;
 let tasksView='lote';
 let filterAnalyst='',filterStatus='',filterSearch='',filterTipo='';
+let _tipoFilter=[];
+let _ingresosTypeFilter=[];
+function _toggleIngresosType(id){var i=_ingresosTypeFilter.indexOf(id);if(i>=0)_ingresosTypeFilter.splice(i,1);else _ingresosTypeFilter.push(id);render();}
 let estabTab='activas',limpvalTab='activas';
 let loginStep=1,selectedLoginUser=null,loginError='',loginShowSync=false,loginShowLabSwitch=false;
 // ── Multi-laboratorio ──
@@ -440,7 +455,7 @@ function getSnapshot(){
     savedAt:Date.now(),
     v:7,
     tasks,nextId,nextUid,nextNotifId,nextAbsId,nextMgmtId,
-    freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,
+    freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,customTipos,
     users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{})})),
     passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
     auditTrail,
@@ -466,6 +481,7 @@ function applySnapshot(json){
     scheduleRequests=d.scheduleRequests||[];
     nextSchedReqId=d.nextSchedReqId||1;
     if(d.absenceTypesDef)absenceTypesDef=d.absenceTypesDef;
+    if(d.customTipos&&Array.isArray(d.customTipos)){customTipos=d.customTipos;_rebuildSampleTypes();}
     if(d.workdayConfig){
       workdayConfig.weekdays=d.workdayConfig.weekdays||workdayConfig.weekdays;
       workdayConfig.extra=d.workdayConfig.extra||[];
@@ -681,10 +697,10 @@ async function _flushAuditBuffer() {
       : (gist.files[GIST_FILE_AUDIT]?.content || '[]');
     let existing = [];
     try { existing = JSON.parse(raw); } catch(e) {}
-    // Prepend nuevos (más reciente primero), cap 500 entradas
-    const merged = [...toFlush, ...existing].slice(0, 500);
+    // Prepend nuevos (más reciente primero), cap 200 entradas
+    const merged = [...toFlush, ...existing].slice(0, 200);
     await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
-      files: { [GIST_FILE_AUDIT]: { content: JSON.stringify(merged, null, 2) } }
+      files: { [GIST_FILE_AUDIT]: { content: JSON.stringify(merged) } }
     });
     // Actualizar badge tras flush exitoso
     gistLastSync = new Date(); gistStatus = 'ok'; renderSpBadge();
@@ -1330,18 +1346,33 @@ function deleteLabProfile(labId){
 
 // Restore session from localStorage after page refresh
 // ── TIPOS DE MUESTRA ──
-const SAMPLE_TYPES=[
-  {id:'PT',  label:'PT',   title:'Producto Terminado', color:'#1e40af', bg:'#dbeafe'},
-  {id:'MP',  label:'MP',   title:'Materia Prima',      color:'#065f46', bg:'#d1fae5'},
-  {id:'Limp',label:'Limp', title:'Limpieza',           color:'#92400e', bg:'#fef3c7'},
-  {id:'Val', label:'Val',  title:'Validación',         color:'#6b21a8', bg:'#f3e8ff'},
-  {id:'EE',  label:'EE',   title:'Estabilidades',      color:'#be123c', bg:'#ffe4e6'},
+const CORE_TYPES=[
+  {id:'PT',    label:'PT',   title:'Producto Terminado', color:'#1e40af', bg:'#dbeafe', _core:true},
+  {id:'MP',    label:'MP',   title:'Materia Prima',      color:'#065f46', bg:'#d1fae5', _core:true},
+  {id:'Limp',  label:'Limp', title:'Limpieza',           color:'#92400e', bg:'#fef3c7', _core:true},
+  {id:'Val',   label:'Val',  title:'Validación',         color:'#6b21a8', bg:'#f3e8ff', _core:true},
+  {id:'EE',    label:'EE',   title:'Estabilidades',      color:'#be123c', bg:'#ffe4e6', _core:true},
+  {id:'Otros', label:'Otros',title:'Otros',              color:'#374151', bg:'#f3f4f6', _core:true},
 ];
+let customTipos=[];
+let SAMPLE_TYPES=[...CORE_TYPES];
+function _rebuildSampleTypes(){SAMPLE_TYPES=[...CORE_TYPES,...customTipos];}
 function sampleTypeBadge(tipo){
   if(!tipo)return'<span style="color:var(--text3);font-size:10px;font-family:var(--mono)">—</span>';
   var st=SAMPLE_TYPES.find(function(s){return s.id===tipo;});
   if(!st)return'<span style="color:var(--text3);font-size:10px">'+escH(tipo)+'</span>';
   return'<span title="'+st.title+'" style="background:'+st.bg+';color:'+st.color+';border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700;white-space:nowrap;cursor:default">'+st.label+'</span>';
+}
+function _toggleTipo(id){var i=_tipoFilter.indexOf(id);if(i>=0)_tipoFilter.splice(i,1);else _tipoFilter.push(id);render();}
+function _tipoMatch(t){if(!_tipoFilter.length)return true;return _tipoFilter.indexOf(t.tipo||'')>=0;}
+function _tipoFilterBar(){
+  return'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;padding:6px 0">'
+    +SAMPLE_TYPES.map(function(st){
+      var active=_tipoFilter.indexOf(st.id)>=0;
+      return'<button class="btn sm" onclick="_toggleTipo(\''+st.id+'\')" style="'+(active?'background:'+st.color+';color:#fff;border-color:'+st.color:'border-color:'+st.color+';color:'+st.color)+';font-weight:700" title="'+st.title+'">'+st.label+'</button>';
+    }).join('')
+    +(_tipoFilter.length?'<button class="btn sm" onclick="_tipoFilter=[];render()" style="color:var(--text3);font-size:11px;margin-left:2px">✕ Todos</button>':'')
+    +'</div>';
 }
 function selectTipoPill(val){
   document.getElementById('f-tipo').value=val;
@@ -2985,7 +3016,15 @@ function getNotifBadge(){
       });
     });
   }
-  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC+samplingC+responseC+overdueC+suggC;
+  // Mgmt activity completions pending supervisor confirmation + not-done alerts
+  var mgmtC=0;
+  if(isSup){
+    mgmtTasks.forEach(function(mt){
+      (mt.completions||[]).forEach(function(c){if(c.status==='pending-confirm')mgmtC++;});
+    });
+    mgmtC+=replanNotifs.filter(function(n){return n.type==='mgmt_not_done'&&n.status==='pending'&&n.forUserId===uid;}).length;
+  }
+  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC+samplingC+responseC+overdueC+suggC+mgmtC;
 }
 function renderNotifBtn(){
   var totalAlerts=getNotifBadge();
@@ -3046,6 +3085,7 @@ function renderFreeTasksTable(isSup){
 
   // Filtered list
   var list=freeTasks.filter(function(ft){
+    if(!isSup&&ft.analystId!==currentUser.id) return false;
     if(fa&&ft.analystId!==fa) return false;
     if(fm&&ft.date.slice(0,7)!==fm) return false;
     return true;
@@ -3055,10 +3095,8 @@ function renderFreeTasksTable(isSup){
   var months=[...new Set(freeTasks.map(function(ft){return ft.date.slice(0,7);}).filter(Boolean))].sort().reverse();
 
   var html='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">';
-  // Supervisor: create new free task button (prominent)
-  if(isSup){
-    html+='<button class="btn pri" onclick="openFreeTaskModal(null)" style="font-size:13px;padding:7px 14px">+ Nueva actividad libre</button>';
-  }
+  // Create button (supervisor = assign to anyone; non-sup = register own task)
+  html+='<button class="btn pri" onclick="openFreeTaskModal(null)" style="font-size:13px;padding:7px 14px">'+(isSup?'+ Nueva actividad libre':'+ Registrar tarea libre')+'</button>';
   // Analyst filter (supervisor only)
   if(isSup){
     html+='<select onchange="window.ftFilterAnalyst=this.value;render()" style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;background:var(--surface)">'
@@ -3092,8 +3130,10 @@ function renderFreeTasksTable(isSup){
   list.forEach(function(ft){
     var u=getU(ft.analystId);
     var approver=ft.confirmedBy?getU(ft.confirmedBy):null;
-    var stColor=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'?'var(--red)':ft.status==='declined'?'var(--red)':'var(--amber)';
-    var stLabel=ft.status==='confirmed'?'Confirmada':ft.status==='rejected'?'Rechazada':ft.status==='declined'?'Declinada':'Pend. confirmación';
+    var isAssignedBySup=!!(ft.assignedBy&&ft.assignedBy!==ft.analystId);
+    var stColor=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'||ft.status==='declined'?'var(--red)':ft.status==='pending'?'var(--blue)':'var(--amber)';
+    var stLabel=ft.status==='confirmed'?'Confirmada':ft.status==='rejected'?'Rechazada':ft.status==='declined'?'Declinada':ft.status==='pending'?(isAssignedBySup?'Asignada — pendiente':'Pendiente'):'Realizada — pend. conf.';
+    var notifForFt=!isSup?replanNotifs.find(function(n){return n.type==='free_task_assigned'&&n.freeTaskId===ft.id&&n.status==='pending';}):null;
     html+='<div class="trow" style="'+COLS+'">'
       +'<div style="font-family:var(--mono);font-size:11px">'+fmtDF(ft.date)+'</div>'
       +'<div style="display:flex;align-items:center;gap:5px"><div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px">'+escH(u.avInit)+'</div><span style="font-size:11px">'+escH(u.name)+'</span></div>'
@@ -3106,6 +3146,11 @@ function renderFreeTasksTable(isSup){
         +(isSup&&ft.status==='pending-confirm'?'<button class="btn sm suc" onclick="confirmFreeTask('+ft.id+')" style="margin-top:3px;font-size:10px">✓ Confirmar</button>':'')
         +(isSup&&ft.status==='declined'?'<button class="btn sm pri" onclick="duplicateFreeTask('+ft.id+')" style="margin-top:3px;font-size:10px">↩ Duplicar y reasignar</button>':'')
         +(isSup?'<button class="btn sm dan" onclick="deleteFreeTask('+ft.id+')" style="margin-top:3px;font-size:10px">🗑 Eliminar</button>':'')
+        +(!isSup&&ft.status==='pending'&&isAssignedBySup?'<div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap">'
+          +'<button class="btn sm suc" onclick="confirmFreeTaskAsAnalyst('+ft.id+','+(notifForFt?notifForFt.id:0)+')" style="font-size:10px">✓ Confirmar</button>'
+          +'<button class="btn sm dan" onclick="declineFreeTaskById('+ft.id+')" style="font-size:10px">✗ Declinar</button>'
+          +'</div>':'')
+        +(!isSup&&ft.status==='pending-confirm'&&!ft.assignedBy?'<button class="btn sm" onclick="openFreeTaskModal('+ft.id+')" style="margin-top:3px;font-size:10px">✎ Editar</button>':'')
       +'</div>'
       +'</div>';
   });
@@ -3118,21 +3163,36 @@ function renderMgmtModule(){
   const wd=getWeekDates(weekOffset);
   const weekOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,wd[0],wd[6]));
   const myOccs=isSup?weekOccs:weekOccs.filter(o=>(o.analysts||[]).includes(currentUser.id));
-  return`
-  <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+
+  const _inDefined=mgmtView!=='freetasks';
+  const _tabBtn=(view,label)=>`<button class="btn sm" onclick="mgmtView='${view}';render()" style="${mgmtView===view?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">${label}</button>`;
+  const _mainTabs=(tab2Label)=>`<div style="display:flex;gap:8px;align-items:center;margin-bottom:${_inDefined?'8':'12'}px">
     <div style="background:var(--bg2);border-radius:var(--radius);padding:3px;display:flex;gap:4px">
-            <button class="btn sm" onclick="mgmtView='freetasks';render()" style="${mgmtView==='freetasks'?'background:var(--surface);box-shadow:var(--shadow-sm);font-weight:600':'border:none;background:transparent'}">Actividades libres</button>
-      ${isSup?`<button class="btn sm" onclick="mgmtView='defined';render()" style="${mgmtView==='defined'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Definidas</button>`:''}
-      <button class="btn sm" onclick="mgmtView='list';render()" style="${mgmtView==='list'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Lista</button>
-      <button class="btn sm" onclick="mgmtView='calendar';render()" style="${mgmtView==='calendar'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Semana</button>
-      <button class="btn sm" onclick="mgmtView='month';render()" style="${mgmtView==='month'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">Mes</button>
-      ${isSup?`<button class="btn sm" onclick="mgmtView='categories';render()" style="${mgmtView==='categories'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">⚙ Categorías</button>`:''}
+      <button class="btn sm" onclick="mgmtView='freetasks';render()" style="${!_inDefined?'background:var(--surface);box-shadow:var(--shadow-sm);font-weight:600':'border:none;background:transparent'}">Actividades libres</button>
+      <button class="btn sm" onclick="if(mgmtView==='freetasks')mgmtView='list';render()" style="${_inDefined?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">${tab2Label}</button>
+    </div>
+  </div>`;
+
+  if(!isSup){
+    return _mainTabs('Actividades de gestión')+`
+    ${_inDefined?`<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+      <div style="background:var(--bg2);border-radius:var(--radius);padding:2px;display:flex;gap:2px">
+        ${_tabBtn('list','Lista')}${_tabBtn('calendar','Semana')}${_tabBtn('month','Mes')}
+      </div>
+    </div>`:''}
+    ${mgmtView==='freetasks'?renderFreeTasksTable(false):mgmtView==='calendar'?renderMgmtWeek(false,wd,weekOccs):mgmtView==='month'?renderMgmtMonth(false):renderMgmtList(false,weekOccs,myOccs)}`;
+  }
+
+  return _mainTabs('Actividades definidas')+`
+  ${_inDefined?`<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+    <div style="background:var(--bg2);border-radius:var(--radius);padding:2px;display:flex;gap:2px">
+      ${_tabBtn('defined','Definidas')}${_tabBtn('list','Lista')}${_tabBtn('calendar','Semana')}${_tabBtn('month','Mes')}${_tabBtn('categories','⚙ Categorías')}
     </div>
     ${(mgmtView==='calendar'||mgmtView==='month')?'<button class="btn sm" onclick="printCalendar()">🖨 Imprimir / PDF</button>':''}
-    ${isSup&&(mgmtView==='defined'||mgmtView==='list'||mgmtView==='calendar'||mgmtView==='month')?`<button class="btn sm pri" style="margin-left:auto" onclick="openMgmtModal(null)">+ Nueva actividad</button>`:''}
-  </div>
-  ${(isSup&&(mgmtView==='calendar'||mgmtView==='month'))?renderMgmtRoleFilter():''}
-  ${mgmtView==='freetasks'?renderFreeTasksTable(isSup):mgmtView==='defined'?renderMgmtDefined(isSup):mgmtView==='list'?renderMgmtList(isSup,weekOccs,myOccs):mgmtView==='month'?renderMgmtMonth(isSup):mgmtView==='categories'?renderMgmtCategories():renderMgmtWeek(isSup,wd,weekOccs)}`;
+    ${mgmtView!=='categories'?`<button class="btn sm pri" style="margin-left:auto" onclick="openMgmtModal(null)">+ Nueva actividad</button>`:''}
+  </div>`:''}
+  ${_inDefined&&(mgmtView==='calendar'||mgmtView==='month')?renderMgmtRoleFilter():''}
+  ${mgmtView==='freetasks'?renderFreeTasksTable(true):mgmtView==='defined'?renderMgmtDefined(true):mgmtView==='list'?renderMgmtList(true,weekOccs,myOccs):mgmtView==='month'?renderMgmtMonth(true):mgmtView==='categories'?renderMgmtCategories():renderMgmtWeek(true,wd,weekOccs)}`;
 }
 
 function renderMgmtList(isSup, weekOccs, myOccs){
@@ -3193,8 +3253,8 @@ function renderMgmtList(isSup, weekOccs, myOccs){
   </div>
   ${periodOccs.length===0?`<div class="tbl"><div class="empty">${_mlq?'Sin resultados para "'+escH(_mlq)+'"':'Sin actividades de gestión en este período'}</div></div>`:
     `<div class="tbl" style="margin-bottom:16px">
-      <div class="thead" style="grid-template-columns:1.2fr .9fr .8fr 1.1fr .65fr .65fr .4fr">
-        <div>Categoría</div><div>Fecha</div><div>Analista(s)</div><div>Horario · Dedicación</div><div>Frecuencia</div><div>Nota</div><div></div>
+      <div class="thead" style="grid-template-columns:1.2fr .9fr .8fr 1.1fr .65fr .65fr .85fr">
+        <div>Categoría</div><div>Fecha</div><div>Analista(s)</div><div>Dedicación / Realizado</div><div>Frecuencia</div><div>Nota</div><div></div>
       </div>
       ${periodOccs.slice(0,50).map(o=>{
         const cat=getMgmtCat(o.category);
@@ -3202,19 +3262,81 @@ function renderMgmtList(isSup, weekOccs, myOccs){
         const analNames=(o.analysts||[]).map(id=>getU(id).name.split(' ')[0]).join(', ')||'—';
         const freq=MGMT_FREQS.find(f=>f.id===o.frequency)?.label||'—';
         const timeStr=o.dedicacion?`${o.dedicacion}h`:'';
-
         const hasExc=!!(o._hasExc);
-        return`<div class="trow" style="grid-template-columns:1.2fr .9fr .8fr 1.1fr .65fr .65fr .4fr;${hasExc?'background:var(--amber-bg);':''}" onclick="${isSup?`openMgmtOccModal(${o.id},'${o.occDate}')`:''}" title="${isSup?'Clic para gestionar esta ocurrencia':''}">
+
+        // Completion data
+        const ocCompls=isSup?(o.completions||[]).filter(c=>c.date===o.occDate):null;
+        const myCompl=!isSup?(o.completions||[]).find(c=>c.date===o.occDate&&c.analystId===currentUser.id):null;
+        const isMyOcc=!isSup&&(o.analysts||[]).includes(currentUser.id);
+
+        // Build completion summary
+        const complHtml=isSup&&ocCompls.length>0
+          ?ocCompls.map(c=>{
+              const u=getU(c.analystId);
+              const stCount=(c.subtasks||[]).length;
+              const tipParts=[];
+              if(c.comment)tipParts.push(c.comment);
+              if(stCount)tipParts.push((c.subtasks||[]).map(s=>s.name+': '+s.hours+'h').join(' | '));
+              const isPend=c.status==='pending-confirm';
+              const isNotDone=c.status==='not-done';
+              const hColor=isPend?'var(--amber)':isNotDone?'var(--red)':'var(--green)';
+              const hLabel=isPend?`⏳ ${c.hours}h`:isNotDone?'✗ No realizada':`✓ ${c.hours}h`;
+              return`<div style="display:flex;align-items:center;gap:3px;margin-top:3px" title="${escH(tipParts.join(' — '))}${isPend?' · Pendiente de confirmación':isNotDone?' · No realizada':''}">
+                <div class="av ${u.av}" style="width:14px;height:14px;font-size:7px;flex-shrink:0">${escH(u.avInit)}</div>
+                <span style="font-size:10px;color:${hColor};font-weight:700;font-family:var(--mono)">${hLabel}</span>
+                ${stCount?`<span style="font-size:9px;color:var(--text3);background:var(--bg2);padding:0 3px;border-radius:3px">${stCount} fases</span>`:''}
+                ${c.comment&&!stCount?`<span style="font-size:9px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;max-width:55px" title="${escH(c.comment)}">· ${escH(c.comment)}</span>`:''}
+              </div>`;
+            }).join('')
+          :!isSup&&myCompl
+            ?(function(){
+                var sc=myCompl.status;
+                var col=sc==='pending-confirm'?'var(--amber)':sc==='not-done'?'var(--red)':'var(--green)';
+                var stCnt=(myCompl.subtasks||[]).length;
+                var tipParts=[];
+                if(myCompl.comment)tipParts.push(myCompl.comment);
+                if(stCnt)tipParts.push((myCompl.subtasks||[]).map(function(s){return s.name+': '+s.hours+'h';}).join(' | '));
+                var lbl=sc==='not-done'?'✗ No realizada':(sc==='pending-confirm'?'⏳ ':'✓ ')+myCompl.hours+'h';
+                return'<div style="display:flex;align-items:center;gap:3px;margin-top:3px" title="'+escH(tipParts.join(' — '))+(sc==='pending-confirm'?' · Pendiente de confirmación':'')+'">'
+                  +'<span style="font-size:10px;font-weight:700;font-family:var(--mono);color:'+col+'">'+lbl+'</span>'
+                  +(stCnt?'<span style="font-size:9px;color:var(--text3);background:var(--bg2);padding:0 3px;border-radius:3px">'+stCnt+' fases</span>':'')
+                  +(myCompl.comment&&!stCnt?'<span style="font-size:9px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;max-width:55px" title="'+escH(myCompl.comment)+'">· '+escH(myCompl.comment)+'</span>':'')
+                  +'</div>';
+              })()
+          :'';
+
+        return`<div class="trow" style="grid-template-columns:1.2fr .9fr .8fr 1.1fr .65fr .65fr .85fr;${hasExc?'background:var(--amber-bg);':''}" onclick="${isSup?`openMgmtOccModal(${o.id},'${o.occDate}')`:''}" title="${isSup?'Clic para gestionar esta ocurrencia':''}">
           <div style="display:flex;align-items:center;gap:7px">
             <span style="font-size:11px;padding:2px 8px;border-radius:10px;font-weight:600;background:${cat.color};color:${cat.text}">${escH(cat.label)}</span>
             ${hasExc?`<span style="font-size:9px;padding:1px 5px;border-radius:6px;background:var(--amber-bg);color:var(--amber-text);font-weight:600">✎ Excep.</span>`:''}
           </div>
           <div style="font-family:var(--mono);font-size:12px">${fmtDF(o.occDate)}</div>
           <div><div class="av-stack">${analAvs}</div><div style="font-size:10px;color:var(--text2)">${escH(analNames)}</div></div>
-          <div style="font-size:12px;font-family:var(--mono)">${timeStr||'—'}</div>
+          <div style="font-size:12px;font-family:var(--mono)">${(isSup?ocCompls.length===0:!myCompl)?(timeStr||'—'):''}${complHtml}</div>
           <div style="font-size:11px;color:var(--text2)">${escH(freq)}</div>
           <div style="font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(o.notes||'')}</div>
-          <div>${isSup?`<button class="btn sm" onclick="event.stopPropagation();openMgmtModal(${o.id})" title="Editar actividad completa">✎</button>`:''}</div>
+          <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+            ${isSup
+              ?`<button class="btn sm" onclick="event.stopPropagation();openMgmtModal(${o.id})" title="Editar definición">✎</button>`
+                +(ocCompls.length>0
+                  ?ocCompls.map(c=>
+                      (c.status==='pending-confirm'
+                        ?`<button class="btn sm suc" onclick="event.stopPropagation();confirmMgmtCompl(${o.id},'${o.occDate}','${c.analystId}')" title="Confirmar realización" style="font-size:10px;padding:3px 6px">✓</button>`
+                        :'')
+                      +`<button class="btn sm" onclick="event.stopPropagation();openMgmtComplModal(${o.id},'${o.occDate}')" title="Editar realización" style="font-size:10px;padding:3px 6px">✎✓</button>`
+                      +`<button class="btn sm dan" onclick="event.stopPropagation();deleteMgmtCompl(${o.id},'${o.occDate}','${c.analystId}')" title="Eliminar registro" style="font-size:11px;padding:3px 6px">🗑</button>`
+                    ).join('')
+                  :`<button class="btn sm suc" onclick="event.stopPropagation();openMgmtComplModal(${o.id},'${o.occDate}')" title="Registrar como realizada" style="font-size:10px;padding:3px 7px">✓</button>`)
+              :isMyOcc?myCompl
+                ?(myCompl.status==='confirmed'
+                  ?''
+                  :myCompl.status==='not-done'
+                    ?`<button class="btn sm suc" onclick="event.stopPropagation();openMgmtComplModal(${o.id},'${o.occDate}')" style="font-size:10px">↩ Registrar</button>`
+                    :`<button class="btn sm" onclick="event.stopPropagation();openMgmtComplModal(${o.id},'${o.occDate}')" title="Editar registro" style="font-size:10px;padding:3px 6px">✎✓</button>`)
+                :`<button class="btn sm suc" onclick="event.stopPropagation();openMgmtComplModal(${o.id},'${o.occDate}')" style="font-size:10px">✓ Realizada</button>`
+                  +`<button class="btn sm" onclick="event.stopPropagation();mgmtMarkNotDone(${o.id},'${o.occDate}')" title="Indicar que no pude realizar" style="font-size:10px;color:var(--red);border-color:var(--red)">✗</button>`
+              :''}
+          </div>
         </div>`;
       }).join('')}
       ${periodOccs.length>50?`<div style="padding:8px 14px;font-size:12px;color:var(--text3);text-align:center">Mostrando 50 de ${periodOccs.length} — ajustá el período para ver más</div>`:''}
@@ -3281,11 +3403,9 @@ function renderMgmtWeek(isSup, wd, weekOccs){
     html+='<div class="wcell-name"><div class="av '+a.av+'" style="flex-shrink:0">'+escH(a.avInit)+'</div>'+escH(a.name.split(' ')[0])+'</div>';
     wd.forEach(function(d){
       var dayOccs=weekOccs.filter(function(o){return o.occDate===d&&(o.analysts||[]).includes(a.id);});
-      var analysisOccs=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===a.id&&x.date===d;});});
-      var analysisH=analysisOccs.reduce(function(s,t){return s+getAssignHours(t,a.id,d);},0);
-      var totalH=analysisH;
-      var pct=Math.min(totalH/WORKDAY_HOURS*100,100);
-      var overload=totalH>WORKDAY_HOURS;
+      var mgmtH=dayOccs.reduce(function(s,o){return s+(o.dedicacion||0);},0);
+      var pct=Math.min(mgmtH/WORKDAY_HOURS*100,100);
+      var overload=mgmtH>WORKDAY_HOURS;
       var isToday=d===todayStr;
       html+='<div class="wcell" style="'+(isToday?'background:rgba(26,79,138,.04)':'')+'">';
       dayOccs.forEach(function(o){
@@ -3293,15 +3413,11 @@ function renderMgmtWeek(isSup, wd, weekOccs){
         html+='<div style="padding:2px 4px;border-radius:3px;margin-bottom:2px;background:'+c.color+';border-left:3px solid '+c.text+';cursor:'+(isSup?'pointer':'default')+';font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onclick="'+(isSup?'openMgmtOccModal('+o.id+',\''+o.occDate+'\')':'')+'">'
           +'<span style="font-weight:600;color:'+c.text+'">'+escH(c.label)+'</span>'+(o._hasExc?'<span style="font-size:8px;color:'+c.text+';opacity:.7"> ✎</span>':'')+'</div>';
       });
-      analysisOccs.forEach(function(t){
-        html+='<div style="padding:2px 4px;border-radius:3px;margin-bottom:2px;background:#e4f2ea;border-left:3px solid #1e5c35;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
-          +'<span style="font-weight:600;color:#1e5c35">'+escH(t.producto.split(' ')[0])+'</span>'+'</div>';
-      });
-      if(totalH>0){
+      if(mgmtH>0){
         html+='<div style="margin-top:3px">'
           +'<div style="background:'+(overload?'var(--red-bg)':'var(--bg2)')+';border-radius:2px;height:4px;overflow:hidden">'
           +'<div style="height:100%;background:'+(overload?'var(--red)':'var(--blue)')+';width:'+pct.toFixed(0)+'%"></div></div>'
-          +'<div style="font-size:9px;font-family:var(--mono);color:'+(overload?'var(--red)':'var(--text3)')+';text-align:right">'+totalH.toFixed(1)+'/'+WORKDAY_HOURS+'h</div>'
+          +'<div style="font-size:9px;font-family:var(--mono);color:'+(overload?'var(--red)':'var(--text3)')+';text-align:right">'+mgmtH.toFixed(1)+'h</div>'
           +'</div>';
       }
       html+='</div>';
@@ -3994,6 +4110,7 @@ function cycleMgmtCatColor(idx){
   c.color=next.color;c.text=next.text;saveLS();render();
 }
 function saveMgmtCat(id){
+  if(!isSupRole()){alert('Solo el Supervisor puede modificar categorías de gestión.');return;}
   const inp=document.getElementById('mgcat-lbl-'+id);
   const val=inp?.value.trim();
   if(!val){alert('El nombre no puede estar vacío.');return;}
@@ -4004,6 +4121,7 @@ function saveMgmtCat(id){
   if(msg){msg.style.color='var(--green)';msg.textContent='Categoría actualizada.';setTimeout(()=>{if(msg)msg.textContent='';render();},1500);}
 }
 function deleteMgmtCat(id){
+  if(!isSupRole()){alert('Solo el Supervisor puede eliminar categorías de gestión.');return;}
   const used=mgmtTasks.filter(t=>t.category===id).length;
   if(used>0){alert('No se puede eliminar: hay '+used+' actividad(es) con esta categoría.');return;}
   if(!confirm('¿Eliminar la categoría "'+mgmtCategories.find(c=>c.id===id)?.label+'"?'))return;
@@ -4011,6 +4129,7 @@ function deleteMgmtCat(id){
   saveLS();render();
 }
 function addMgmtCat(){
+  if(!isSupRole()){alert('Solo el Supervisor puede agregar categorías de gestión.');return;}
   const label=(document.getElementById('newmgcat-label')?.value||'').trim();
   if(!label){const m=document.getElementById('newmgcat-msg');if(m){m.style.color='var(--red)';m.textContent='Ingresá un nombre.';setTimeout(()=>{if(m)m.textContent='';},2000);}return;}
   const pal=MGMT_CAT_PALETTES[selMgmtCatPalette]||MGMT_CAT_PALETTES[0];
@@ -4065,6 +4184,7 @@ function selectMgmtCat(id){
   });
 }
 function saveMgmt(){
+  if(!isSupRole()){alert('Solo el Supervisor puede guardar actividades de gestión.');return;}
   const catId=document.getElementById('mg-cat')?.value||mgmtCategories[0]?.id;
   const analysts=CAL_USERS.filter(a=>document.getElementById('mgac-'+a.id)?.classList.contains('selected')).map(a=>a.id);
   const obj={
@@ -4091,6 +4211,181 @@ function saveMgmt(){
 
 function openMgmtOccModal(id,occDate){mgmtOccTaskId=id;mgmtOccDate=occDate;showMgmtOccModal=true;render();}
 function closeMgmtOccModal(){showMgmtOccModal=false;mgmtOccTaskId=null;mgmtOccDate=null;render();}
+
+function deleteMgmtCompl(mgmtId,occDate,analystId){
+  if(!isSupRole()){alert('Solo el Supervisor puede eliminar registros de actividades de gestión.');return;}
+  if(!confirm('¿Eliminar el registro de realización?'))return;
+  var mt=mgmtTasks.find(function(m){return m.id===mgmtId;});
+  if(!mt)return;
+  mt.completions=(mt.completions||[]).filter(function(c){return!(c.date===occDate&&c.analystId===analystId);});
+  mt._ts=Date.now();
+  saveLS();saveNow();render();
+}
+
+function confirmMgmtCompl(mgmtId,occDate,analystId){
+  if(!isSupRole()){alert('Solo el Supervisor puede confirmar registros.');return;}
+  var mt=mgmtTasks.find(function(m){return m.id===mgmtId;});
+  if(!mt)return;
+  var c=(mt.completions||[]).find(function(x){return x.date===occDate&&x.analystId===analystId;});
+  if(!c)return;
+  c.status='confirmed';
+  c.confirmedBy=currentUser.id;
+  c.confirmedTs=Date.now();
+  mt._ts=Date.now();
+  saveLS();saveNow().catch(function(e){console.error(e);});render();
+}
+
+function mgmtMarkNotDone(mgmtId,occDate){
+  if(isSupRole())return;
+  if(!confirm('¿Confirmar que no pudiste realizar esta actividad? Se notificará al supervisor.'))return;
+  var mt=mgmtTasks.find(function(m){return m.id===mgmtId;});
+  if(!mt)return;
+  mt.completions=(mt.completions||[]).filter(function(c){return!(c.date===occDate&&c.analystId===currentUser.id);});
+  mt.completions.push({date:occDate,analystId:currentUser.id,ts:Date.now(),hours:0,status:'not-done'});
+  mt._ts=Date.now();
+  var sup=users.find(function(u){return u.role==='supervisor';});
+  if(sup){
+    replanNotifs.push({id:nextNotifId++,type:'mgmt_not_done',
+      mgmtId:mgmtId,occDate:occDate,analystId:currentUser.id,
+      forUserId:sup.id,fromUser:currentUser.id,fromName:currentUser.name,
+      category:mt.category,status:'pending',ts:Date.now()});
+  }
+  saveLS();saveNow().catch(function(e){console.error(e);});render();
+}
+
+function openMgmtComplModal(mgmtId,occDate){
+  var mt=mgmtTasks.find(function(x){return x.id===mgmtId;});
+  if(!mt)return;
+  var isSup=currentUser.role==='supervisor';
+  var cat=getMgmtCat(mt.category);
+  // Effective analysts for this occurrence (check exceptions)
+  var exc=(mt.exceptions||[]).find(function(e){return e.date===occDate;});
+  var effAnalysts=(exc&&exc.analysts&&exc.analysts.length)?exc.analysts:(mt.analysts||[]);
+  if(!effAnalysts.length)effAnalysts=[currentUser.id];
+  var defaultAnalystId=isSup?effAnalysts[0]:currentUser.id;
+  function getExistingCompl(analystId){
+    return(mt.completions||[]).find(function(c){return c.date===occDate&&c.analystId===analystId;});
+  }
+  var existingCompl=getExistingCompl(defaultAnalystId);
+  if(!isSup&&existingCompl&&existingCompl.status==='confirmed'){
+    alert('Esta actividad ya fue confirmada por el supervisor y no puede modificarse.');return;
+  }
+
+  var div=document.createElement('div');
+  div.innerHTML='<div style="position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center" id="mc-backdrop">'
+    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:22px;width:440px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
+    +'<div style="font-weight:700;font-size:15px;margin-bottom:4px">Registrar actividad realizada</div>'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">'
+    +'<span style="font-size:12px;padding:2px 8px;border-radius:10px;font-weight:600;background:'+cat.color+';color:'+cat.text+'">'+escH(cat.label)+'</span>'
+    +'<span style="font-size:12px;color:var(--text2);font-family:var(--mono)">'+fmtDF(occDate)+'</span>'
+    +'</div>'
+    // Analyst selector (supervisor only)
+    +(isSup?'<div style="margin-bottom:12px"><label style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Analista *</label>'
+      +'<select id="mc-analyst" style="width:100%;margin-top:6px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+      +effAnalysts.map(function(id){var u=getU(id);return'<option value="'+id+'">'+escH(u.name)+'</option>';}).join('')
+      +'</select></div>':'')
+    +(mt.dedicacion?'<div style="background:var(--blue-bg);border-radius:var(--radius);padding:7px 10px;font-size:12px;margin-bottom:14px;color:var(--blue-text)">⏱ Dedicación planificada: <b style="font-family:var(--mono)">'+mt.dedicacion+'h</b></div>':'')
+    // Hours
+    +'<div style="margin-bottom:12px"><label style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Horas reales dedicadas *</label>'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-top:6px">'
+    +'<button id="mc-btn-minus" type="button" onclick="var e=document.getElementById(\'mc-hrs\');if(!e.readOnly)e.value=Math.max(0.5,parseFloat(e.value||1)-0.5)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">−</button>'
+    +'<input type="number" id="mc-hrs" min="0.5" max="24" step="0.5" value="'+(existingCompl?existingCompl.hours:(mt.dedicacion||1))+'" style="width:90px;text-align:center;font-size:20px;font-weight:700;padding:5px;border:2px solid var(--border);border-radius:var(--radius);font-family:var(--mono)">'
+    +'<button id="mc-btn-plus" type="button" onclick="var e=document.getElementById(\'mc-hrs\');if(!e.readOnly)e.value=(parseFloat(e.value||1)+0.5)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">+</button>'
+    +'<span style="font-size:12px;color:var(--text3)">horas</span>'
+    +'</div></div>'
+    // Subtasks
+    +'<details id="mc-desglose" style="margin-bottom:14px"><summary style="cursor:pointer;font-size:11px;font-weight:600;color:var(--blue);padding:4px 0;outline:none">▸ Desglose de tiempo (opcional)</summary>'
+    +'<div id="mc-subtasks" style="margin-top:8px"></div>'
+    +'<button type="button" onclick="window._addMgmtSubtask()" class="btn sm" style="margin-top:6px;font-size:11px">+ Agregar fase</button>'
+    +'</details>'
+    // Comment
+    +'<div style="margin-bottom:16px"><label style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Comentario (opcional)</label>'
+    +'<textarea id="mc-comment" rows="2" placeholder="Ej: Completado sin inconvenientes" style="width:100%;margin-top:6px;padding:7px 9px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;resize:vertical;box-sizing:border-box">'+escH(existingCompl?existingCompl.comment||'':'')+'</textarea></div>'
+    +'<div style="display:flex;gap:8px">'
+    +'<button id="mc-cancel" class="btn" style="flex:1">Cancelar</button>'
+    +'<button onclick="window._doMgmtCompl('+mgmtId+',\''+occDate+'\')" class="btn suc" style="flex:1">✓ Registrar</button>'
+    +'</div></div></div>';
+  document.body.appendChild(div);
+  document.getElementById('mc-cancel').onclick=function(){document.body.removeChild(div);};
+
+  var _stCounter=0;
+  window._addMgmtSubtask=function(name,hours){
+    var id='_st_'+(_stCounter++);
+    var container=document.getElementById('mc-subtasks');
+    var row=document.createElement('div');
+    row.id=id;row.style.cssText='display:flex;align-items:center;gap:6px;margin-bottom:6px';
+    row.innerHTML='<input type="text" placeholder="Descripción de la fase" value="'+escH(name||'')+'" style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px">'
+      +'<input type="number" min="0.5" max="24" step="0.5" value="'+(hours||0.5)+'" oninput="window._updateMgmtTotal()" style="width:65px;padding:5px 6px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;text-align:center;font-family:var(--mono)">'
+      +'<span style="font-size:11px;color:var(--text3)">h</span>'
+      +'<button type="button" onclick="document.getElementById(\''+id+'\').remove();window._updateMgmtTotal()" class="btn" style="width:24px;height:24px;padding:0;font-size:14px;line-height:1;color:var(--red)">✕</button>';
+    container.appendChild(row);
+    window._updateMgmtTotal();
+  };
+  window._updateMgmtTotal=function(){
+    var rows=document.querySelectorAll('#mc-subtasks > div');
+    var hrsEl=document.getElementById('mc-hrs');
+    var minusEl=document.getElementById('mc-btn-minus');
+    var plusEl=document.getElementById('mc-btn-plus');
+    if(!rows.length){
+      hrsEl.readOnly=false;hrsEl.style.opacity='1';
+      minusEl.disabled=false;plusEl.disabled=false;return;
+    }
+    var total=0;
+    rows.forEach(function(row){var h=row.querySelectorAll('input')[1];total+=parseFloat(h.value||0)||0;});
+    total=Math.round(total*10)/10;
+    hrsEl.value=total;hrsEl.readOnly=true;hrsEl.style.opacity='0.65';
+    minusEl.disabled=true;plusEl.disabled=true;
+  };
+
+  // Supervisor: reload fields when analyst changes
+  if(isSup){
+    document.getElementById('mc-analyst').onchange=function(){
+      var selId=this.value;
+      var c=getExistingCompl(selId);
+      document.getElementById('mc-hrs').value=c?c.hours:(mt.dedicacion||1);
+      document.getElementById('mc-comment').value=c?c.comment||'':'';
+      document.getElementById('mc-subtasks').innerHTML='';
+      _stCounter=0;
+      if(c&&c.subtasks&&c.subtasks.length){
+        document.getElementById('mc-desglose').open=true;
+        c.subtasks.forEach(function(st){window._addMgmtSubtask(st.name,st.hours);});
+      } else {window._updateMgmtTotal();}
+    };
+  }
+
+  // Pre-populate existing subtasks
+  if(existingCompl&&existingCompl.subtasks&&existingCompl.subtasks.length){
+    document.getElementById('mc-desglose').open=true;
+    existingCompl.subtasks.forEach(function(st){window._addMgmtSubtask(st.name,st.hours);});
+  }
+
+  window._doMgmtCompl=function(mid,oDate){
+    var analystId=isSup?(document.getElementById('mc-analyst')||{value:currentUser.id}).value:currentUser.id;
+    var stRows=document.querySelectorAll('#mc-subtasks > div');
+    var subtasks=[];
+    stRows.forEach(function(row){
+      var inputs=row.querySelectorAll('input');
+      var name=(inputs[0].value||'').trim();
+      var h=parseFloat(inputs[1].value||0)||0;
+      if(h>0)subtasks.push({name:name||'Fase',hours:h});
+    });
+    var hVal;
+    if(subtasks.length){hVal=Math.round(subtasks.reduce(function(s,st){return s+st.hours;},0)*10)/10;}
+    else{hVal=parseFloat((document.getElementById('mc-hrs')||{}).value||0);}
+    var comment=((document.getElementById('mc-comment')||{}).value||'').trim();
+    if(!hVal||hVal<=0){alert('Ingresá horas válidas.');return;}
+    document.body.removeChild(div);
+    var mt2=mgmtTasks.find(function(x){return x.id===mid;});
+    if(!mt2)return;
+    if(!mt2.completions)mt2.completions=[];
+    var idx=mt2.completions.findIndex(function(c){return c.date===oDate&&c.analystId===analystId;});
+    var complStatus=isSup?'confirmed':'pending-confirm';
+    var rec={date:oDate,analystId:analystId,ts:Date.now(),hours:hVal,comment:comment,status:complStatus};
+    if(subtasks.length)rec.subtasks=subtasks;
+    if(idx>=0)mt2.completions[idx]=rec;else mt2.completions.push(rec);
+    saveLS();saveNow().catch(function(e){console.error(e);});render();
+  };
+}
 
 function renderMgmtOccModal(){
   var mt=mgmtTasks.find(function(m){return m.id===mgmtOccTaskId;});
@@ -4160,6 +4455,7 @@ function renderMgmtOccModal(){
 
 function toggleMoccAna(el){el.classList.toggle('selected');}
 function saveMgmtOcc(){
+  if(!isSupRole()){alert('Solo el Supervisor puede modificar ocurrencias de actividades de gestión.');return;}
   var mt=mgmtTasks.find(function(m){return m.id===mgmtOccTaskId;});
   if(!mt)return;
   if(!mt.exceptions)mt.exceptions=[];
@@ -4217,9 +4513,13 @@ function removeMgmtExc(){
   showMgmtOccModal=false;saveLS();render();
 }
 
-function openMgmtModal(id){editingMgmt=id;showMgmtModal=true;render();}
+function openMgmtModal(id){
+  if(!isSupRole()){alert('Solo el Supervisor puede crear o editar actividades de gestión.');return;}
+  editingMgmt=id;showMgmtModal=true;render();
+}
 function closeMgmtModal(){showMgmtModal=false;editingMgmt=null;render();}
 function deleteMgmt(id){
+  if(!isSupRole()){alert('Solo el Supervisor puede eliminar actividades de gestión.');return;}
   if(!confirm('¿Eliminar esta actividad de gestión?'))return;
   const mt=mgmtTasks.find(m=>m.id===id);
   const cat=mt?getMgmtCat(mt.category):null;
@@ -4520,9 +4820,34 @@ function renderEstabilidades(){
     var anaAv=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':'';}).join('');
     var actBtns='';
     if(estabTab==='activas'){
+      // Acciones supervisor / revisor
+      if(t.status==='pending-confirm'&&sup)actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();confirmDone('+t.id+')" style="font-size:10px;padding:2px 6px" title="Confirmar completado">✓</button>';
       if(t.status==='done')actBtns+='<button class="btn sm" onclick="event.stopPropagation();markReviewed('+t.id+')" style="background:var(--green);color:#fff;font-size:10px;padding:2px 6px">✓ Revisar</button>';
       if((t.status==='done'||t.status==='reviewed')&&(sup||rev))actBtns+='<button class="btn sm" onclick="event.stopPropagation();markObserved('+t.id+')" style="background:var(--orange,#f59e0b);color:#fff;font-size:10px;padding:2px 6px">⚑ Obs.</button>';
       if(t.status==='reviewed'&&sup)actBtns+='<button class="btn sm" onclick="event.stopPropagation();markApproved('+t.id+')" style="background:var(--blue);color:#fff;font-size:10px;padding:2px 6px">✓ Aprobar</button>';
+      if(sup&&assigns.length>0)actBtns+='<button class="btn sm" title="Replanificar" onclick="event.stopPropagation();openReplanSuper('+t.id+')" style="font-size:10px;padding:2px 4px">↺</button>';
+      if(sup)actBtns+='<button class="btn sm" style="color:var(--text3);padding:2px 4px" title="Eliminar" onclick="event.stopPropagation();deleteTask('+t.id+')">🗑</button>';
+      // Acciones analista asignado
+      if(currentUser&&currentUser.role==='analyst'){
+        var _myAE=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
+        if(_myAE.length>0){
+          var _tdE=today();var _tdDE=new Date(_tdE+'T12:00:00');
+          var _maE=_myAE.find(function(a){return a.date===_tdE;})||_myAE.slice().sort(function(a,b){return Math.abs(new Date(a.date+'T12:00:00')-_tdDE)-Math.abs(new Date(b.date+'T12:00:00')-_tdDE);})[0];
+          var _dpE=_maE&&_maE.date?',\''+_maE.date+'\'':'';
+          var _iDE=_maE&&((_maE.realHours>0)||(_maE.sessions&&_maE.sessions.length>0)||!!_maE._completedBySup);
+          var _iPCE=_maE&&_maE._pendingConfirm&&!_maE._supervisorConfirmed;
+          var _iSE=!!(_maE&&_maE._started);
+          var _diffE=_maE&&_maE.date?Math.round((new Date(_maE.date+'T12:00:00')-_tdDE)/(1000*60*60*24)):0;
+          var _inWE=(_diffE>=-3&&_diffE<=1);
+          var _tActE=['pending','scheduled','progress','pending-confirm','observed'].indexOf(t.status)>=0;
+          var _pRE=replanNotifs.find(function(n){return n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';});
+          if(!_iDE&&!_iPCE&&!_iSE&&_inWE&&_tActE)actBtns+='<button class="btn sm pri" onclick="event.stopPropagation();markProg('+t.id+_dpE+')">▶ Iniciar</button>';
+          if(!_iDE&&!_iPCE&&_inWE&&_tActE&&t.status!=='pending-confirm')actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();markDone('+t.id+_dpE+')">✓ Completar</button>';
+          if(t.status==='observed')actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();markDone('+t.id+_dpE+')">↩ Re-enviar</button>';
+          if(!_pRE&&!_iDE&&t.status!=='done'&&t.status!=='pending-confirm')actBtns+='<button class="btn sm" onclick="event.stopPropagation();openReplan('+t.id+',\''+currentUser.id+'\')" title="Replanificar">📅</button>';
+          if((t.observations&&t.observations.length)||(t.completionComments&&t.completionComments.length)||(t.resubmitHistory&&t.resubmitHistory.length))actBtns+='<button class="btn sm" onclick="event.stopPropagation();openEdit('+t.id+')" title="Ver comentarios" style="color:var(--blue)">💬</button>';
+        }
+      }
     }
     return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
       +'<div><div class="cell-trunc" style="font-weight:500">'+escH(t.producto)+'</div>'
@@ -4599,9 +4924,34 @@ function renderLimpVal(){
     var anaAv=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':'';}).join('');
     var actBtns='';
     if(limpvalTab==='activas'){
+      // Acciones supervisor / revisor
+      if(t.status==='pending-confirm'&&sup)actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();confirmDone('+t.id+')" style="font-size:10px;padding:2px 6px" title="Confirmar completado">✓</button>';
       if(t.status==='done')actBtns+='<button class="btn sm" onclick="event.stopPropagation();markReviewed('+t.id+')" style="background:var(--green);color:#fff;font-size:10px;padding:2px 6px">✓ Revisar</button>';
       if((t.status==='done'||t.status==='reviewed')&&(sup||rev))actBtns+='<button class="btn sm" onclick="event.stopPropagation();markObserved('+t.id+')" style="background:var(--orange,#f59e0b);color:#fff;font-size:10px;padding:2px 6px">⚑ Obs.</button>';
       if(t.status==='reviewed'&&sup)actBtns+='<button class="btn sm" onclick="event.stopPropagation();markApproved('+t.id+')" style="background:var(--blue);color:#fff;font-size:10px;padding:2px 6px">✓ Aprobar</button>';
+      if(sup&&assigns.length>0)actBtns+='<button class="btn sm" title="Replanificar" onclick="event.stopPropagation();openReplanSuper('+t.id+')" style="font-size:10px;padding:2px 4px">↺</button>';
+      if(sup)actBtns+='<button class="btn sm" style="color:var(--text3);padding:2px 4px" title="Eliminar" onclick="event.stopPropagation();deleteTask('+t.id+')">🗑</button>';
+      // Acciones analista asignado
+      if(currentUser&&currentUser.role==='analyst'){
+        var _myAL=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
+        if(_myAL.length>0){
+          var _tdL=today();var _tdDL=new Date(_tdL+'T12:00:00');
+          var _maL=_myAL.find(function(a){return a.date===_tdL;})||_myAL.slice().sort(function(a,b){return Math.abs(new Date(a.date+'T12:00:00')-_tdDL)-Math.abs(new Date(b.date+'T12:00:00')-_tdDL);})[0];
+          var _dpL=_maL&&_maL.date?',\''+_maL.date+'\'':'';
+          var _iDL=_maL&&((_maL.realHours>0)||(_maL.sessions&&_maL.sessions.length>0)||!!_maL._completedBySup);
+          var _iPCL=_maL&&_maL._pendingConfirm&&!_maL._supervisorConfirmed;
+          var _iSL=!!(_maL&&_maL._started);
+          var _diffL=_maL&&_maL.date?Math.round((new Date(_maL.date+'T12:00:00')-_tdDL)/(1000*60*60*24)):0;
+          var _inWL=(_diffL>=-3&&_diffL<=1);
+          var _tActL=['pending','scheduled','progress','pending-confirm','observed'].indexOf(t.status)>=0;
+          var _pRL=replanNotifs.find(function(n){return n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';});
+          if(!_iDL&&!_iPCL&&!_iSL&&_inWL&&_tActL)actBtns+='<button class="btn sm pri" onclick="event.stopPropagation();markProg('+t.id+_dpL+')">▶ Iniciar</button>';
+          if(!_iDL&&!_iPCL&&_inWL&&_tActL&&t.status!=='pending-confirm')actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();markDone('+t.id+_dpL+')">✓ Completar</button>';
+          if(t.status==='observed')actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();markDone('+t.id+_dpL+')">↩ Re-enviar</button>';
+          if(!_pRL&&!_iDL&&t.status!=='done'&&t.status!=='pending-confirm')actBtns+='<button class="btn sm" onclick="event.stopPropagation();openReplan('+t.id+',\''+currentUser.id+'\')" title="Replanificar">📅</button>';
+          if((t.observations&&t.observations.length)||(t.completionComments&&t.completionComments.length)||(t.resubmitHistory&&t.resubmitHistory.length))actBtns+='<button class="btn sm" onclick="event.stopPropagation();openEdit('+t.id+')" title="Ver comentarios" style="color:var(--blue)">💬</button>';
+        }
+      }
     }
     return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
       +'<div><div class="cell-trunc" style="font-weight:500">'+escH(t.producto)+'</div>'
@@ -5043,9 +5393,9 @@ function renderRevision(){
   if(typeof window.revSearch==='undefined') window.revSearch='';
   var q=(window.revSearch||'').toLowerCase().trim();
   function mQ(t){return !q||t.producto.toLowerCase().includes(q)||(t.lote||'').toLowerCase().includes(q);}
-  var doneT=activeTasks().filter(function(t){return t.status==='done'&&mQ(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
-  var reviewedT=activeTasks().filter(function(t){return t.status==='reviewed'&&mQ(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
-  var observedT=activeTasks().filter(function(t){return t.status==='observed'&&mQ(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
+  var doneT=activeTasks().filter(function(t){return t.status==='done'&&mQ(t)&&_tipoMatch(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
+  var reviewedT=activeTasks().filter(function(t){return t.status==='reviewed'&&mQ(t)&&_tipoMatch(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
+  var observedT=activeTasks().filter(function(t){return t.status==='observed'&&mQ(t)&&_tipoMatch(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
   var cols='grid-template-columns:1.6fr 0.9fr 0.7fr 0.65fr 1fr';
   function tRow(t,actions){
     var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
@@ -5071,7 +5421,7 @@ function renderRevision(){
     +(window.revSearch?'<span onclick="window.revSearch=\'\';render()" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:var(--text3);font-size:20px;line-height:1;user-select:none">×</span>':'')
     +'</div>';
   var thd='<div class="thead" style="'+cols+'"><div>Producto / Lote</div><div>Analistas</div><div style="text-align:center">H. Real</div><div style="text-align:center">Vto</div><div></div></div>';
-  var html=tabBar+searchHtml;
+  var html=tabBar+searchHtml+_tipoFilterBar();
   // Para revisar
   html+='<div style="margin-bottom:20px">';
   html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
@@ -5212,24 +5562,20 @@ function renderSugerencias(){
     return html;
   }
 
-  // ── Vista no-supervisor: mis sugerencias ──
-  var mySugg=productSuggestions.filter(function(s){return s.suggestedBy===uid;}).sort(function(a,b){return(b.suggestedTs||0)-(a.suggestedTs||0);});
-  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">'
-    +'<div style="font-size:13px;color:var(--text2)">Sugerí ingresos al supervisor. Recibirás notificación con la respuesta.</div>'
-    +'<button class="btn pri" onclick="openSuggestionModal()">📦 Nueva sugerencia</button>'
-    +'</div>';
+  // ── Vista no-supervisor: mis sugerencias + productos a ingresar ──
+  var _isSampler=isSamplerRole();
+  var _aIngresar=activeTasks().filter(function(t){return t.status==='a-ingresar'||t.status==='muestra-ok';});
+  var mySugg=productSuggestions.filter(function(s){return s.suggestedBy===uid&&s.status==='pending';}).sort(function(a,b){return(b.suggestedTs||0)-(a.suggestedTs||0);});
 
-  if(mySugg.length===0){
-    return html+'<div class="empty">Todavía no enviaste sugerencias de ingreso.</div>';
-  }
-
-  var pendS=mySugg.filter(function(s){return s.status==='pending';});
-  var resolvedS=mySugg.filter(function(s){return s.status!=='pending';});
-
-  if(pendS.length>0){
+  // Sección: Sugerencias (arriba)
+  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px">'
+    +'<div style="font-size:13px;font-weight:700">💡 Mis sugerencias de ingreso</div>'
+    +'<button class="btn pri" onclick="openSuggestionModal()">+ Nueva sugerencia</button>'
+    +'</div>'
+    +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Sugerí ingresos al supervisor. Recibirás notificación con la respuesta.</div>';
+  if(mySugg.length>0){
     html+='<div style="margin-bottom:20px">';
-    html+='<div style="font-size:13px;font-weight:700;color:var(--blue);margin-bottom:8px">En espera de respuesta ('+pendS.length+')</div>';
-    html+=pendS.map(function(s){
+    html+=mySugg.map(function(s){
       return '<div style="background:var(--surface);border:1px solid var(--blue);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:8px">'
         +'<div style="font-size:13px;font-weight:600;margin-bottom:4px">'+escH(s.producto)+'</div>'
         +'<div style="font-size:12px;color:var(--text3);font-family:var(--mono);margin-bottom:6px">'+escH(s.lote)+'</div>'
@@ -5241,25 +5587,75 @@ function renderSugerencias(){
         +'</div>';
     }).join('');
     html+='</div>';
+  } else {
+    html+='<div style="margin-bottom:20px;font-size:12px;color:var(--text3)">Sin sugerencias pendientes de respuesta.</div>';
   }
 
-  if(resolvedS.length>0){
-    html+='<div>';
-    html+='<div style="font-size:13px;font-weight:700;color:var(--text2);margin-bottom:8px">Historial ('+resolvedS.length+')</div>';
-    html+=resolvedS.map(function(s){
-      var confirmed=s.status==='confirmed';
-      var borderC=confirmed?'var(--green)':'var(--red)';
-      var badge=confirmed
-        ?'<div style="display:inline-block;background:var(--green-bg);color:var(--green-text);border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;margin-top:6px">✓ Confirmado — producto ingresado</div>'
-        :'<div style="display:inline-block;background:var(--red-bg);color:var(--red);border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;margin-top:6px">✗ Rechazado</div>';
-      return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:6px;border-left:3px solid '+borderC+'">'
-        +'<div style="font-size:13px;font-weight:600">'+escH(s.producto)+' <span style="font-size:11px;font-family:var(--mono);font-weight:400;color:var(--text3)">'+escH(s.lote)+'</span></div>'
-        +badge
-        +'<div style="font-size:10px;color:var(--text3);margin-top:5px">Enviado '+new Date(s.suggestedTs).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'})+'</div>'
+  // Sección: Productos pendientes de ingreso (abajo)
+  html+='<div style="border-top:1px solid var(--border);padding-top:20px">';
+  if(_aIngresar.length>0){
+    var _filteredAI=_ingresosTypeFilter.length?_aIngresar.filter(function(t){return _ingresosTypeFilter.indexOf(t.tipo||'')>=0;}):_aIngresar;
+    var _typesInList=[...new Set(_aIngresar.map(function(t){return t.tipo||'';}))].filter(Boolean);
+    html+='<div style="margin-bottom:16px">'
+      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'
+      +'<div style="font-size:14px;font-weight:700;color:#7c3aed">📥 Productos pendientes de ingreso</div>'
+      +'<span style="background:#7c3aed;color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700">'+_aIngresar.length+'</span>'
+      +'</div>'
+      +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
+      +SAMPLE_TYPES.filter(function(st){return _typesInList.indexOf(st.id)>=0;}).map(function(st){
+        var active=_ingresosTypeFilter.indexOf(st.id)>=0;
+        return'<button class="btn sm" onclick="_toggleIngresosType(\''+st.id+'\')" title="'+st.title+'" style="'+(active?'background:'+st.color+';color:#fff;border-color:'+st.color:'border-color:'+st.color+';color:'+st.color)+';font-weight:700">'+st.label+'</button>';
+      }).join('')
+      +(_ingresosTypeFilter.length?'<button class="btn sm" onclick="_ingresosTypeFilter=[];render()" style="color:var(--text3);font-size:11px;margin-left:2px">✕ Todos</button>':'')
+      +'</div>'
+      +'</div>';
+    html+=_filteredAI.map(function(t){
+      var sa=_isSampler?(t.samplerAssignments||[]).find(function(s){return s.sampler===uid;}):null;
+      var isDone=sa&&sa.done;
+      var isOk=t.status==='muestra-ok';
+      var isMP=t.tipo==='MP';
+      var actionHtml='';
+      if(_isSampler){
+        if(isDone){
+          actionHtml='<div class="sampling-info">✓ Muestreo realizado<br><b>'+fmtDDMMYY(sa.realArrivalDate)+'</b>'+(sa.lotNotes?'<br>'+escH(sa.lotNotes):'')+(sa.hours?'<br>'+sa.hours.toFixed(1)+'h':'')+'</div>';
+        } else if(sa){
+          actionHtml='<button class="btn sm pri" style="background:#059669;border-color:#059669;white-space:nowrap" onclick="openSamplingModal('+t.id+')">✓ Registrar muestreo</button>';
+        } else if(isOk){
+          actionHtml='<span class="sampling-info">✓ Muestra OK — pendiente supervisor</span>';
+        } else if(!(t.samplerAssignments||[]).length){
+          actionHtml='<button class="btn sm" style="white-space:nowrap" onclick="openSamplingModal('+t.id+')" title="Sin muestreador asignado">Registrar (sin asignar)</button>';
+        } else {
+          actionHtml='<span style="font-size:11px;color:var(--text3)">Asignado a otro</span>';
+        }
+      } else if(isMP){
+        actionHtml='<span style="font-size:11px;color:var(--text3);text-align:right">Solo<br>muestreadores</span>';
+      } else {
+        actionHtml='<button class="btn sm pri" style="white-space:nowrap" onclick="openSamplingModal('+t.id+')">📥 Registrar llegada</button>';
+      }
+      return'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:8px">'
+        +'<div style="display:flex;align-items:flex-start;gap:10px">'
+        +'<div style="flex:1">'
+        +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
+        +'<span class="pill '+(isOk?'muestra-ok':'a-ingresar')+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
+        +(t.tipo?'<span style="font-size:10px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:var(--text2)">'+escH(t.tipo)+'</span>':'')
+        +(t.priority&&t.priority!=='Normal'?'<span class="pill '+t.priority.toLowerCase()+'" style="font-size:10px">'+t.priority+'</span>':'')
+        +'</div>'
+        +'<div style="font-weight:600;font-size:13px">'+escH(t.producto)+'</div>'
+        +'<div style="font-size:11px;color:var(--text3);font-family:var(--mono)">'+escH(t.lote)+'</div>'
+        +(t.expectedArrival?'<div style="font-size:11px;color:var(--text2);margin-top:3px">Llegada esperada: <b style="font-family:var(--mono)">'+fmtDDMMYY(t.expectedArrival)+'</b>'+(t.expectedArrival<today()?'<span style="color:var(--red);font-weight:700;margin-left:4px">⚠ vencida</span>':'')+'</div>':'')
+        +(t.arrivalNotes?'<div style="font-size:11px;color:var(--text2);margin-top:2px">📝 '+escH(t.arrivalNotes)+'</div>':'')
+        +'</div>'
+        +'<div style="display:flex;flex-direction:column;align-items:flex-end;justify-content:center;gap:6px;min-width:120px">'
+        +actionHtml
+        +'</div>'
+        +'</div>'
         +'</div>';
     }).join('');
     html+='</div>';
+  } else {
+    html+='<div style="padding:14px 16px;background:var(--bg2);border-radius:var(--radius);text-align:center;font-size:13px;color:var(--text3)">✓ Sin productos pendientes de ingreso</div>';
   }
+  html+='</div>';
   return html;
 }
 
@@ -5470,7 +5866,6 @@ function renderInformes(){
     +'<select onchange="informeFilterTipo=this.value;render()" style="font-size:12px;padding:5px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
     +'<option value="">Todos los tipos</option>'
     +SAMPLE_TYPES.map(function(st){return'<option value="'+st.id+'"'+(informeFilterTipo===st.id?' selected':'')+'>'+st.label+' — '+st.title+'</option>';}).join('')
-    +'<option value="none"'+(informeFilterTipo==='none'?' selected':'')+'>Sin clasificar</option>'
     +'</select>'
     +'<span style="font-size:12px;color:var(--text3)">'+filtered.length+' muestras</span>'
     +'<div style="display:flex;gap:5px;margin-left:auto">'
@@ -6285,50 +6680,50 @@ function renderShell(){
   })();
   const reviewPendC=(isReviewer||sup)?activeTasks().filter(t=>t.status==='done').length:0;
   const navs=sup?[
-    {id:'dashboard',label:'Panel general',icon:'▪'},
-    {id:'tasks',label:'Análisis',icon:'≡',badge:pendC>0?pendC:'',bc:'w'},
-    {id:'pending',label:'Pendientes',icon:'▲',badge:(()=>{const pc=activeTasks().filter(t=>t.status==='pending-confirm').length;const sc=productSuggestions.filter(s=>s.status==='pending').length;return lateC>0||pc>0||sc>0?(lateC+pc+sc):'';})(),bc:'d'},
-    {id:'revision',label:'Revisión',icon:'📝',badge:(()=>{const d=activeTasks().filter(t=>t.status==='done').length,r=activeTasks().filter(t=>t.status==='reviewed').length,o=activeTasks().filter(t=>t.status==='observed').length;const tot=d+r+o;return tot>0?tot:'';})(),bc:'w'},
-    {id:'sugerencias',label:'Sugerencias de ingreso',icon:'📦',badge:(()=>{const sc=productSuggestions.filter(s=>s.status==='pending').length;return sc>0?sc:'';})(),bc:'w'},
+    {id:'dashboard',label:'Panel general',icon:'🏠'},
+    {id:'tasks',label:'Análisis',icon:'🔬',badge:pendC>0?pendC:'',bc:'w'},
+    {id:'pending',label:'Pendientes',icon:'⏰',badge:(()=>{const pc=activeTasks().filter(t=>t.status==='pending-confirm').length;const sc=productSuggestions.filter(s=>s.status==='pending').length;return lateC>0||pc>0||sc>0?(lateC+pc+sc):'';})(),bc:'d'},
+    {id:'revision',label:'Revisión',icon:'✅',badge:(()=>{const d=activeTasks().filter(t=>t.status==='done').length,r=activeTasks().filter(t=>t.status==='reviewed').length,o=activeTasks().filter(t=>t.status==='observed').length;const tot=d+r+o;return tot>0?tot:'';})(),bc:'w'},
+    {id:'sugerencias',label:'Ingresos',icon:'💡',badge:(()=>{const sc=productSuggestions.filter(s=>s.status==='pending').length;return sc>0?sc:'';})(),bc:'w'},
     {id:'especiales',label:'Especiales',icon:'🧪',badge:(()=>{const c=activeTasks().filter(t=>(t.tipo==='EE'||t.tipo==='Limp'||t.tipo==='Val')&&t.status!=='approved').length;return c>0?c:'';})()},
-    {id:'mgmt',label:'Gestión',icon:'📋'},
-    {id:'week',label:'Calendario',icon:'▦'},
+    {id:'mgmt',label:'Gestión',icon:'🗂'},
+    {id:'week',label:'Calendario',icon:'📅'},
     {id:'informes',label:'Informes',icon:'📊'},
-    {id:'rrhh',label:'Personal',icon:'👤',badge:(()=>{const c=checkAbsenceConflicts();return c.length>0?c.length:'';})(),bc:'d'},
+    {id:'rrhh',label:'Personal',icon:'👥',badge:(()=>{const c=checkAbsenceConflicts();return c.length>0?c.length:'';})(),bc:'d'},
     {id:'notificaciones',label:'Solicitudes',icon:'🔔',badge:(()=>{const p=scheduleRequests.filter(r=>r.status==="pending").length;return p>0?p:"";})(),bc:'w'},
-    {id:'historial',label:'Historial notificaciones',icon:'🕐'},
+    {id:'historial',label:'Historial notificaciones',icon:'📜'},
     {id:'admin',label:'Administración',icon:'⚙'},
-    {id:'audittrail',label:'Audit Trail',icon:'📋'},
+    {id:'audittrail',label:'Audit Trail',icon:'🔍'},
   ]:isReviewer?[
-    {id:'dashboard',label:'Mi día',icon:'▪'},
-    {id:'revision',label:'Revisión',icon:'✓',badge:reviewPendC>0?reviewPendC:'',bc:'w'},
-    {id:'tasks',label:'Análisis',icon:'≡',badge:reviewPendC>0?reviewPendC:'',bc:'w'},
-    {id:'pending',label:'Pendientes',icon:'📋'},
-    {id:'sugerencias',label:'Sugerencias de ingreso',icon:'📦',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
-    {id:'week',label:'Calendario equipo',icon:'▦'},
-    {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
+    {id:'dashboard',label:'Mi día',icon:'🏠'},
+    {id:'revision',label:'Revisión',icon:'✅',badge:reviewPendC>0?reviewPendC:'',bc:'w'},
+    {id:'tasks',label:'Análisis',icon:'🔬',badge:reviewPendC>0?reviewPendC:'',bc:'w'},
+    {id:'pending',label:'Pendientes',icon:'⏰'},
+    {id:'sugerencias',label:'Ingresos',icon:'💡',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
+    {id:'week',label:'Calendario equipo',icon:'📅'},
+    {id:'cronograma',label:'Mi cronograma',icon:'🗓',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
     {id:'especiales',label:'Especiales',icon:'🧪'},
+    {id:'mgmt',label:'Gestión',icon:'🗂'},
     {id:'notificaciones',label:'Solicitudes',icon:'🔔',badge:(()=>{const p=scheduleRequests.filter(r=>r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ]:isSamplerRole()?[
-    {id:'dashboard',label:'Mi día',icon:'▪'},
-    {id:'sampler',label:'A ingresar',icon:'📦',badge:(()=>{const myS=activeTasks().filter(t=>(t.status==='a-ingresar'||t.status==='muestra-ok')&&(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&!s.done));return myS.length>0?myS.length:'';})(),bc:'w'},
-    {id:'freeTasks',label:'Tareas libres',icon:'✏'},
-    {id:'sugerencias',label:'Sugerencias de ingreso',icon:'📦',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
-    {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
+    {id:'dashboard',label:'Mi día',icon:'🏠'},
+    {id:'mgmt',label:'Gestión',icon:'🗂'},
+    {id:'sugerencias',label:'Ingresos',icon:'💡',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;const myS=activeTasks().filter(t=>(t.status==='a-ingresar'||t.status==='muestra-ok')&&(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&!s.done)).length;return(sr+myS)>0?(sr+myS):'';})(),bc:'w'},
+    {id:'cronograma',label:'Mi cronograma',icon:'🗓',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ]:isStaffRole()?[
-    {id:'dashboard',label:'Mi día',icon:'▪'},
-    {id:'freeTasks',label:'Tareas libres',icon:'✏'},
-    {id:'mgmt',label:'Gestión',icon:'📋'},
-    {id:'sugerencias',label:'Sugerencias de ingreso',icon:'📦',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
-    {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending');return p.length>0?p.length:'';})(),bc:'w'},
+    {id:'dashboard',label:'Mi día',icon:'🏠'},
+    {id:'mgmt',label:'Gestión',icon:'🗂'},
+    {id:'sugerencias',label:'Ingresos',icon:'💡',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
+    {id:'cronograma',label:'Mi cronograma',icon:'🗓',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending');return p.length>0?p.length:'';})(),bc:'w'},
   ]:[
-    {id:'dashboard',label:'Mi día',icon:'▪'},
-    {id:'tasks',label:'Análisis',icon:'≡',badge:actionC>0?actionC:'',bc:'d'},
-    {id:'pending',label:'Pendientes',icon:'📋'},
-    {id:'sugerencias',label:'Sugerencias de ingreso',icon:'📦',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
-    {id:'cronograma',label:'Mi cronograma',icon:'🕐',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
+    {id:'dashboard',label:'Mi día',icon:'🏠',badge:actionC>0?actionC:'',bc:'d'},
+    {id:'tasks',label:'Mis análisis',icon:'🔬'},
+    {id:'mgmt',label:'Gestión',icon:'🗂'},
+    {id:'pending',label:'Pendientes',icon:'⏰'},
+    {id:'sugerencias',label:'Ingresos',icon:'💡',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
+    {id:'cronograma',label:'Mi cronograma',icon:'🗓',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ];
-  const titles={dashboard:sup?'Panel general':'Mi día',tasks:(sup||isReviewerRole())?'Análisis / Lotes':'Mis análisis',pendientes:'Ensayos pendientes',review:'Revisión de análisis',revision:'Revisión y Aprobación',sugerencias:'Sugerencias de ingreso',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',audittrail:'Audit Trail',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración',historial:'Historial de notificaciones',sampler:'A ingresar — Muestreo',freeTasks:'Mis tareas libres',estabilidades:'Estabilidades',limpval:'Limpiezas & Validaciones'};
+  const titles={dashboard:sup?'Panel general':'Mi día',tasks:(sup||isReviewerRole())?'Análisis / Lotes':'Mis análisis',pendientes:'Ensayos pendientes',review:'Revisión de análisis',revision:'Revisión y Aprobación',sugerencias:'Ingresos',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',audittrail:'Audit Trail',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración',historial:'Historial de notificaciones',sampler:'A ingresar — Muestreo',freeTasks:'Mis tareas libres',estabilidades:'Estabilidades',limpval:'Limpiezas & Validaciones'};
   const content=({dashboard:renderDashboard,aprobados:renderAprobados,tasks:renderTasks,pending:renderPendientesList,pendientes:renderPendientesList,week:renderWeek,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderRevision,revision:renderRevision,sugerencias:renderSugerencias,informes:renderInformes,notificaciones:renderNotificaciones,historial:renderHistorialNotif,admin:renderAdmin,audittrail:renderAuditTrail,sampler:renderSamplerView,freeTasks:renderStaffFreeTasks,especiales:renderEspeciales,estabilidades:renderEstabilidades,limpval:renderLimpVal}[currentView]||renderDashboard)();
   return`<div class="shell">
     <div class="sidebar">
@@ -6337,7 +6732,7 @@ function renderShell(){
         <div style="line-height:1.15;min-width:0"><div class="sb-logo-text">Humanova</div><div style="font-size:10px;color:var(--text2);font-weight:500;margin-top:1px">LabTrack${labProfiles.length>1&&_getActiveLab()?` · <span style="color:var(--blue)">${escH(_getActiveLab().name)}</span>`:''}</div></div>
         <span class="sb-role-badge ${currentUser.role==='supervisor'?'sup':currentUser.role==='staff'?'stf':'ana'}">${currentUser.role==='supervisor'?'Sup.':currentUser.role==='reviewer'?'Rev.':currentUser.role==='staff'?'Pers.':currentUser.role==='sampler'?'Muest.':'Ana.'}</span>
       </div>
-      <div class="sb-nav">${navs.map(n=>`<div class="nav-item${currentView===n.id?' active':''}" onclick="setView('${n.id}')"><span class="ni">${n.icon}</span>${n.label}${n.badge?`<span class="nbadge ${n.bc||''}">${n.badge}</span>`:''}</div>`).join('')}</div>
+      <div class="sb-nav">${navs.map(n=>`<div class="nav-item${currentView===n.id?' active':''}" onclick="setView('${n.id}')"><span class="ni">${n.icon}</span>${n.label}${n.badge?`<span class="nbadge ${n.bc||''}">${n.badge}</span>`:''}</div>`).join('')}<div class="nav-item mob-user-navitem" onclick="openMobUserMenu()" aria-label="Perfil de usuario"><span class="ni"><span class="av ${currentUser.av}" style="width:22px;height:22px;font-size:8px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%">${escH(currentUser.avInit)}</span></span>Perfil</div></div>
       <div class="sb-user">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
           <div class="av av-lg ${currentUser.av}">${escH(currentUser.avInit)}</div>
@@ -6357,6 +6752,7 @@ function renderShell(){
         ${currentUser?renderNotifBtn():''}
         <div id="sp-status-badge" style="margin-right:4px"></div>
         ${sup&&currentView!=='admin'?`<button class="btn amb" onclick="showImportModal=true;modalTab='paste';pastePreview=[];render()">↑ <span class="btn-txt">Importar</span></button><button class="btn pri" onclick="openNewTask()">+ <span class="btn-txt">Nuevo Producto</span></button>`:''}
+        ${currentUser?`<button class="mob-user-btn av ${currentUser.av}" onclick="openMobUserMenu()" aria-label="Perfil de usuario">${escH(currentUser.avInit)}</button>`:''}
       </div>
       <div class="content">${content}</div>
     </div>
@@ -6484,7 +6880,7 @@ function renderSamplerView(){
 function renderDashboard(){
   const sup=currentUser.role==='supervisor';
   if(sup){
-    const _at=activeTasks();
+    const _at=activeTasks().filter(_tipoMatch);
     const late=_at.filter(t=>t._dueStatus==='late'&&t.status!=='approved').length;
     const prog=_at.filter(t=>t.status==='progress'||t.status==='pending-confirm').length;
     const done=_at.filter(t=>['done','reviewed','approved'].includes(t.status)).length;
@@ -6495,7 +6891,7 @@ function renderDashboard(){
     let filtered=((dashFilter&&dashFilter!=='all')?_at.filter(t=>dashFilter==='late'?t._dueStatus==='late'&&t.status!=='approved':dashFilter==='done'?['done','reviewed','approved'].includes(t.status):dashFilter==='progress'?(t.status==='progress'||t.status==='pending-confirm'):t.status===dashFilter):sortTasks([..._at],taskSort,taskSortDir)).filter(t=>!filterSearch||t.producto.toLowerCase().includes(filterSearch.toLowerCase())||t.lote.toLowerCase().includes(filterSearch.toLowerCase()));
     const filterLabel={'':`Todos (${_at.length})`,'pending':`Pendientes (${pend})`,'progress':`En curso (${prog})`,'late':`Vencidos (${late})`,'done':`Completados p/revisar (${done})`};
     return`
-      <div class="stats-row">
+      ${_tipoFilterBar()}<div class="stats-row">
         <div class="scard" onclick="dashFilter='';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter===''?';box-shadow:0 0 0 2px var(--navy,#1a4f8a)':''}">
           <div class="scard-lbl">LOTES TOTALES</div><div class="scard-val">${_at.length}</div></div>
         ${aIngresar>0?`<div class="scard" onclick="currentView='pending';window.pendingStatusFilter='a-ingresar';render()" style="cursor:pointer;transition:box-shadow .15s;border-color:#d8b4fe">
@@ -6660,18 +7056,62 @@ function renderDashboard(){
   var _myFTToday=freeTasks.filter(function(ft){return ft.analystId===_myId&&ft.status==='pending'&&(ft.date||'')=== _todayStr;});
   var _myFTUpcoming=freeTasks.filter(function(ft){return ft.analystId===_myId&&ft.status==='pending'&&(ft.date||'')>_todayStr;});
 
+  // Actividades de gestión en ventana ±3 días (pendientes de marcar como realizadas)
+  var _mgmtWindow=mgmtTasks.flatMap(function(mt){return expandMgmt(mt,_relDate(-3),_relDate(3));})
+    .filter(function(o){
+      if(!(o.analysts||[]).includes(_myId))return false;
+      return!(o.completions||[]).some(function(c){return c.date===o.occDate&&c.analystId===_myId&&(c.status==='confirmed'||!c.status);});
+    });
+  var _myMgmtPast=_mgmtWindow.filter(function(o){return o.occDate<_todayStr;});
+  var _myMgmtToday=_mgmtWindow.filter(function(o){return o.occDate===_todayStr;});
+  var _myMgmtUpcoming=_mgmtWindow.filter(function(o){return o.occDate>_todayStr;});
+
   var myDone=myTasks.filter(function(t){return _termSt.includes(t.status);});
   var myHReal=myTasks.reduce(function(s,t){
     return s+(t.assignments||[]).filter(function(a){return a.analyst===_myId;})
       .reduce(function(s2,a){return s2+(a.realHours||0);},0);
   },0);
-  var totalAction=pastCombos.length+todayCombos.length+_myFTPast.length+_myFTToday.length;
+  var totalAction=pastCombos.length+todayCombos.length+_myFTPast.length+_myFTToday.length+_myMgmtPast.length+_myMgmtToday.length;
 
   // Cabecera de sección
   function _secHdr(label,count,bg,border,textColor){
     return'<div style="display:flex;align-items:center;gap:8px;margin:16px 0 8px;padding:8px 12px;background:'+bg+';border-left:3px solid '+border+';border-radius:var(--radius)">'
       +'<span style="font-weight:700;font-size:13px;color:'+textColor+'">'+label+'</span>'
       +(count>0?'<span style="font-size:11px;font-weight:700;color:'+border+';background:'+border+'22;padding:1px 8px;border-radius:10px">'+count+'</span>':'')
+      +'</div>';
+  }
+
+  // Tarjeta de actividad de gestión en "Mi día"
+  function _mgmtCard(o){
+    var cat=getMgmtCat(o.category);
+    var myCompl=(o.completions||[]).find(function(c){return c.date===o.occDate&&c.analystId===currentUser.id;});
+    var daysLate=o.occDate&&o.occDate<_todayStr?Math.round((new Date(_todayStr+'T12:00:00')-new Date(o.occDate+'T12:00:00'))/86400000):0;
+    var _isMgmtSup=currentUser.role==='supervisor';
+    var actionHtml='';
+    if(_isMgmtSup){
+      actionHtml='<button class="btn sm suc" onclick="event.stopPropagation();openMgmtComplModal('+o.id+',\''+o.occDate+'\')" style="font-size:11px">✓ Realizada</button>';
+    } else if(!myCompl){
+      actionHtml='<button class="btn sm suc" onclick="event.stopPropagation();openMgmtComplModal('+o.id+',\''+o.occDate+'\')" style="font-size:11px">✓ Realizada</button>'
+        +'<button class="btn sm" onclick="event.stopPropagation();mgmtMarkNotDone('+o.id+',\''+o.occDate+'\')" title="No pude realizar" style="font-size:11px;color:var(--red);border-color:var(--red)">✗</button>';
+    } else if(myCompl.status==='pending-confirm'){
+      actionHtml='<span style="font-size:10px;color:var(--amber);font-weight:600;flex-shrink:0;white-space:nowrap">⏳ Pend. confirmación</span>';
+    } else if(myCompl.status==='not-done'){
+      actionHtml='<span style="font-size:10px;color:var(--red);font-weight:600;flex-shrink:0">✗ No realizada</span>'
+        +'<button class="btn sm suc" onclick="event.stopPropagation();openMgmtComplModal('+o.id+',\''+o.occDate+'\')" style="font-size:11px">↩ Registrar</button>';
+    }
+    return'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:6px;display:flex;align-items:center;gap:12px">'
+      +'<span style="font-size:20px;flex-shrink:0">🗂</span>'
+      +'<div style="flex:1;min-width:0">'
+      +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">'
+      +'<span style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;background:'+cat.color+';color:'+cat.text+'">'+escH(cat.label)+'</span>'
+      +'</div>'
+      +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(o.name||o.description||'')+'</div>'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:1px">'+fmtDF(o.occDate)
+        +(o.hours?' · '+o.hours+'h planificadas':'')
+        +(daysLate>0?'<span style="color:var(--red);font-weight:600;margin-left:4px">· '+daysLate+' día'+(daysLate!==1?'s':'')+' de atraso</span>':'')
+      +'</div>'
+      +'</div>'
+      +'<div style="display:flex;gap:6px;flex-shrink:0;align-items:center">'+actionHtml+'</div>'
       +'</div>';
   }
 
@@ -6699,33 +7139,29 @@ function renderDashboard(){
 
   var _html='';
 
-  // Stats
-  _html+='<div class="dash-grid" style="margin-bottom:16px">'
-    +'<div class="stat-card"><div class="stat-n" style="color:'+(totalAction>0?'var(--amber)':'var(--green)')+'">'+totalAction+'</div><div class="stat-l">Requieren acción</div></div>'
-    +'<div class="stat-card"><div class="stat-n" style="color:var(--blue)">'+myTasks.filter(function(t){return t.status==='progress'||t.status==='pending-confirm';}).length+'</div><div class="stat-l">En curso</div></div>'
-    +'<div class="stat-card"><div class="stat-n" style="color:var(--green)">'+myDone.length+'</div><div class="stat-l">Completados</div></div>'
-    +(myHReal>0?'<div class="stat-card"><div class="stat-n" style="color:var(--green)">'+myHReal.toFixed(1)+'h</div><div class="stat-l">H. Real total</div></div>':'')
-    +'</div>';
 
   // ── PASADAS ──
-  if(pastCombos.length>0||_myFTPast.length>0){
-    _html+=_secHdr('⚠ Anteriores sin completar',pastCombos.length+_myFTPast.length,'var(--amber-bg)','var(--amber)','var(--amber-text)');
+  if(pastCombos.length>0||_myFTPast.length>0||_myMgmtPast.length>0){
+    _html+=_secHdr('⚠ Anteriores sin completar',pastCombos.length+_myFTPast.length+_myMgmtPast.length,'var(--amber-bg)','var(--amber)','var(--amber-text)');
+    if(_myMgmtPast.length)_html+=_myMgmtPast.map(_mgmtCard).join('');
     if(_myFTPast.length)_html+=_myFTPast.map(_ftCard).join('');
     if(pastCombos.length)_html+='<div class="tbl">'+pastCombos.map(function(x){return tRowAna(x.t,x.a);}).join('')+'</div>';
   }
 
   // ── HOY ──
-  _html+=_secHdr('📅 Hoy — '+fmtDF(_todayStr),todayCombos.length+_myFTToday.length,'var(--blue-bg)','var(--blue)','var(--blue-text)');
-  if(todayCombos.length===0&&_myFTToday.length===0){
+  _html+=_secHdr('📅 Hoy — '+fmtDF(_todayStr),todayCombos.length+_myFTToday.length+_myMgmtToday.length,'var(--blue-bg)','var(--blue)','var(--blue-text)');
+  if(todayCombos.length===0&&_myFTToday.length===0&&_myMgmtToday.length===0){
     _html+='<div class="empty" style="margin-bottom:4px">No hay actividades para hoy ✓</div>';
   } else {
+    if(_myMgmtToday.length)_html+=_myMgmtToday.map(_mgmtCard).join('');
     if(_myFTToday.length)_html+=_myFTToday.map(_ftCard).join('');
     if(todayCombos.length)_html+='<div class="tbl">'+todayCombos.map(function(x){return tRowAna(x.t,x.a);}).join('')+'</div>';
   }
 
   // ── PRÓXIMAS ──
-  if(upcomingCombos.length>0||_myFTUpcoming.length>0){
-    _html+=_secHdr('→ Próximas',upcomingCombos.length+_myFTUpcoming.length,'var(--bg2)','var(--border2)','var(--text2)');
+  if(upcomingCombos.length>0||_myFTUpcoming.length>0||_myMgmtUpcoming.length>0){
+    _html+=_secHdr('→ Próximas',upcomingCombos.length+_myFTUpcoming.length+_myMgmtUpcoming.length,'var(--bg2)','var(--border2)','var(--text2)');
+    if(_myMgmtUpcoming.length)_html+=_myMgmtUpcoming.map(_mgmtCard).join('');
     if(_myFTUpcoming.length)_html+=_myFTUpcoming.map(_ftCard).join('');
     if(upcomingCombos.length)_html+='<div class="tbl">'+upcomingCombos.map(function(x){return tRowAna(x.t,x.a);}).join('')+'</div>';
   }
@@ -7005,67 +7441,29 @@ function renderTasks(){
   if(filterStatus)f=f.filter(function(t){return filterStatus==='late'?t._dueStatus==='late':t.status===filterStatus;});
   if(filterTipo){if(filterTipo==='none')f=f.filter(function(t){return !(t.tipo||'');});else f=f.filter(function(t){return (t.tipo||'')===filterTipo;});}
   if(filterSearch){var fs2=filterSearch.toLowerCase();f=f.filter(function(t){return t.producto.toLowerCase().includes(fs2)||t.lote.toLowerCase().includes(fs2);});}
+  f=f.filter(_tipoMatch);
   if(!sup){
-    // ── Historial de tareas libres (todos los estados, orden cronológico) ──
-    var myFT=freeTasks.filter(function(ft){return ft.analystId===currentUser.id;})
-      .sort(function(a,b){return(b.date||'').localeCompare(a.date||'');});
-    var _stCfg={
-      confirmed:  {color:'var(--green)',      label:'✓ Confirmada'},
-      'pending-confirm':{color:'var(--amber)',label:'Completada — conf. pendiente'},
-      pending:    {color:'var(--blue)',       label:'Asignada — pendiente'},
-      rejected:   {color:'var(--red)',        label:'✗ Rechazada'},
-      declined:   {color:'var(--red)',        label:'✗ Declinada'}
-    };
-    var ftSection='<div style="margin-bottom:20px">'
-      +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)">'
-      +'<div style="font-weight:700;font-size:13px">✏ Mis actividades libres <span style="font-size:11px;font-weight:400;color:var(--text3)">('+myFT.length+')</span></div>'
-      +'<button class="btn sm pri" onclick="openFreeTaskModal(null)">+ Agregar</button>'
-      +'</div>'
-      +(myFT.length===0?'<div class="empty" style="margin-bottom:0">Sin actividades libres registradas</div>'
-      :myFT.map(function(ft){
-          var cfg=_stCfg[ft.status]||{color:'var(--text3)',label:ft.status||'—'};
-          var h=ft.realHours||ft.suggestedHours||ft.hours||0;
-          var fromSup=ft.assignedBy&&ft.assignedBy!==currentUser.id;
-          var notifFt=replanNotifs.find(function(n){return n.type==='free_task_assigned'&&n.freeTaskId===ft.id&&n.status==='pending';});
-          var isPending=ft.status==='pending';
-          return'<div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid '+cfg.color+';border-radius:var(--radius-lg);padding:10px 12px;margin-bottom:5px;display:flex;align-items:center;gap:10px">'
-            +'<div style="flex:1;min-width:0">'
-            +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(ft.description)+'</div>'
-            +'<div style="font-size:11px;color:var(--text2);margin-top:2px">'
-              +fmtDF(ft.date)
-              +(h?' · <b style="font-family:var(--mono)">'+h+'h</b>':'')
-              +(ft.suggestedHours&&ft.realHours&&ft.realHours!==ft.suggestedHours?' <span style="color:var(--text3)">(sug. '+ft.suggestedHours+'h)</span>':'')
-              +(ft.notes?' · '+escH(ft.notes):'')
-              +(fromSup?'<span style="color:var(--text3);margin-left:4px">· Asignada por supervisor</span>':'')
-            +'</div>'
-            +(ft.completionComment?'<div style="font-size:10px;color:var(--blue-text);background:var(--blue-bg);border-radius:4px;padding:2px 7px;margin-top:3px;display:inline-block">💬 '+escH(ft.completionComment)+'</div>':'')
-            +'</div>'
-            +'<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:'+cfg.color+'22;color:'+cfg.color+';white-space:nowrap;flex-shrink:0">'+cfg.label+'</span>'
-            +(isPending&&fromSup
-              ?'<button class="btn sm suc" onclick="confirmFreeTaskAsAnalyst('+ft.id+','+(notifFt?notifFt.id:0)+')" style="font-size:11px;flex-shrink:0">✓ Confirmar</button>'
-              +'<button class="btn sm dan" onclick="declineFreeTask('+(notifFt?notifFt.id:0)+')" style="font-size:11px;flex-shrink:0">✗</button>':'')
-            +(ft.status==='pending-confirm'?'<button class="btn sm" onclick="openFreeTaskModal('+ft.id+')" style="font-size:11px;flex-shrink:0">✎ Editar</button>':'')
-            +'</div>';
-        }).join(''))
-      +'</div>';
-
-    // PUNTO 4: mostrar UNA FILA POR FECHA ASIGNADA
-    if(f.length===0){
-      rows=ftSection+'<div class="empty">Sin análisis asignados</div>';
-    } else {
-      // Expandir: para cada tarea, una fila por asignación de este analista
-      var expandedRows=[];
-      f.forEach(function(t){
-        var myAssigns=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
-        if(myAssigns.length===0){
-          expandedRows.push(tRowAna(t,null));
-        } else {
-          myAssigns.slice().sort(function(a,b){return(a.date||'').localeCompare(b.date||'');})
-            .forEach(function(ma){expandedRows.push(tRowAna(t,ma));});
-        }
-      });
-      rows=ftSection+expandedRows.join('');
-    }
+    // ── Historial de análisis — solo lectura, ordenado por fecha DESC ──
+    var theadHist='<div class="thead" style="grid-template-columns:1.8fr .8fr .55fr .9fr">'
+      +'<div>Producto / Lote</div><div>F. asignación</div><div>H. real</div><div>Estado</div></div>';
+    var fSorted=f.slice().sort(function(a,b){
+      var aD=(a.assignments||[]).filter(function(x){return x.analyst===currentUser.id&&!x._removed;})
+        .reduce(function(mx,x){return x.date>mx?x.date:mx;},'');
+      var bD=(b.assignments||[]).filter(function(x){return x.analyst===currentUser.id&&!x._removed;})
+        .reduce(function(mx,x){return x.date>mx?x.date:mx;},'');
+      return bD.localeCompare(aD);
+    });
+    var expandedRows=[];
+    fSorted.forEach(function(t){
+      var myAssigns=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
+      if(myAssigns.length===0){
+        expandedRows.push(tRowAnaHist(t,null));
+      } else {
+        myAssigns.slice().sort(function(a,b){return(b.date||'').localeCompare(a.date||'');})
+          .forEach(function(ma){expandedRows.push(tRowAnaHist(t,ma));});
+      }
+    });
+    rows=f.length===0?'<div class="empty">Sin análisis en el historial</div>':theadHist+expandedRows.join('');
   }else if(tasksView==='lote'){
     rows=f.length===0?'<div class="empty">Sin resultados</div>':thead+f.map(function(t){return tRowSupLote(t);}).join('');
   }else{
@@ -7076,7 +7474,7 @@ function renderTasks(){
       rows=thead+f.map(function(t){return tRowSupAnalista(t);}).join('');
     }
   }
-  return'<div class="filter-row" style="gap:8px;flex-wrap:wrap">'
+  return(sup?_tipoFilterBar():'')+'<div class="filter-row" style="gap:8px;flex-wrap:wrap">'
     +searchBarHtml()
     +(sup?'<select onchange="setFA(this.value)"><option value=""'+(filterAnalyst===''?' selected':'')+'>Todos los analistas</option>'+aOpts+'</select>':'')
     +'<select onchange="setFS(this.value)">'
@@ -7091,11 +7489,6 @@ function renderTasks(){
     +'<option value="approved"'+(filterStatus==='approved'?' selected':'')+'>Aprobado</option>'
     +'<option value="observed"'+(filterStatus==='observed'?' selected':'')+'>Observado</option>'
     +'</select>'
-    +(sup?'<select onchange="setFTipo(this.value)">'
-    +'<option value=""'+(filterTipo===''?' selected':'')+'>Todos los tipos</option>'
-    +SAMPLE_TYPES.map(function(st){return'<option value="'+st.id+'"'+(filterTipo===st.id?' selected':'')+'>'+st.label+' — '+st.title+'</option>';}).join('')
-    +'<option value="none"'+(filterTipo==='none'?' selected':'')+'>Sin clasificar</option>'
-    +'</select>':'')
     +viewToggle
     +'<span class="count-lbl">'+f.length+' lote'+(f.length!==1?'s':'')+(filterSearch?' — «'+escH(filterSearch)+'»':'')+'</span>'
     +(sup?'<button id="copybtn-tbl-tasks" class="btn sm" onclick="copyTableToClipboard(\'tbl-tasks\')" style="margin-left:auto">📋 Copiar</button>':'')
@@ -7103,6 +7496,22 @@ function renderTasks(){
     +'<div class="tbl" id="tbl-tasks">'+rows+'</div>';
 }
 
+function tRowAnaHist(t,ma){
+  var md=ma?ma.date:t.due;
+  var maRealH=ma?((ma.sessions||[]).reduce(function(s,e){return s+(e.hours||0);},0)||(ma.realHours||0)):0;
+  var lastObs=t.observations&&t.observations.length?t.observations[t.observations.length-1]:{};
+  return'<div class="trow" onclick="openEdit('+t.id+')" style="grid-template-columns:1.8fr .8fr .55fr .9fr;cursor:pointer">'
+    +'<div><div class="cell-trunc" style="font-weight:600">'+escH(t.producto)+'</div>'
+    +'<div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+'<span style="font-family:var(--mono);font-size:11px">'+escH(t.lote)+'</span></div></div>'
+    +'<div style="font-family:var(--mono);font-size:12px">'+fmtD(md)+'</div>'
+    +'<div>'+(maRealH?'<span style="font-size:11px;font-weight:700;font-family:var(--mono);color:var(--green)">'+maRealH.toFixed(1)+'h</span>':'<span style="font-size:10px;color:var(--text3)">—</span>')+'</div>'
+    +'<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">'
+    +'<span class="pill '+(taskDisplayStatus(t)==='partial'?'partial':t.status)+'">'+statusLabel(taskDisplayStatus(t))+'</span>'
+    +(lastObs.comment?'<span style="font-size:10px;color:var(--amber-text);cursor:help" title="'+escH(lastObs.comment)+'">⚑</span>':'')
+    +(t.status==='approved'&&t.approvedDate?'<span style="font-size:9px;color:var(--green);font-weight:600;margin-left:2px">'+fmtDF(t.approvedDate)+'</span>':'')
+    +'</div>'
+    +'</div>';
+}
 function taskCard(t, showReplanBtn){
     const assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
     const myA=assigns.find(function(a){return a.analyst===currentUser.id;});
@@ -7149,7 +7558,7 @@ function renderPendientesList(){
   }
 
   var allActive=activeTasks().filter(function(t){
-    return (t.status==='pending'||t.status==='scheduled'||t.status==='progress')&&matchQ(t);
+    return (t.status==='pending'||t.status==='scheduled'||t.status==='progress')&&matchQ(t)&&_tipoMatch(t);
   });
   var filtered=allActive.filter(matchS);
 
@@ -7209,7 +7618,7 @@ function renderPendientesList(){
     +'</div>'
     +'</div>';
 
-  return chips+searchBar+'<div id="pend-results">'+renderPendientesResults(filtered,misPendConfirm)+'</div>';
+  return chips+_tipoFilterBar()+searchBar+'<div id="pend-results">'+renderPendientesResults(filtered,misPendConfirm)+'</div>';
 }
 
 function renderPendientesResults(filtered,pc){
@@ -7221,7 +7630,7 @@ function renderPendientesResults(filtered,pc){
       if(psf2==='all') return t.status==='pending'||t.status==='scheduled'||t.status==='progress';
       return t.status===psf2;
     }
-    filtered=activeTasks().filter(function(t){return mS2(t)&&mQ2(t);});
+    filtered=activeTasks().filter(function(t){return mS2(t)&&mQ2(t)&&_tipoMatch(t);});
     pc=activeTasks().filter(function(t){return t.status==='pending-confirm'&&t.completedBy===currentUser.id&&mQ2(t);});
   }
   function alreadyReq(taskId){
@@ -7332,7 +7741,7 @@ function renderPending(){
             +'</div>';
         }).join(''))
     +'</div>':'';
-  return suggPendHtml+ftPendHtml+unassignedSection+`
+  return suggPendHtml+ftPendHtml+unassignedSection+(isSupRole()||isReviewerRole()?_tipoFilterBar():'')+`
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
     <div style="position:relative;flex:1">
       <input id="pending-search-input" type="text" placeholder="Buscar por producto o lote…" value="${escH(window.pendingSearch||'')}"
@@ -7358,6 +7767,7 @@ function renderPendingContent(){
     return visibleStatuses.indexOf(t.status)>=0&&mQ2(t);
   }),taskSort,taskSortDir);
 
+  allT=allT.filter(_tipoMatch);
   // Apply status filter
   var filtered=allT.filter(function(t){
     if(psf==='all') return true;
@@ -7965,6 +8375,39 @@ function renderHistorialNotif(){
     +'<div class="tbl">'+thead+rows+'</div>';
 }
 
+const _TIPO_COLORS=[
+  {label:'Gris',       color:'#374151',bg:'#f3f4f6'},
+  {label:'Celeste',    color:'#075985',bg:'#e0f2fe'},
+  {label:'Lima',       color:'#3f6212',bg:'#ecfccb'},
+  {label:'Teal',       color:'#134e4a',bg:'#ccfbf1'},
+  {label:'Rosa',       color:'#9d174d',bg:'#fce7f3'},
+  {label:'Rojo',       color:'#9b1c1c',bg:'#fee2e2'},
+  {label:'Naranja',    color:'#7c2d12',bg:'#ffedd5'},
+  {label:'Azul marino',color:'#1e3a5f',bg:'#dbeafe'},
+];
+function adminAddTipo(){
+  var label=(document.getElementById('nt-label')||{}).value||'';
+  var title=(document.getElementById('nt-title')||{}).value||'';
+  var colorIdx=parseInt((document.getElementById('nt-color')||{}).value||'0');
+  var msg=document.getElementById('new-tipo-msg');
+  label=label.trim().slice(0,10);title=title.trim().slice(0,40);
+  if(!label||!title){if(msg)msg.textContent='⚠ Completá la etiqueta y el nombre';return;}
+  var idKey=label.replace(/[^a-zA-Z0-9]/g,'').toUpperCase().slice(0,10);
+  if(SAMPLE_TYPES.find(function(s){return s.id===idKey;})){if(msg)msg.textContent='⚠ Ya existe un tipo con esa etiqueta';return;}
+  var c=_TIPO_COLORS[colorIdx]||_TIPO_COLORS[0];
+  customTipos.push({id:idKey,label:label,title:title,color:c.color,bg:c.bg});
+  _rebuildSampleTypes();
+  saveLS();saveNow().catch(function(e){console.error('adminAddTipo:',e);});
+  render();
+}
+function adminDeleteTipo(id){
+  if(!confirm('¿Eliminar el tipo "'+id+'"? Los productos con este tipo quedarán sin clasificar.'))return;
+  customTipos=customTipos.filter(function(t){return t.id!==id;});
+  _rebuildSampleTypes();
+  var i=_tipoFilter.indexOf(id);if(i>=0)_tipoFilter.splice(i,1);
+  saveLS();saveNow().catch(function(e){console.error('adminDeleteTipo:',e);});
+  render();
+}
 function renderAdmin(){
   if(!isSupRole()) return '<div class="empty">Acceso restringido</div>';
   const roleOpts=[
@@ -8147,6 +8590,33 @@ function renderAdmin(){
     +(workdayConfig.guideUrl?'<a href="'+escH(workdayConfig.guideUrl)+'" target="_blank" class="btn sm">Abrir ↗</a>':'')
     +'</div>'
     +'<div id="guide-url-msg" style="font-size:11px;min-height:14px;margin-top:5px;color:var(--green)"></div>'
+    +'</div>'
+
+    +'<div style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px">'
+    +'<div style="font-weight:700;margin-bottom:4px">🏷 Tipos de muestra</div>'
+    +'<div style="font-size:12px;color:var(--text2);margin-bottom:12px">Los tipos base no pueden eliminarse. Podés agregar tipos personalizados para categorías adicionales.</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">'
+    +SAMPLE_TYPES.map(function(st){
+      return'<div style="display:inline-flex;align-items:center;gap:5px;background:'+st.bg+';border-radius:var(--radius);padding:5px 10px">'
+        +'<span style="font-size:11px;font-weight:700;color:'+st.color+'">'+escH(st.label)+'</span>'
+        +'<span style="font-size:11px;color:'+st.color+'">'+escH(st.title)+'</span>'
+        +(!st._core?'<button onclick="adminDeleteTipo(\''+st.id+'\')" style="background:none;border:none;cursor:pointer;color:'+st.color+';font-size:14px;padding:0 0 0 4px;line-height:1" title="Eliminar tipo">×</button>':'')
+        +'</div>';
+    }).join('')
+    +'</div>'
+    +'<div style="border-top:1px solid var(--border);padding-top:12px">'
+    +'<div style="font-size:12px;font-weight:600;margin-bottom:8px">Agregar tipo personalizado</div>'
+    +'<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">'
+    +'<div style="min-width:90px"><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Etiqueta corta</label><input type="text" id="nt-label" maxlength="10" placeholder="Ej: GMP" style="font-size:12px;padding:5px 8px;border:1px solid var(--border2);border-radius:var(--radius);width:100%;box-sizing:border-box;background:var(--surface);color:var(--text)"></div>'
+    +'<div style="flex:1;min-width:150px"><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Nombre completo</label><input type="text" id="nt-title" maxlength="40" placeholder="Ej: Control GMP" style="font-size:12px;padding:5px 8px;border:1px solid var(--border2);border-radius:var(--radius);width:100%;box-sizing:border-box;background:var(--surface);color:var(--text)"></div>'
+    +'<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Color</label>'
+    +'<select id="nt-color" style="font-size:12px;padding:5px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
+    +_TIPO_COLORS.map(function(c,i){return'<option value="'+i+'">'+c.label+'</option>';}).join('')
+    +'</select></div>'
+    +'<button class="btn sm pri" onclick="adminAddTipo()" style="height:31px;white-space:nowrap">+ Agregar</button>'
+    +'</div>'
+    +'<div id="new-tipo-msg" style="font-size:12px;min-height:16px;margin-top:6px;color:var(--red)"></div>'
+    +'</div>'
     +'</div>'
 
     +'<div style="margin-top:16px;background:var(--red-bg);border:1px solid var(--red);border-radius:var(--radius-lg);padding:14px">'
@@ -8819,14 +9289,14 @@ function toggleAna(id){
 
 // ── IMPORT MODAL ──
 function renderImportModal(){
-  return`<div class="modal-overlay" onclick="if(event.target===this){showImportModal=false;pastePreview=[];render()}"><div class="modal" style="width:520px">
-    <h3>Importar análisis</h3>
+  return`<div class="modal-overlay" onclick="if(event.target===this){showImportModal=false;pastePreview=[];render()}"><div class="modal" style="width:580px">
+    <h3>Importar productos</h3>
     <div class="tab-bar">
       <div class="tab${modalTab==='paste'?' active':''}" onclick="setMTab('paste')">Pegar tabla</div>
       <div class="tab${modalTab==='file'?' active':''}" onclick="setMTab('file')">Archivo Excel</div>
       <div class="tab${modalTab==='template'?' active':''}" onclick="setMTab('template')">Descargar plantilla</div>
     </div>
-    ${modalTab==='paste'?`<div><p style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.6">Copiá desde Excel o Google Sheets y pegá acá. Columnas: <b>Producto · Lote · Tipo · Fecha entrega · Prioridad · Notas</b></p>
+    ${modalTab==='paste'?`<div><p style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.6">Copiá desde Excel o Google Sheets y pegá acá. Columnas: <b>Producto · Lote · Tipo · Fecha entrega · Prioridad · Notas · Estado · Fecha prevista de ingreso</b></p>
     <textarea class="paste-area" id="paste-in" placeholder="Pegá aquí el contenido copiado de Excel..." oninput="parsePaste(this.value)"></textarea>${renderPreview()}</div>`
     :modalTab==='file'?`<div><div class="import-area" onclick="document.getElementById('file-in').click()"><div style="font-size:28px;margin-bottom:8px">📄</div><div style="font-weight:500;color:var(--text);margin-bottom:3px">Seleccioná un archivo .xlsx o .csv</div><div>Hacé clic para buscar en tu computadora</div></div><input type="file" id="file-in" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleFile(this)">${renderPreview()}</div>`
     :`<div>
@@ -8839,16 +9309,16 @@ function renderImportModal(){
       2. Completar los datos en Excel respetando los encabezados (no modificarlos)<br>
       3. Una fila por producto/lote<br>
       4. Guardar el archivo y volver a esta pantalla → pestaña <b>Archivo Excel</b><br>
-      5. Tras importar, editar cada análisis para asignar analistas y fechas
+      5. Tras importar, editar cada registro para asignar analistas y fechas de análisis
     </div>
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:10px">
       <div style="background:var(--bg2);padding:8px 12px;font-size:11px;font-weight:600;color:var(--text2);display:flex;align-items:center;justify-content:space-between">
-        <span>Columnas requeridas</span>
+        <span>Columnas</span>
         <button class="btn sm" onclick="copyHeadersNow(this)" style="font-size:11px">📋 Copiar encabezados</button>
       </div>
       <table style="width:100%;font-size:11px;border-collapse:collapse">
         <tr style="background:var(--bg2)">
-          ${['Producto','Lote','Tipo','Fecha entrega','Prioridad','Notas'].map(h=>`<th style="padding:5px 8px;border:1px solid var(--border);text-align:left;font-weight:600">${h}</th>`).join('')}
+          ${['Producto','Lote','Tipo','Fecha entrega','Prioridad','Notas','Estado','Fecha prevista de ingreso'].map(h=>`<th style="padding:5px 8px;border:1px solid var(--border);text-align:left;font-weight:600">${h}</th>`).join('')}
         </tr>
         <tr>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Amoxicilina 500mg</td>
@@ -8857,14 +9327,28 @@ function renderImportModal(){
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${_relDate(3)}</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Normal</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Control fisicoquímico</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)"></td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)"></td>
         </tr>
         <tr style="background:var(--bg)">
-          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Ibuprofeno 400mg</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Dipirona MP</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">L-2024-012</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">MP</td>
-          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${_relDate(5)}</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)"></td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Alta</td>
           <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Microbiológico</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">A ingresar</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${_relDate(4)}</td>
+        </tr>
+        <tr>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Ibuprofeno 400mg</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">L-2024-013</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">PT</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">${_relDate(5)}</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Normal</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)"></td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)">Ingresado</td>
+          <td style="padding:5px 8px;border:1px solid var(--border);color:var(--text3)"></td>
         </tr>
       </table>
     </div>
@@ -8872,7 +9356,8 @@ function renderImportModal(){
       ⚠ <b>Tipo:</b> PT / MP / Limp / Val / EE (dejar vacío si no corresponde).<br>
       ⚠ <b>Fecha entrega:</b> formato AAAA-MM-DD (ej: 2026-04-25) o DD/MM/AAAA.<br>
       ⚠ <b>Prioridad:</b> Normal / Alta / Urgente.<br>
-      ⚠ Los analistas y fechas de análisis se asignan desde la aplicación tras importar.
+      ⚠ <b>Estado:</b> <i>A ingresar</i> (pendiente de recepción) · <i>Ingresado</i> (ya en laboratorio) · vacío = análisis pendiente.<br>
+      ⚠ <b>Fecha prevista de ingreso:</b> requerida si Estado = A ingresar. Formato AAAA-MM-DD o DD/MM/AAAA.
     </p>
   </div>
   </div>`}
@@ -8891,7 +9376,7 @@ function renderImportModal(){
 function renderPreview(){
   if(!pastePreview.length)return'';
   return`<div style="margin-top:10px"><div style="font-size:12px;font-weight:500;color:var(--green);margin-bottom:6px">✓ ${pastePreview.length} registro${pastePreview.length>1?'s':''} detectado${pastePreview.length>1?'s':''}</div>
-  <div style="overflow-x:auto"><table class="preview-tbl"><tr><th>Producto</th><th>Lote</th><th>Tipo</th><th>F. entrega</th><th>Prioridad</th><th>Notas</th></tr>${pastePreview.slice(0,5).map(r=>`<tr><td>${escH(r.producto)}</td><td>${escH(r.lote)}</td><td>${escH(r.tipo||"")}</td><td>${escH(r.due)}</td><td>${escH(r.priority||"Normal")}</td><td>${escH(r.notes||"")}</td></tr>`).join("")}${pastePreview.length>5?`<tr><td colspan="6" style="text-align:center;color:var(--text3)">... y ${pastePreview.length-5} más</td></tr>`:""}</table></div></div>`;
+  <div style="overflow-x:auto"><table class="preview-tbl"><tr><th>Producto</th><th>Lote</th><th>Tipo</th><th>F. entrega</th><th>Prioridad</th><th>Notas</th><th>Estado</th><th>F. prevista ingreso</th></tr>${pastePreview.slice(0,5).map(r=>`<tr><td>${escH(r.producto)}</td><td>${escH(r.lote)}</td><td>${escH(r.tipo||"")}</td><td>${escH(r.due)}</td><td>${escH(r.priority||"Normal")}</td><td>${escH(r.notes||"")}</td><td>${escH(r.estado||"")}</td><td>${escH(r.expectedArrival||"")}</td></tr>`).join("")}${pastePreview.length>5?`<tr><td colspan="8" style="text-align:center;color:var(--text3)">... y ${pastePreview.length-5} más</td></tr>`:""}</table></div></div>`;
 }
 
 // ── CHANGE PWD MODAL ──
@@ -8906,12 +9391,46 @@ function renderChangePwdModal(){
   </div></div>`;
 }
 
+// ── IMPORT TEMPLATE HELPERS ──
+function downloadTemplate(){
+  if(typeof XLSX==='undefined'){alert('La librería de Excel no está cargada aún. Intentá en unos segundos.');return;}
+  var d1=new Date();d1.setDate(d1.getDate()+3);
+  var d2=new Date();d2.setDate(d2.getDate()+5);
+  var fmt=function(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');};
+  var ws=XLSX.utils.aoa_to_sheet([
+    ['Producto','Lote','Tipo','Fecha entrega','Prioridad','Notas','Estado','Fecha prevista de ingreso'],
+    ['Amoxicilina 500mg','L-2024-011','PT',fmt(d1),'Normal','Control fisicoquímico','',''],
+    ['Dipirona MP','L-2024-012','MP','','Alta','Microbiológico','A ingresar',fmt(d2)],
+    ['Ibuprofeno 400mg','L-2024-013','PT',fmt(d2),'Normal','','Ingresado','']
+  ]);
+  ws['!cols']=[{wch:28},{wch:16},{wch:8},{wch:14},{wch:10},{wch:24},{wch:12},{wch:22}];
+  var wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'Importar');
+  XLSX.writeFile(wb,'plantilla_importar_labtrack.xlsx');
+}
+function copyHeadersNow(btn){
+  var headers='Producto\tLote\tTipo\tFecha entrega\tPrioridad\tNotas\tEstado\tFecha prevista de ingreso';
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(headers).then(function(){
+      var orig=btn.innerHTML;btn.innerHTML='✓ Copiado';btn.disabled=true;
+      setTimeout(function(){btn.innerHTML=orig;btn.disabled=false;},1500);
+    }).catch(function(){_copyFallback(btn,headers);});
+  } else {_copyFallback(btn,headers);}
+}
+function _copyFallback(btn,text){
+  var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+  document.body.appendChild(ta);ta.select();
+  try{document.execCommand('copy');var orig=btn.innerHTML;btn.innerHTML='✓ Copiado';btn.disabled=true;setTimeout(function(){btn.innerHTML=orig;btn.disabled=false;},1500);}
+  catch(e){alert('No se pudo copiar automáticamente.\n\nEncabezados:\n'+text);}
+  document.body.removeChild(ta);
+}
+
 // ── IMPORT ACTIONS ──
 function nameToId(n){const nl=n.trim().toLowerCase();return ANALYSTS.find(a=>a.name.toLowerCase()===nl||a.name.toLowerCase().split(' ')[0]===nl.split(' ')[0])||null;}
 function parsePaste(text){
   const lines=text.trim().split('\n').filter(l=>l.trim());
   if(lines.length<2){pastePreview=[];render();return;}
-  pastePreview=lines.slice(1).map(r=>{const c=r.split('\t');return{producto:c[0]||'',lote:c[1]||'',tipo:c[2]||'',due:c[3]||'',priority:c[4]||'Normal',notes:c[5]||''};}).filter(r=>r.producto&&r.lote);
+  pastePreview=lines.slice(1).map(r=>{const c=r.split('\t');return{producto:c[0]||'',lote:c[1]||'',tipo:c[2]||'',due:c[3]||'',priority:c[4]||'Normal',notes:c[5]||'',estado:c[6]||'',expectedArrival:c[7]||''};}).filter(r=>r.producto&&r.lote);
   render();
 }
 function handleFile(input){
@@ -8933,7 +9452,9 @@ function handleFile(input){
         tipo:String(r['Tipo']||r['tipo']||'').trim(),
         due:String(r['Fecha entrega']||r['Vence']||r['fecha_entrega']||'').trim(),
         priority:String(r['Prioridad']||r['prioridad']||'Normal').trim(),
-        notes:String(r['Notas']||r['notas']||'').trim()
+        notes:String(r['Notas']||r['notas']||'').trim(),
+        estado:String(r['Estado']||r['estado']||'').trim(),
+        expectedArrival:String(r['Fecha prevista de ingreso']||r['fecha_prevista_ingreso']||r['Fecha prevista']||'').trim()
       })).filter(r=>r.producto&&r.lote);
       render();
     }catch(err){
@@ -9003,15 +9524,24 @@ function confirmImport(){
       var due='';
       var priority='Normal';
       var notes='';
+      var estadoRaw='';
+      var expectedArrivalRaw='';
       group.rows.forEach(function(r){
         var rowDue=normDate(r.due);
         if(rowDue&&!due)due=rowDue;
         if(r.priority&&['Normal','Alta','Urgente'].includes(r.priority))priority=r.priority;
         if(r.notes)notes=r.notes;
+        if(r.estado&&!estadoRaw)estadoRaw=r.estado.trim();
+        if(r.expectedArrival&&!expectedArrivalRaw)expectedArrivalRaw=r.expectedArrival.trim();
       });
       var tipoRaw=(group.tipo||'').trim();
       var tipoVal=SAMPLE_TYPES.find(function(s){return s.id===tipoRaw;})?tipoRaw:'';
-      return{id:nextId++,producto:prod,lote,created:today(),assignments,due,priority,status:'pending',notes,tipo:tipoVal};
+      var estadoNorm=estadoRaw.toLowerCase().replace(/\s+/g,'-');
+      var importStatus=estadoNorm==='a-ingresar'?'a-ingresar':'pending';
+      var expectedArrival=(importStatus==='a-ingresar')?normDate(expectedArrivalRaw):'';
+      var task={id:nextId++,producto:prod,lote,created:today(),assignments,due,priority,status:importStatus,notes,tipo:tipoVal};
+      if(expectedArrival)task.expectedArrival=expectedArrival;
+      return task;
     }).filter(Boolean);
     tasks=tasks.concat(newTasks);
     if(duplicates&&duplicates.length>0&&newTasks.length>0)alert('Importacion completada. '+newTasks.length+' registro(s) importados. '+duplicates.length+' duplicado(s) omitido(s).');
@@ -9408,6 +9938,29 @@ function logout(){
   currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';loginShowSync=false;loginShowLabSwitch=false;
   try{localStorage.removeItem('lt9-session');localStorage.removeItem('lt9-lastView');}catch(e){}
   render();
+}
+function openMobUserMenu(){
+  if(!currentUser)return;
+  var roleLabel=currentUser.role==='supervisor'?'Supervisor':currentUser.role==='reviewer'?'Revisor':currentUser.role==='staff'?'Personal':currentUser.role==='sampler'?'Muestreador':'Analista';
+  var overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;z-index:800;background:rgba(0,0,0,.45);display:flex;flex-direction:column;justify-content:flex-end';
+  var guideLink=workdayConfig&&workdayConfig.guideUrl?'<a href="'+escH(workdayConfig.guideUrl)+'" target="_blank" rel="noopener" class="btn" style="width:100%;text-align:left;padding:13px 16px;font-size:14px;min-height:48px;text-decoration:none;display:flex;align-items:center;gap:8px;box-sizing:border-box">📖 Guía de usuario</a>':'';
+  overlay.innerHTML='<div style="background:var(--surface);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:0 0 0 0;box-shadow:0 -4px 28px rgba(0,0,0,.18)" onclick="event.stopPropagation()">'
+    +'<div style="display:flex;justify-content:center;padding:10px 0 4px"><div style="width:36px;height:4px;background:var(--border2);border-radius:4px;opacity:.5"></div></div>'
+    +'<div style="padding:16px 20px 14px;display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--border)">'
+    +'<div class="av av-xl '+currentUser.av+'">'+escH(currentUser.avInit)+'</div>'
+    +'<div><div style="font-size:15px;font-weight:600;letter-spacing:-.01em">'+escH(currentUser.name)+'</div>'
+    +'<div style="font-size:12px;color:var(--text3);margin-top:2px">'+roleLabel+'</div></div></div>'
+    +'<div style="padding:10px 16px;display:flex;flex-direction:column;gap:6px">'
+    +'<button class="btn" style="width:100%;text-align:left;padding:13px 16px;font-size:14px;min-height:48px;display:flex;align-items:center;gap:8px;box-sizing:border-box" onclick="window._closeMobMenu();openChangePwd()">🔑 Cambiar contraseña</button>'
+    +guideLink
+    +'<button class="btn dan" style="width:100%;text-align:left;padding:13px 16px;font-size:14px;min-height:48px;display:flex;align-items:center;gap:8px;box-sizing:border-box;margin-top:4px" onclick="window._closeMobMenu();logout()">⏻ Salir de LabTrack</button>'
+    +'</div>'
+    +'<div style="height:calc(env(safe-area-inset-bottom) + 8px)"></div>'
+    +'</div>';
+  window._closeMobMenu=function(){try{document.body.removeChild(overlay);}catch(e){}};
+  overlay.addEventListener('click',function(e){if(e.target===overlay)window._closeMobMenu();});
+  document.body.appendChild(overlay);
 }
 function openNewTask(){editingTask=null;selectedAnalysts=[];analystDates={};multiAssigns=[];newTaskPrefill={};showModal=true;render();}
 function openNewTaskFromSuggestion(suggId){
@@ -10516,6 +11069,22 @@ function rejectPlanifRequest(notifId){
   saveLS();render();saveNow().catch(function(e){console.error(e);});
 }
 
+// ── Declinar tarea libre por ID (usado desde tabla Gestión sin notifId) ──
+function declineFreeTaskById(ftId){
+  var reason=prompt('Motivo por el que no podés realizar esta tarea (opcional):','');
+  if(reason===null)return;
+  var ft=freeTasks.find(function(x){return x.id===ftId;});
+  if(!ft)return;
+  ft.status='declined';ft.declinedBy=currentUser.id;ft.declinedTs=Date.now();ft.declineReason=reason||'';
+  replanNotifs.filter(function(n){return n.type==='free_task_assigned'&&n.freeTaskId===ftId&&n.status==='pending';}).forEach(function(n){n.status='resolved';});
+  var supUser=USERS.find(function(u){return u.role==='supervisor';});
+  replanNotifs.push({id:nextNotifId++,type:'free_task_declined',
+    freeTaskId:ftId,analystId:currentUser.id,analystName:currentUser.name,
+    forUserId:supUser?supUser.id:'',
+    description:ft.description,reason:reason||'',status:'pending',ts:Date.now()});
+  saveLS();render();saveNow().catch(function(e){console.error(e);});
+}
+
 // ── Declinar tarea libre: avisa al supervisor, desaparece del panel del analista ──
 function declineFreeTask(notifId){
   var reason=prompt('Motivo por el que no podés realizar esta tarea (opcional):','');
@@ -10659,6 +11228,24 @@ function renderNotifPanel(){
   var ftPendConfirm=isSup
     ?freeTasks.filter(function(ft){return ft.status==='pending-confirm';}).sort(function(a,b){return (b._ts||0)-(a._ts||0);})
     :[];
+  // Supervisor: direct scan for pending-confirm mgmt completions
+  var mgmtPendConfirm=isSup
+    ?(function(){
+        var items=[];
+        mgmtTasks.forEach(function(mt){
+          (mt.completions||[]).filter(function(c){return c.status==='pending-confirm';}).forEach(function(c){
+            items.push({mgmtId:mt.id,category:mt.category,
+              date:c.date,analystId:c.analystId,hours:c.hours,comment:c.comment,ts:c.ts});
+          });
+        });
+        return items.sort(function(a,b){return(b.ts||0)-(a.ts||0);});
+      })()
+    :[];
+  // Supervisor: mgmt not-done notifications
+  var mgmtNotDoneNotifs=isSup
+    ?replanNotifs.filter(function(n){return n.type==='mgmt_not_done'&&n.status==='pending'&&n.forUserId===uid;})
+        .sort(function(a,b){return(b.ts||0)-(a.ts||0);})
+    :[];
   // ftAssignedNotifs: non-supervisor assigned tasks
   var ftAssignedNotifs=replanNotifs.filter(function(n){
     if(n.status==='resolved') return false;
@@ -10699,7 +11286,7 @@ function renderNotifPanel(){
   const totalBadge=myObsNotifs.filter(isUnread).length
     +pendReplan.filter(isUnread).length+schedPend.length+schedApproved.length+confirmPend.length
     +resubmitBadge
-    +(isSup?ftPendConfirm.length:replanNotifs.filter(function(n){
+    +(isSup?ftPendConfirm.length+mgmtPendConfirm.length+mgmtNotDoneNotifs.length:replanNotifs.filter(function(n){
       return n.type==='free_task_assigned'&&n.forUserId===uid&&n.status!=='resolved'&&isUnread(n);
     }).length)
     +planReqNotifs.filter(isUnread).length+responseNotifBadge+samplingDoneBadge+overdueAlerts.length
@@ -10889,6 +11476,46 @@ function renderNotifPanel(){
         +'<button class="btn sm suc" onclick="confirmFreeTask('+ft.id+');showNotifPanel=false" style="font-size:10px">✓ Confirmar</button>'
         +'<button class="btn sm dan" onclick="rejectFreeTask('+ft.id+');showNotifPanel=false" style="font-size:10px">✗ Rechazar</button>'
         +'</div>'
+        +'</div>';
+    });
+    html+='</div>';
+  }
+
+  // ── Actividades de gestión para confirmar (supervisor) ──
+  if(isSup&&(mgmtPendConfirm.length>0||mgmtNotDoneNotifs.length>0)){
+    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--green-bg)">'
+      +'<div style="font-size:12px;font-weight:600;color:var(--green-text);margin-bottom:8px">🗂 Actividades de gestión ('+(mgmtPendConfirm.length+mgmtNotDoneNotifs.length)+')</div>';
+    mgmtPendConfirm.forEach(function(item){
+      var uA=getU(item.analystId);
+      var cat=getMgmtCat(item.category);
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--blue)">'
+        +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
+        +'<span style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;background:'+cat.color+';color:'+cat.text+'">'+escH(cat.label)+'</span>'
+        +'<span style="font-size:11px;color:var(--text3);font-family:var(--mono)">'+fmtDDMMYY(item.date)+'</span>'
+        +'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin:3px 0;display:flex;align-items:center;gap:4px">'
+        +(uA?'<span class="av '+uA.av+'" style="width:16px;height:16px;font-size:8px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center">'+escH(uA.avInit)+'</span><b>'+escH(uA.name)+'</b>':'')
+        +(item.hours?' · <b style="font-family:var(--mono);color:#059669">'+item.hours+'h</b>':'')
+        +'</div>'
+        +(item.comment?'<div style="font-size:11px;color:var(--text);background:var(--bg2);border-radius:4px;padding:4px 8px;margin:4px 0">💬 '+escH(item.comment)+'</div>':'')
+        +'<div style="display:flex;gap:4px;flex-wrap:wrap">'
+        +'<button class="btn sm suc" onclick="confirmMgmtCompl('+item.mgmtId+',\''+item.date+'\',\''+item.analystId+'\');showNotifPanel=false" style="font-size:10px">✓ Confirmar</button>'
+        +'<button class="btn sm dan" onclick="deleteMgmtCompl('+item.mgmtId+',\''+item.date+'\',\''+item.analystId+'\');showNotifPanel=false" style="font-size:10px">✗ Rechazar</button>'
+        +'</div></div>';
+    });
+    mgmtNotDoneNotifs.forEach(function(n){
+      var uA=getU(n.analystId);
+      var cat=getMgmtCat(n.category);
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--red)">'
+        +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
+        +'<span style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;background:'+cat.color+';color:'+cat.text+'">'+escH(cat.label)+'</span>'
+        +'<span style="font-size:11px;color:var(--text3);font-family:var(--mono)">'+fmtDDMMYY(n.occDate)+'</span>'
+        +'</div>'
+        +'<div style="font-size:11px;color:var(--red);font-weight:600;margin-bottom:3px">✗ No pudo realizar</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin:3px 0;display:flex;align-items:center;gap:4px">'
+        +(uA?'<span class="av '+uA.av+'" style="width:16px;height:16px;font-size:8px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center">'+escH(uA.avInit)+'</span><b>'+escH(uA.name)+'</b>':'')
+        +'</div>'
+        +'<button class="btn sm" onclick="markResponseNotifRead('+n.id+');render()" style="font-size:10px;color:var(--text3)">✓ Entendido</button>'
         +'</div>';
     });
     html+='</div>';
@@ -11186,6 +11813,7 @@ function renderNotifPanel(){
         if(n.dateStr)detail+='<br>Fecha: '+fmtDDMMYY(n.dateStr);
         if(n.proposed&&n.proposed.startTime)detail+=' · '+n.proposed.startTime+' – '+n.proposed.endTime;
         if(n.proposed&&n.proposed.type==='overtime')detail+=' · Horas extra: '+(n.proposed.extraHours||'?')+'h';
+
       }
 
       html+='<div style="background:'+cardColor+';border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid '+borderColor+'">'
@@ -11517,6 +12145,14 @@ let showFreeTaskModal=false;
 let editingFreeTask=null;
 
 function openFreeTaskModal(ftId){
+  if(ftId){
+    // Solo el supervisor puede editar tareas ajenas
+    const _ft=freeTasks.find(function(x){return x.id===ftId;});
+    if(_ft&&!isSupRole()&&_ft.analystId!==currentUser.id){
+      alert('Solo el Supervisor puede editar tareas asignadas a otros usuarios.');
+      return;
+    }
+  }
   editingFreeTask=ftId||null;
   showFreeTaskModal=true;
   render();
@@ -11586,6 +12222,11 @@ function saveFreeTask(){
   if(editingFreeTask){
     const ft=freeTasks.find(function(x){return x.id===editingFreeTask;});
     if(ft){
+      // Solo el supervisor puede editar tareas ajenas
+      if(!isSup2&&ft.analystId!==currentUser.id){
+        alert('Solo el Supervisor puede editar tareas asignadas a otros usuarios.');
+        return;
+      }
       ft.description=desc.trim();ft.date=date;ft.hours=hours;ft.notes=notes.trim();
       if(isSup2&&selAnalyst){ft.analystId=selAnalyst;ft.analystName=targetUser.name;}
       auditLog('EDIT','FREE_TASK',editingFreeTask,{description:desc.trim(),hours,date},'');
