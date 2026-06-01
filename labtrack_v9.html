@@ -7294,6 +7294,7 @@ function tRowSupLote(t){
   var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
   var realTotal=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
   var ds=taskDisplayStatus(t);
+  var _ilrSup=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id;});
   var obsTitle=t.observations&&t.observations.length
     ?escH(t.observations.map(function(o,i){return '#'+(i+1)+' '+(o.byName||'')+': '+(o.comment||'');}).join('\n')):'';
   var row='<div class="trow-sup" onclick="openEdit('+t.id+')">';
@@ -7312,9 +7313,12 @@ function tRowSupLote(t){
   row+='<div style="font-size:11px">'+(t.due?dueBadge(t):'<span style="color:var(--text3)">—</span>')+'</div>';
   // C5 Estado
   var lastCmpCmtSup=t.completionComments&&t.completionComments.length?t.completionComments[t.completionComments.length-1]:null;
-  row+='<div><span class="pill '+(ds==='partial'?'partial':t.status)+'" style="font-size:10px">'+statusLabel(ds)+'</span>'
+  var _ilrSupSi=_ilrSup?_ilrStatusInfo(_ilrSup.status):null;
+  row+='<div style="display:flex;flex-direction:column;gap:2px;align-items:flex-start"><span class="pill '+(ds==='partial'?'partial':t.status)+'" style="font-size:10px">'+statusLabel(ds)+'</span>'
       +(obsTitle?'<span style="cursor:help;font-size:10px;font-weight:700;color:var(--amber-text);margin-left:3px" title="'+obsTitle+'">⚑</span>':'')
       +(lastCmpCmtSup?'<span style="cursor:help;font-size:10px;color:var(--text2);margin-left:3px" title="'+escH(lastCmpCmtSup.byName+': '+lastCmpCmtSup.comment)+'">💬</span>':'')
+      +(_ilrSup&&!t._interLab?'<span class="pill '+_ilrSupSi.cls+'" style="font-size:9px;padding:1px 5px" title="Solicitud inter-lab enviada · '+escH(_ilrSupSi.label)+'">🔗 '+escH(_ilrSupSi.label)+'</span>':'')
+      +(t._interLab?'<span style="font-size:9px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:4px;padding:1px 5px;font-weight:600" title="Recibido de '+escH(t._interLab.fromLabName||'')+'">🔗 '+escH(t._interLab.fromLabName||'Inter-lab')+'</span>':'')
       +'</div>';
   // C5 Prioridad
   row+='<div><span class="pill '+(t.priority||'Normal').toLowerCase()+'" style="font-size:10px">'+(t.priority||'Normal')+'</span></div>';
@@ -7470,7 +7474,7 @@ function tRowAna(t,maOverride){
   var daysLateAssign=ma&&ma.date?Math.round((new Date(todayStr+'T12:00:00').getTime()-new Date(ma.date+'T12:00:00').getTime())/86400000):0;
   var showOverdueWarn=daysLateAssign>=2&&!iThisAssignDone&&!iThisAssignPendConf&&(t.status==='pending'||t.status==='scheduled'||t.status==='progress');
 
-  var _ilrActive=interLabRequests.find(function(r){return r.taskId===t.id&&r.status!=='completado';});
+  var _ilrActive=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id;});
   return'<div>'
     +'<div class="trow" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr'+(showOverdueWarn?';border-left:3px solid var(--amber)':'')+'">'
     +'<div><div class="cell-trunc">'+escH(t.producto)+'</div><div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+'<span>'+escH(t.lote)+'</span></div></div>'
@@ -7625,7 +7629,7 @@ function tRowAnaHist(t,ma){
   var md=ma?ma.date:t.due;
   var maRealH=ma?((ma.sessions||[]).reduce(function(s,e){return s+(e.hours||0);},0)||(ma.realHours||0)):0;
   var lastObs=t.observations&&t.observations.length?t.observations[t.observations.length-1]:{};
-  var _ilrA=interLabRequests.find(function(r){return r.taskId===t.id&&r.status!=='completado';});
+  var _ilrA=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id;});
   return'<div class="trow" onclick="openEdit('+t.id+')" style="grid-template-columns:1.8fr .8fr .55fr .9fr;cursor:pointer">'
     +'<div><div class="cell-trunc" style="font-weight:600">'+escH(t.producto)+'</div>'
     +'<div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+'<span style="font-family:var(--mono);font-size:11px">'+escH(t.lote)+'</span></div></div>'
@@ -9344,6 +9348,15 @@ function renderAdmin(){
         +'</div>'
         +'<div id="extlab-msg" style="font-size:12px;min-height:16px;margin-top:6px;color:var(--red)"></div>'
         +'</div>';
+      // Limpiar solicitudes IL — para transición de pruebas a producción
+      var ilrCount=interLabRequests.length;
+      eh+='<div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">'
+        +'<div>'
+        +'<div style="font-size:12px;font-weight:600;color:var(--text)">Solicitudes inter-lab almacenadas: <b>'+ilrCount+'</b></div>'
+        +'<div style="font-size:11px;color:var(--text2);margin-top:2px">Eliminar el historial al comenzar el uso oficial.</div>'
+        +'</div>'
+        +(ilrCount>0?'<button class="btn sm dan" onclick="adminClearAllILR()" title="Eliminar todas las solicitudes inter-laboratorio">🗑 Limpiar solicitudes IL</button>':'<span style="font-size:11px;color:var(--text3)">Sin solicitudes</span>')
+        +'</div>';
       return eh;
     })()
 
@@ -9376,6 +9389,15 @@ function adminDeleteExternalLab(labId){
   if(!confirm('¿Eliminar este laboratorio externo?'))return;
   externalLabs=externalLabs.filter(function(l){return l.id!==labId;});
   saveLS();saveNow().catch(function(e){console.error('adminDeleteExternalLab:',e);});
+  render();
+}
+
+function adminClearAllILR(){
+  var n=interLabRequests.length;
+  if(!n){alert('No hay solicitudes inter-lab almacenadas.');return;}
+  if(!confirm('¿Eliminar las '+n+' solicitudes inter-laboratorio?\n\nEsta acción limpia el historial de pruebas. No se puede deshacer.'))return;
+  interLabRequests=[];
+  saveLS();saveNow().catch(function(e){console.error('adminClearAllILR:',e);});
   render();
 }
 
@@ -9764,7 +9786,7 @@ function renderTaskModal(){
     var _uid=currentUser.id;
     var _isAssigned=assigns.some(function(a){return a.analyst===_uid;});
     var _hasDestLabs=labProfiles.filter(function(l){return l.id!==activeLabId;}).length>0||externalLabs.length>0;
-    var _taskILRs=interLabRequests.filter(function(r){return r.taskId===t.id&&r.status!=='completado';});
+    var _taskILRs=interLabRequests.filter(function(r){return r.taskId===t.id;}).sort(function(a,b){return(b.ts||0)-(a.ts||0);});
     var _ilrBlock='';
     if(t._interLab){
       _ilrBlock='<div style="border-top:1px solid var(--border);margin-top:12px;padding-top:10px;background:#eff6ff;border-radius:var(--radius);padding:10px 12px;margin-top:12px;font-size:12px">'
@@ -9829,12 +9851,26 @@ function renderTaskModal(){
       +'<div style="margin-top:4px;color:var(--text3);font-size:11px">Guardá el formulario para confirmar la sugerencia y crear el producto.</div>'
       +'</div>';
   }
-  var _ilBanner=(isEdit&&t._interLab)
-    ?'<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:var(--radius);padding:10px 14px;margin-bottom:12px;font-size:12px">'
-      +'<div style="font-weight:700;color:#1d4ed8;margin-bottom:2px">🔗 Análisis inter-laboratorio</div>'
+  var _editILRs=interLabRequests.filter(function(r){return r.taskId===t.id;}).sort(function(a,b){return(b.ts||0)-(a.ts||0);});
+  var _ilBanner='';
+  if(isEdit&&t._interLab){
+    _ilBanner='<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:var(--radius);padding:10px 14px;margin-bottom:12px;font-size:12px">'
+      +'<div style="font-weight:700;color:#1d4ed8;margin-bottom:2px">🔗 Análisis inter-laboratorio recibido</div>'
       +'<div style="color:var(--text2)">Solicitado por: <b>'+escH(t._interLab.fromLabName||'—')+'</b></div>'
-      +'</div>'
-    :'';
+      +'</div>';
+  } else if(isEdit&&_editILRs.length){
+    _ilBanner='<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:var(--radius);padding:10px 14px;margin-bottom:12px;font-size:12px">'
+      +'<div style="font-weight:700;color:#1d4ed8;margin-bottom:6px">🔗 Solicitudes inter-laboratorio enviadas</div>'
+      +_editILRs.map(function(r){
+        var si=_ilrStatusInfo(r.status);
+        return'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:3px">'
+          +'<span style="color:var(--text2);font-size:11px">→ <b>'+escH(_ilrLabName(r.destLabId))+'</b></span>'
+          +'<span class="pill '+si.cls+'" style="font-size:9px;padding:1px 5px">'+si.icon+' '+escH(si.label)+'</span>'
+          +(r.dueDate?'<span style="font-size:10px;font-family:var(--mono);color:var(--text3)">'+fmtDF(r.dueDate)+'</span>':'')
+          +'</div>';
+      }).join('')
+      +'</div>';
+  }
   return'<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal">'
     +'<h3>'+(isEdit?'Editar análisis de lote':(newTaskPrefill.suggId?'Confirmar ingreso sugerido':'Nuevo análisis de lote'))+'</h3>'
     +_ilBanner+_suggBanner
