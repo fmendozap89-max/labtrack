@@ -360,6 +360,10 @@ let estabTab='activas',limpvalTab='activas';
 let loginStep=1,selectedLoginUser=null,loginError='',loginShowSync=false,loginShowLabSwitch=false;
 // ── Multi-laboratorio ──
 var labProfiles=[]; // [{id,name,token,gistId}]
+var _discoverState=null; // null | 'loading' | {labs:[{gistId,name}]} | {error:'msg'}
+var _selectedDiscoverGistId=null;
+var labConfigPwd=''; // hash SHA-256 de la clave maestra de configuración de labs; '' = sin clave
+var _labConfigUnlocked=false; // desbloqueado por sesión en memoria
 var activeLabId=null;
 // ── Solicitudes inter-laboratorio ──
 var interLabRequests=[];
@@ -457,8 +461,11 @@ function rebuildDerived(){
 function getSnapshot(){
   // Registro de laboratorios (sin tokens — solo nombre y gistId para descubrimiento entre dispositivos)
   var _labRegistry=labProfiles.filter(function(l){return l.gistId;}).map(function(l){return{id:l.id,name:l.name,gistId:l.gistId};});
+  var _currentLab=labProfiles.find(function(l){return l.id===activeLabId;});
+  var _labName=_currentLab?(_currentLab.name||''):'';
   return JSON.stringify({
     savedAt:Date.now(),
+    labName:_labName,
     v:7,
     tasks,nextId,nextUid,nextNotifId,nextAbsId,nextMgmtId,
     freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,customTipos,
@@ -466,7 +473,8 @@ function getSnapshot(){
     passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
     auditTrail,
     interLabRequests,externalLabs,
-    labRegistry:_labRegistry
+    labRegistry:_labRegistry,
+    labConfigPwd:labConfigPwd
   });
 }
 function applySnapshot(json){
@@ -530,17 +538,21 @@ function applySnapshot(json){
     // Solo actualiza nombres de labs YA conocidos localmente.
     // No agrega labs nuevos automáticamente (requiere acción del supervisor)
     // para evitar mezcla de datos entre laboratorios.
-    if(d.labRegistry&&Array.isArray(d.labRegistry)&&d.labRegistry.length>0&&labProfiles.length>0){
+    // Cargar contraseña maestra de configuración de labs
+    if(typeof d.labConfigPwd==='string')labConfigPwd=d.labConfigPwd;
+    if(d.labRegistry&&Array.isArray(d.labRegistry)&&d.labRegistry.length>0){
       var _changed=false;
       d.labRegistry.forEach(function(entry){
         if(!entry.gistId||!entry.id)return;
-        // Solo actualizar labs que ya existen en este dispositivo (por id o gistId)
         var existing=labProfiles.find(function(l){return l.id===entry.id;})
                    ||labProfiles.find(function(l){return l.gistId===entry.gistId;});
         if(existing){
           if(entry.name&&entry.name!==existing.name){existing.name=entry.name;_changed=true;}
+        } else if(GIST_CONFIG.token&&entry.gistId!==GIST_CONFIG.gistId){
+          // Auto-agregar lab nuevo descubierto en el registry usando el token ya configurado
+          labProfiles.push({id:entry.id,name:entry.name||entry.id,token:GIST_CONFIG.token,gistId:entry.gistId});
+          _changed=true;
         }
-        // No se agregan labs nuevos automáticamente — el supervisor los configura en Administración
       });
       if(_changed)_saveLabProfiles();
     }
@@ -1264,9 +1276,10 @@ function renderSpConfigModal() {
     +'El token se guarda solo en este navegador (localStorage). El Supervisor debe compartir el token y el Gist ID con los demás usuarios para que sincronicen al mismo Gist.'
     +'</div>'
 
-    +'<div class="modal-btns">'
+    +'<div class="modal-btns" style="flex-wrap:wrap;gap:6px">'
     +'<button class="btn" onclick="closeSpConfig()">Cancelar</button>'
     +(cfg.configured?'<button class="btn dan" onclick="disconnectGist()">Desconectar</button>':'')
+    +(cfg.configured?'<button id="gcfg-discover-btn" class="btn" onclick="adminDiscoverLabs()" title="Descubrir y agregar labs de la misma cuenta GitHub" style="color:var(--blue)">🔍 Descubrir labs</button>':'')
     +'<button class="btn pri" onclick="saveGistConfig()">Guardar y conectar</button>'
     +'</div>'
     +'</div></div>';
@@ -1285,6 +1298,33 @@ async function saveGistConfig() {
   gistBoot().then(function(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';render();}).catch(function(e){console.error('gistBoot after config:',e);render();});
 }
 
+async function adminDiscoverLabs(){
+  var token=(document.getElementById('gcfg-token')?.value||GIST_CONFIG.token||'').trim();
+  if(!token){alert('Ingresá o guardá el token primero.');return;}
+  var btn=document.getElementById('gcfg-discover-btn');
+  if(btn){btn.disabled=true;btn.textContent='⏳ Buscando…';}
+  try{
+    var labs=await discoverLabsFromToken(token);
+    var added=0;
+    labs.forEach(function(disc){
+      var existing=labProfiles.find(function(l){return l.gistId===disc.gistId;});
+      if(!existing){
+        labProfiles.push({id:'lab_'+disc.gistId.slice(0,8),name:disc.name,token:token,gistId:disc.gistId});
+        added++;
+      } else {
+        // Actualizar nombre si cambió
+        if(disc.name&&disc.name!==existing.name)existing.name=disc.name;
+        // Asegurar que el token quede actualizado
+        existing.token=token;
+      }
+    });
+    _saveLabProfiles();
+    var msg=added>0?'✓ '+added+' laboratorio'+(added!==1?'s':'')+'  nuevo'+(added!==1?'s':'')+' agregado'+(added!==1?'s':'')+'.'
+      :'Sin laboratorios nuevos. Los '+labs.length+' labs encontrados ya están configurados.';
+    alert(msg);
+  }catch(e){alert('Error al descubrir: '+e.message);}
+  if(btn){btn.disabled=false;btn.textContent='🔍 Descubrir labs';}
+}
 function disconnectGist() {
   if (!confirm('¿Desconectar la sincronización? Los datos locales en memoria se mantienen.')) return;
   GIST_CONFIG = { token:'', gistId:'', configured:false };
@@ -1438,8 +1478,38 @@ function adminAddLab(){
   labProfiles.push({id:_newId,name:name,token:'',gistId:''});
   _saveLabProfiles();
   render();
-  // Abrir editor del nuevo lab automáticamente
   setTimeout(function(){adminEditLabToggle(_newId);},80);
+}
+async function adminUnlockLabConfig(){
+  if(!labConfigPwd){_labConfigUnlocked=true;render();return;}
+  var v=prompt('Contraseña de configuración de laboratorios:');
+  if(v===null)return;
+  var h=await hashPassword(v);
+  if(h===labConfigPwd){_labConfigUnlocked=true;render();}
+  else{alert('Contraseña incorrecta.');}
+}
+function adminLockLabConfig(){_labConfigUnlocked=false;render();}
+async function adminSetLabConfigPwd(){
+  if(labConfigPwd&&!_labConfigUnlocked){alert('Desbloqueá la configuración primero.');return;}
+  if(labConfigPwd){
+    var old=prompt('Contraseña actual:');
+    if(old===null)return;
+    if(await hashPassword(old)!==labConfigPwd){alert('Contraseña actual incorrecta.');return;}
+  }
+  var n1=prompt('Nueva contraseña (dejá vacío para quitar la contraseña):');
+  if(n1===null)return;
+  if(!n1.trim()){
+    if(!confirm('¿Quitar la contraseña de configuración? La sección quedará accesible para todos los supervisores.'))return;
+    labConfigPwd='';_labConfigUnlocked=false;
+  } else {
+    var n2=prompt('Confirmá la nueva contraseña:');
+    if(n2===null)return;
+    if(n1!==n2){alert('Las contraseñas no coinciden.');return;}
+    labConfigPwd=await hashPassword(n1);
+    _labConfigUnlocked=true;
+  }
+  saveNow().catch(function(e){console.warn('saveLabConfigPwd:',e);});
+  render();
 }
 
 // Eliminar perfil de laboratorio (no toca el Gist)
@@ -5277,20 +5347,48 @@ function renderLogin(){
   const _inp='width:100%;padding:8px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:12px;box-sizing:border-box;font-family:var(--mono)';
   let syncWidget='';
   if(!cfg.configured&&labProfiles.length===0){
-    // Primer acceso: mostrar formulario directamente, sin botón
+    // Sección de resultados del discovery
+    var _discoverSection='';
+    if(_discoverState==='loading'){
+      _discoverSection='<div style="text-align:center;padding:12px;font-size:12px;color:var(--text2)">⏳ Buscando laboratorios…</div>';
+    } else if(_discoverState&&_discoverState.error){
+      _discoverSection='<div style="background:#fef2f2;border-radius:var(--radius);padding:9px 12px;font-size:12px;color:#dc2626;margin-top:8px">⚠ '+escH(_discoverState.error)+'</div>';
+    } else if(_discoverState&&_discoverState.labs){
+      _discoverSection='<div style="margin-top:10px;margin-bottom:4px">'
+        +'<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px">Seleccioná tu laboratorio:</div>'
+        +_discoverState.labs.map(function(l){
+          var sel=_selectedDiscoverGistId===l.gistId;
+          return'<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:2px solid '+(sel?'var(--blue)':'var(--border2)')+';border-radius:var(--radius);margin-bottom:5px;cursor:pointer;background:'+(sel?'var(--blue-bg)':'var(--surface)')+'">'
+            +'<input type="radio" name="disc-lab" value="'+escH(l.gistId)+'" '+(sel?'checked':'')+' onchange="loginDiscoverSelect(\''+escH(l.gistId)+'\')" style="accent-color:var(--blue)">'
+            +'<span style="font-size:13px;font-weight:'+(sel?'600':'400')+'">'+escH(l.name)+'</span>'
+            +'</label>';
+        }).join('')
+        +'</div>';
+    }
+    // Configuración manual como fallback colapsable (solo cuando no hay resultado de discovery)
+    var _manualSection='';
+    if(!_discoverState||_discoverState==='loading'||(_discoverState&&_discoverState.error)){
+      _manualSection='<details style="margin-top:8px"><summary style="font-size:11px;color:var(--text3);cursor:pointer;user-select:none;padding:2px 0">Configuración manual (avanzado)</summary>'
+        +'<div style="margin-top:8px">'
+        +'<label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Gist ID</label>'
+        +'<input type="text" id="ls-gistid" value="" placeholder="Identificador del Gist" autocomplete="off" style="'+_inp+'">'
+        +'</div>'
+        +'</details>';
+    }
+    var _connectDisabled=(_discoverState&&_discoverState.labs&&!_selectedDiscoverGistId);
     syncWidget='<div style="margin-top:14px;padding:12px;border-top:1px solid var(--border2);background:var(--hover);border-radius:0 0 var(--radius-lg) var(--radius-lg);margin:-1px -1px -1px -1px;box-sizing:border-box">'
       +'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);margin-bottom:8px">🔗 Primer acceso — conectar al laboratorio</div>'
-      +'<div style="font-size:11px;color:var(--text2);margin-bottom:10px;line-height:1.4">Ingresá los datos que te proporcionó el supervisor para sincronizar.</div>'
-      +'<div style="margin-bottom:7px">'
+      +'<div style="margin-bottom:8px">'
       +'<label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Token de GitHub</label>'
-      +'<input type="password" id="ls-token" value="" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" style="'+_inp+'">'
-      +'</div>'
-      +'<div style="margin-bottom:10px">'
-      +'<label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Gist ID</label>'
-      +'<input type="text" id="ls-gistid" value="" placeholder="Identificador del Gist" autocomplete="off" style="'+_inp+'">'
-      +'</div>'
       +'<div style="display:flex;gap:6px">'
-      +'<button class="btn pri" onclick="loginSyncSave()" style="flex:1;font-size:12px;padding:7px">Conectar</button>'
+      +'<input type="password" id="ls-token" value="" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" style="'+_inp+';flex:1">'
+      +'<button class="btn" onclick="loginDiscover()" style="font-size:11px;padding:6px 10px;white-space:nowrap;flex-shrink:0"'+(_discoverState==='loading'?' disabled':'')+'>🔍 Descubrir</button>'
+      +'</div>'
+      +'</div>'
+      +_discoverSection
+      +_manualSection
+      +'<div style="display:flex;gap:6px;margin-top:10px">'
+      +'<button class="btn pri" onclick="loginSyncSave()" style="flex:1;font-size:12px;padding:7px"'+(_connectDisabled?' disabled':'')+'>Conectar</button>'
       +'<button class="btn" onclick="loginSyncCancel()" style="font-size:12px;padding:7px">Cancelar</button>'
       +'</div>'
       +'</div>';
@@ -5350,28 +5448,99 @@ function attachLogin(){setTimeout(function(){var p=document.getElementById('logi
 function selUser(id){selectedLoginUser=USERS.find(function(u){return u.id===id;})||null;loginError='';render();}
 function backStep(){loginStep=1;selectedLoginUser=null;loginError='';render();}
 function loginSyncCancel(){loginShowSync=false;document.body.style.overflowY='';render();}
+async function discoverLabsFromToken(token){
+  var headers={
+    'Authorization':'Bearer '+token,
+    'Accept':'application/vnd.github+json',
+    'X-GitHub-Api-Version':'2022-11-28'
+  };
+  // Validar token antes de listar
+  var userR=await fetch('https://api.github.com/user',{headers:headers});
+  if(userR.status===401)throw new Error('Token inválido o expirado. Verificá que el token tenga el scope "gist" habilitado en GitHub.');
+  if(!userR.ok)throw new Error('Error '+userR.status+' al validar el token.');
+  var allGists=[],page=1;
+  while(true){
+    var r=await fetch('https://api.github.com/gists?per_page=100&page='+page,{headers:headers});
+    if(r.status===401)throw new Error('El token no tiene permiso para listar Gists. Verificá el scope "gist" en GitHub → Settings → Developer settings → Personal access tokens.');
+    if(!r.ok)throw new Error('Error '+r.status+' al listar Gists.');
+    var batch=await r.json();
+    allGists=allGists.concat(batch);
+    if(batch.length<100)break;
+    page++;
+  }
+  var ltGists=allGists.filter(function(g){return g.files&&g.files[GIST_FILE_STATE];});
+  if(!ltGists.length)return [];
+  var results=await Promise.all(ltGists.map(async function(g){
+    try{
+      var r2=await fetch('https://api.github.com/gists/'+g.id,{headers:headers});
+      var data=await r2.json();
+      var content=data.files&&data.files[GIST_FILE_STATE]&&data.files[GIST_FILE_STATE].content;
+      var name='';
+      if(content){
+        try{
+          var parsed=JSON.parse(content);
+          // Primero: campo labName (nuevo)
+          if(parsed.labName)name=parsed.labName;
+          // Fallback: buscar en labRegistry la entrada cuyo gistId coincide con este Gist
+          if(!name&&Array.isArray(parsed.labRegistry)){
+            var self=parsed.labRegistry.find(function(e){return e.gistId===g.id;});
+            if(self&&self.name)name=self.name;
+          }
+        }catch(e2){}
+      }
+      // Último recurso: descripción del Gist en GitHub
+      if(!name)name=g.description||('Lab-'+g.id.slice(0,8));
+      return{gistId:g.id,name:name};
+    }catch(e){return null;}
+  }));
+  return results.filter(Boolean);
+}
+async function loginDiscover(){
+  var token=(document.getElementById('ls-token')||{}).value||'';
+  token=token.trim();
+  if(!token){alert('Ingresá el token primero.');return;}
+  if(!token.startsWith('ghp_')&&!token.startsWith('github_pat_')&&token.length<20){alert('El token no parece válido.');return;}
+  _discoverState='loading';_selectedDiscoverGistId=null;render();
+  try{
+    var labs=await discoverLabsFromToken(token);
+    if(!labs.length){_discoverState={error:'No se encontraron laboratorios LabTrack en esta cuenta.'};}
+    else{_discoverState={labs:labs};if(labs.length===1)_selectedDiscoverGistId=labs[0].gistId;}
+  }catch(e){_discoverState={error:'Error al conectar: '+e.message};}
+  render();
+}
+function loginDiscoverSelect(gistId){_selectedDiscoverGistId=gistId;render();}
 function loginSyncSave(){
   var token=(document.getElementById('ls-token')||{}).value||'';
-  var gistId=(document.getElementById('ls-gistid')||{}).value||'';
-  token=token.trim(); gistId=gistId.trim();
+  token=token.trim();
   if(!token){alert('El token es requerido.');return;}
   if(!token.startsWith('ghp_')&&!token.startsWith('github_pat_')&&token.length<20){
     alert('El token no parece válido. Debe empezar con ghp_ o github_pat_');return;
   }
-  var gistCambio=gistId&&GIST_CONFIG.gistId&&gistId!==GIST_CONFIG.gistId;
-  if(gistCambio){
-    if(!confirm('Al cambiar el Gist ID se cargarán los datos de ese Gist y los datos locales actuales serán reemplazados.\n\nEl Gist anterior no se modifica.\n\n¿Continuar?'))return;
+  var ownGistId='';
+  if(_discoverState&&_discoverState.labs){
+    // Modo discovery: configurar todos los labs descubiertos
+    if(!_selectedDiscoverGistId){alert('Seleccioná tu laboratorio.');return;}
+    ownGistId=_selectedDiscoverGistId;
+    _discoverState.labs.forEach(function(disc){
+      var existing=labProfiles.find(function(l){return l.gistId===disc.gistId;});
+      if(existing){existing.token=token;if(disc.name)existing.name=disc.name;}
+      else{labProfiles.push({id:'lab_'+disc.gistId.slice(0,8),name:disc.name,token:token,gistId:disc.gistId});}
+    });
+    var activeLab=labProfiles.find(function(l){return l.gistId===ownGistId;});
+    if(activeLab)activeLabId=activeLab.id;
+  } else {
+    // Modo manual (fallback)
+    var gistId=(document.getElementById('ls-gistid')||{}).value||'';
+    gistId=gistId.trim();
+    var gistCambio=gistId&&GIST_CONFIG.gistId&&gistId!==GIST_CONFIG.gistId;
+    if(gistCambio){if(!confirm('Al cambiar el Gist ID se cargarán los datos de ese Gist y los datos locales actuales serán reemplazados.\n\nEl Gist anterior no se modifica.\n\n¿Continuar?'))return;}
+    ownGistId=gistId;
+    if(!activeLabId){var _nid='lab_'+Date.now().toString(36);activeLabId=_nid;labProfiles.push({id:_nid,name:'Laboratorio',token:token,gistId:gistId});}
+    else{var _lab2=_getActiveLab();if(_lab2){_lab2.token=token;_lab2.gistId=gistId;}}
   }
-  // Obtener nombre del lab del campo si existe
-  var _labName=(document.getElementById('ls-labname')||{}).value||'';
-  _labName=_labName.trim();
-  GIST_CONFIG={token:token,gistId:gistId,configured:true};
-  // Si no hay lab activo, crear uno nuevo
-  if(!activeLabId){var _nid='lab_'+Date.now().toString(36);activeLabId=_nid;labProfiles.push({id:_nid,name:_labName||'Laboratorio',token:token,gistId:gistId});}
-  else{var _lab2=_getActiveLab();if(_lab2){if(_labName)_lab2.name=_labName;_lab2.token=token;_lab2.gistId=gistId;}}
-  _saveLabProfiles();
-  _saveGistConfig();
-  loginShowSync=false;
+  GIST_CONFIG={token:token,gistId:ownGistId,configured:true};
+  _saveLabProfiles();_saveGistConfig();
+  _discoverState=null;_selectedDiscoverGistId=null;loginShowSync=false;
   gistBoot().then(function(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';render();}).catch(function(e){console.error('loginSyncSave gistBoot:',e);render();});
 }
 function goStep2(){if(!selectedLoginUser){loginError='Seleccioná un usuario para continuar.';render();return;}loginStep=2;loginError='';render();}
@@ -9256,11 +9425,20 @@ function renderAdmin(){
 
     // ── Laboratorios ──
     +(function(){
+      var _labLocked=labConfigPwd&&!_labConfigUnlocked;
       var labHtml='<div style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px">';
       labHtml+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">'
-        +'<div><div style="font-weight:700;margin-bottom:2px">🏭 Laboratorios</div>'
+        +'<div><div style="font-weight:700;margin-bottom:2px">🏭 Laboratorios '
+          +(_labLocked?'<span style="font-size:12px;color:var(--text3)">🔒</span>':(!labConfigPwd?'':'<span style="font-size:12px;color:var(--green)">🔓</span>'))
+          +'</div>'
         +'<div style="font-size:12px;color:var(--text2)">Cada laboratorio usa sus propios datos y credenciales de GitHub.</div></div>'
-        +'<button class="btn sm pri" onclick="adminAddLab()" style="white-space:nowrap">+ Agregar laboratorio</button>'
+        +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
+        +(_labLocked
+          ?'<button class="btn sm" onclick="adminUnlockLabConfig()" style="color:var(--blue)">🔒 Desbloquear</button>'
+          :'<button class="btn sm pri" onclick="adminAddLab()" style="white-space:nowrap">+ Agregar laboratorio</button>'
+           +'<button class="btn sm" onclick="adminSetLabConfigPwd()" title="'+(labConfigPwd?'Cambiar o quitar contraseña':'Establecer contraseña de configuración')+'" style="color:var(--text3)">'+(labConfigPwd?'🔑 Cambiar clave':'🔑 Establecer clave')+'</button>'
+           +(_labConfigUnlocked?'<button class="btn sm" onclick="adminLockLabConfig()" style="color:var(--text3)">🔒 Bloquear</button>':''))
+        +'</div>'
         +'</div>';
       if(labProfiles.length===0){
         labHtml+='<div style="font-size:12px;color:var(--text3);padding:10px 0">No hay laboratorios configurados.</div>';
@@ -9277,9 +9455,10 @@ function renderAdmin(){
             +'<div style="font-size:11px;color:var(--text3);font-family:var(--mono)">Gist: '+escH(_gistShort)+'</div></div></div>'
             +'<div style="display:flex;gap:5px;flex-shrink:0">'
             +(l.id!==activeLabId?'<button class="btn sm" onclick="adminSwitchLab(\''+l.id+'\')">Activar</button>':'')
-            +'<button class="btn sm" onclick="adminEditLabToggle(\''+l.id+'\')">Editar</button>'
-            +'<button class="btn sm dan" onclick="doLabReset(\''+l.id+'\')" title="Borrar todos los datos de este laboratorio" style="white-space:nowrap">🗑 Borrar datos</button>'
-            +(labProfiles.length>1?'<button class="btn sm dan" onclick="deleteLabProfile(\''+l.id+'\')">🗑</button>':'')
+            +(!_labLocked?'<button class="btn sm" onclick="adminEditLabToggle(\''+l.id+'\')">Editar</button>':'')
+            +(!_labLocked?'<button class="btn sm dan" onclick="doLabReset(\''+l.id+'\')" title="Borrar todos los datos de este laboratorio" style="white-space:nowrap">🗑 Borrar datos</button>':'')
+            +(!_labLocked&&labProfiles.length>1?'<button class="btn sm dan" onclick="deleteLabProfile(\''+l.id+'\')">🗑</button>':'')
+            +(_labLocked?'<span style="font-size:11px;color:var(--text3)">🔒 Bloqueado</span>':'')
             +'</div></div>'
             // Edit form (hidden by default)
             +'<div id="labedit-'+l.id+'" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">'
