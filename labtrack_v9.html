@@ -7503,7 +7503,9 @@ function tRowAna(t,maOverride){
     +((t.observations&&t.observations.length)||(t.completionComments&&t.completionComments.length)||(t.resubmitHistory&&t.resubmitHistory.length)?'<button class="btn sm" onclick="openEdit('+t.id+')" title="Ver comentarios del proceso" style="color:var(--blue)">💬</button>':'')
     +(t._interLab
       ?'<span style="display:inline-flex;align-items:center;gap:3px;font-size:9px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:4px;padding:1px 6px;font-weight:600" title="Solicitud recibida de '+escH((t._interLab&&t._interLab.fromLabName)||'')+'" >🔗 '+escH((t._interLab&&t._interLab.fromLabName)||'Inter-lab')+'</span>'
-      :(_ilrActive?'<span class="pill '+_ilrStatusInfo(_ilrActive.status).cls+'" style="font-size:9px;padding:1px 5px" title="Solicitud inter-lab">🔗 '+escH(_ilrStatusInfo(_ilrActive.status).label)+'</span>':''))
+      :(_ilrActive
+        ?'<span class="pill '+_ilrStatusInfo(_ilrActive.status).cls+'" style="font-size:9px;padding:1px 5px" title="Solicitud inter-lab">🔗 '+escH(_ilrStatusInfo(_ilrActive.status).label)+'</span>'
+        :(taskActive?'<button class="btn sm" onclick="openSolicitudModal('+t.id+')" title="Solicitar análisis inter-laboratorio" style="font-size:10px;padding:2px 4px;color:var(--blue)">🔗</button>':[].join(''))))
     +'</div>'
     +'</div>'
     +(showOverdueWarn
@@ -9000,7 +9002,7 @@ function openSolicitudModal(taskId){
 
   var partnerOpts=labProfiles.filter(function(l){return l.id!==activeLabId;}).map(function(l){return'<option value="lab:'+escH(l.id)+'">'+escH(l.name)+' (interno)</option>';}).join('');
   var extOpts=externalLabs.map(function(l){return'<option value="ext:'+escH(l.id)+'">'+escH(l.name)+'</option>';}).join('');
-  var destOpts='<option value="">Seleccionar destino…</option>'+partnerOpts+extOpts+'<option value="ext:__otro__">Otro laboratorio…</option>';
+  var destOpts='<option value="">Seleccionar destino…</option>'+partnerOpts+extOpts;
 
   // Product/lot display — read-only, sourced from task
   var productBlock='';
@@ -9023,8 +9025,7 @@ function openSolicitudModal(taskId){
     +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px 24px;min-width:340px;max-width:500px;width:92%;box-shadow:var(--shadow-lg);max-height:90vh;overflow-y:auto">'
     +'<div style="font-weight:700;font-size:14px;margin-bottom:14px">Nueva solicitud inter-laboratorio</div>'
     +productBlock
-    +'<div class="frow"><label>Destino</label><select id="sol-destino" onchange="_solDestinoChange()">'+destOpts+'</select></div>'
-    +'<div id="sol-otro-wrap" class="frow" style="display:none"><label>Nombre del laboratorio</label><input type="text" id="sol-otro-nombre" placeholder="Nombre del lab externo"></div>'
+    +'<div class="frow"><label>Destino</label><select id="sol-destino">'+destOpts+'</select></div>'
     +'<div class="frow"><label>Análisis solicitados</label><textarea id="sol-analisis" placeholder="Describa los análisis requeridos…" style="height:70px"></textarea></div>'
     +'<div class="frow"><label>Fecha límite</label><input type="date" id="sol-due" value="'+today()+'"></div>'
     +'<div class="frow"><label>Comentarios</label><textarea id="sol-comments" style="height:50px"></textarea></div>'
@@ -9083,14 +9084,6 @@ async function _saveSolicitud(taskId){
     var destLab=labProfiles.find(function(l){return l.id===destLabId;});
     destName=destLab?destLab.name:destLabId;
     isInternal=true;
-  } else if(destVal==='ext:__otro__'){
-    var otroNombre=document.getElementById('sol-otro-nombre').value.trim();
-    if(!otroNombre){alert('Ingresa el nombre del laboratorio.');return;}
-    destLabId='ext_'+Date.now();
-    destName=otroNombre;
-    // Save to externalLabs
-    externalLabs.push({id:destLabId,name:otroNombre});
-    saveLS();
   } else {
     destLabId=destVal.slice(4);
     var extL=externalLabs.find(function(l){return l.id===destLabId;});
