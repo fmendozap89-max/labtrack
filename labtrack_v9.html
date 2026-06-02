@@ -349,6 +349,14 @@ let auditTrail=[];
 let auditFilterUser='';
 let auditFilterAction='';
 let auditFilterEntity='';
+var _ilrEnvSearch='';
+var _ilrRcvSearch='';
+var _schedSearch='';
+var _ftSearch='';
+var _analystSearch='';
+var _staffFTSearch='';
+var _samplerSearch='';
+var _ingresosSearch='';
 let mgmtListPeriod='week';
 let showImportModal=false,showChangePwd=false;
 let tasksView='lote';
@@ -368,7 +376,7 @@ var activeLabId=null;
 // ── Solicitudes inter-laboratorio ──
 var interLabRequests=[];
 var externalLabs=[];
-var _solicitudesSubView='enviadas';
+var _solicitudesSubView='recibidas';
 var _partnerLabCache={};
 let modalTab='paste',pastePreview=[];
 let replanNotifs=[];
@@ -2497,11 +2505,19 @@ function renderSchedulesWeek(isSup,rows,pendTotal){
     </div>`;
   }).join('')}
 
-  ${isSup&&scheduleRequests.filter(r=>r.status==='pending').length>0?`
-  <div class="sec" style="color:var(--amber)">Solicitudes pendientes</div>
-  <div class="tbl">
+  ${(()=>{
+    const pending=scheduleRequests.filter(r=>r.status==='pending');
+    if(!isSup||!pending.length)return'';
+    const _sq=(_schedSearch||'').toLowerCase().trim();
+    const filtered=_sq?pending.filter(r=>{const u=getU(r.analystId);return u.name.toLowerCase().includes(_sq)||(r.reason||'').toLowerCase().includes(_sq)||(r.dateStr||'').includes(_sq);}):pending;
+    return`<div class="sec" style="color:var(--amber)">Solicitudes pendientes</div>
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <input id="srch-sched" type="text" placeholder="Buscar por analista, motivo o fecha…" value="${escH(_schedSearch||'')}" oninput="_srch('_schedSearch',this.value,'srch-sched')" style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">
+    ${_sq?`<button class="btn sm" onclick="_schedSearch='';render()">✕ Limpiar</button>`:''}
+  </div>
+  ${filtered.length===0?`<div class="empty">Sin resultados para "${escH(_sq)}"</div>`:`<div class="tbl">
     <div class="thead" style="grid-template-columns:1.2fr .9fr 1.3fr 1.4fr .7fr .7fr"><div>Analista</div><div>Día</div><div>Horario</div><div>Motivo</div><div>Jornada</div><div></div></div>
-    ${scheduleRequests.filter(r=>r.status==='pending').sort((a,b)=>b.ts-a.ts).map(req=>{
+    ${filtered.sort((a,b)=>b.ts-a.ts).map(req=>{
       const u=getU(req.analystId);const h=calcHours(req.proposed);
       return`<div class="trow" style="grid-template-columns:1.2fr .9fr 1.3fr 1.4fr .7fr .7fr">
         <div style="display:flex;align-items:center;gap:6px"><div class="av ${u.av}">${escH(u.avInit)}</div>${escH(u.name.split(' ')[0])}</div>
@@ -2512,7 +2528,8 @@ function renderSchedulesWeek(isSup,rows,pendTotal){
         <div style="display:flex;gap:4px"><button class="btn sm suc" onclick="approveSchedule(${req.id})">✓</button><button class="btn sm dan" onclick="rejectSchedule(${req.id})">✕</button></div>
       </div>`;
     }).join('')}
-  </div>`:''}`;
+  </div>`}`;
+  })()}`;
 }
 
 function renderSchedulesMonth(isSup,rows){
@@ -3266,12 +3283,18 @@ function renderFreeTasksTable(isSup){
   if(typeof window.ftFilterMonth==='undefined') window.ftFilterMonth='';
   var fa=window.ftFilterAnalyst;
   var fm=window.ftFilterMonth;
+  var fts=(_ftSearch||'').toLowerCase().trim();
 
   // Filtered list
   var list=freeTasks.filter(function(ft){
     if(!isSup&&ft.analystId!==currentUser.id) return false;
     if(fa&&ft.analystId!==fa) return false;
     if(fm&&ft.date.slice(0,7)!==fm) return false;
+    if(fts&&!(
+      (ft.description||'').toLowerCase().includes(fts)||
+      (ft.notes||'').toLowerCase().includes(fts)||
+      (getU(ft.analystId).name||'').toLowerCase().includes(fts)
+    )) return false;
     return true;
   }).sort(function(a,b){return(b.date||'').localeCompare(a.date||'');});
 
@@ -3281,6 +3304,10 @@ function renderFreeTasksTable(isSup){
   var html='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">';
   // Create button (supervisor = assign to anyone; non-sup = register own task)
   html+='<button class="btn pri" onclick="openFreeTaskModal(null)" style="font-size:13px;padding:7px 14px">'+(isSup?'+ Nueva actividad libre':'+ Registrar tarea libre')+'</button>';
+  // Text search
+  html+='<input id="srch-ft" type="text" placeholder="Buscar por descripción, comentario o usuario…" value="'+escH(_ftSearch||'')+'"'
+    +' oninput="_srch(\'_ftSearch\',this.value,\'srch-ft\')"'
+    +' style="flex:1;min-width:160px;padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)">';
   // Analyst filter (supervisor only)
   if(isSup){
     html+='<select onchange="window.ftFilterAnalyst=this.value;render()" style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;background:var(--surface)">'
@@ -3294,7 +3321,7 @@ function renderFreeTasksTable(isSup){
     +months.map(function(m){var d=new Date(m+'-01');return'<option value="'+m+'"'+(fm===m?' selected':'')+'>'
       +d.toLocaleDateString('es',{month:'long',year:'numeric'})+'</option>';}).join('')
     +'</select>';
-  if(fa||fm) html+='<button class="btn sm" onclick="window.ftFilterAnalyst=\'\';window.ftFilterMonth=\'\';render()">✕ Limpiar</button>';
+  if(fa||fm||fts) html+='<button class="btn sm" onclick="window.ftFilterAnalyst=\'\';window.ftFilterMonth=\'\';_ftSearch=\'\';render()">✕ Limpiar</button>';
   html+='<span style="font-size:12px;color:var(--text3)">'+list.length+' registro(s)</span>';
   html+='<div style="display:flex;gap:5px;margin-left:auto">'
     +'<button class="btn sm" onclick="copyFreeTasks(this)">📋 Copiar</button>'
@@ -5083,11 +5110,16 @@ function renderLimpVal(){
     +(sup?'<button class="btn sm" onclick="exportTipoXLSX([\'Limp\',\'Val\'],\'limpiezas_validaciones\')">↓ Excel</button>':'')
     +'</div>';
 
-  // Tipo filter chips
-  var tipoChips='<div style="display:flex;gap:5px;margin-bottom:10px">'
-    +'<button onclick="window._lvTipoFilter=\'\';render()" style="padding:3px 12px;border:1px solid var(--border);border-radius:20px;font-size:11px;cursor:pointer;background:'+(!(window._lvTipoFilter||'')?'var(--blue);color:#fff':'var(--surface);color:var(--text2)')+';font-weight:'+(!(window._lvTipoFilter||'')?'700':'400')+'">Todos</button>'
-    +'<button onclick="window._lvTipoFilter=\'Limp\';render()" style="padding:3px 12px;border:1px solid var(--border);border-radius:20px;font-size:11px;cursor:pointer;background:'+((window._lvTipoFilter||'')==='Limp'?'#fef3c7;color:#92400e':'var(--surface);color:var(--text2)')+';font-weight:'+((window._lvTipoFilter||'')==='Limp'?'700':'400')+'">Limp</button>'
-    +'<button onclick="window._lvTipoFilter=\'Val\';render()" style="padding:3px 12px;border:1px solid var(--border);border-radius:20px;font-size:11px;cursor:pointer;background:'+((window._lvTipoFilter||'')==='Val'?'#f3e8ff;color:#6b21a8':'var(--surface);color:var(--text2)')+';font-weight:'+((window._lvTipoFilter||'')==='Val'?'700':'400')+'">Val</button>'
+  // Tipo filter chips — same pattern as _tipoFilterBar
+  var _lvTf=window._lvTipoFilter||'';
+  var tipoChips='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">'
+    +'<button class="btn sm" onclick="window._lvTipoFilter=\'\';render()" style="'+(!_lvTf?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent;color:var(--text2)')+'">Todos</button>'
+    +['Limp','Val'].map(function(id){
+      var st=SAMPLE_TYPES.find(function(s){return s.id===id;});
+      if(!st)return'';
+      var active=_lvTf===id;
+      return'<button class="btn sm" onclick="window._lvTipoFilter=\''+id+'\';render()" style="'+(active?'background:'+st.color+';color:#fff;border-color:'+st.color:'border-color:'+st.color+';color:'+st.color)+';font-weight:700" title="'+st.title+'">'+st.label+'</button>';
+    }).join('')
     +'</div>';
 
   var list=(limpvalTab==='activas'?activas:aprobadas).filter(function(t){
@@ -5883,12 +5915,23 @@ function renderSugerencias(){
   // Sección: Productos pendientes de ingreso (abajo)
   html+='<div style="border-top:1px solid var(--border);padding-top:20px">';
   if(_aIngresar.length>0){
-    var _filteredAI=_ingresosTypeFilter.length?_aIngresar.filter(function(t){return _ingresosTypeFilter.indexOf(t.tipo||'')>=0;}):_aIngresar;
+    var _isq=(_ingresosSearch||'').toLowerCase().trim();
+    var _filteredAI=_aIngresar.filter(function(t){
+      if(_ingresosTypeFilter.length&&_ingresosTypeFilter.indexOf(t.tipo||'')<0) return false;
+      if(_isq&&!(t.producto.toLowerCase().includes(_isq)||(t.lote||'').toLowerCase().includes(_isq))) return false;
+      return true;
+    });
     var _typesInList=[...new Set(_aIngresar.map(function(t){return t.tipo||'';}))].filter(Boolean);
     html+='<div style="margin-bottom:16px">'
       +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'
       +'<div style="font-size:14px;font-weight:700;color:#7c3aed">📥 Productos pendientes de ingreso</div>'
       +'<span style="background:#7c3aed;color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700">'+_aIngresar.length+'</span>'
+      +'</div>'
+      +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">'
+      +'<input id="srch-ingresos" type="text" placeholder="Buscar por producto o lote…" value="'+escH(_ingresosSearch||'')+'"'
+      +' oninput="_srch(\'_ingresosSearch\',this.value,\'srch-ingresos\')"'
+      +' style="flex:1;min-width:160px;padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)">'
+      +(_isq?'<button class="btn sm" onclick="_ingresosSearch=\'\';render()">✕</button>':'')
       +'</div>'
       +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
       +SAMPLE_TYPES.filter(function(st){return _typesInList.indexOf(st.id)>=0;}).map(function(st){
@@ -6646,11 +6689,13 @@ function renderAuditTrail() {
   const filterUser = auditFilterUser||'';
   const filterAction = auditFilterAction||'';
   const filterEntity = auditFilterEntity||'';
-  
+  const filterText = (window.auditFilterText||'').toLowerCase().trim();
+
   let f = entries;
   if(filterUser) f = f.filter(function(e){return (e.userId||e.user)===filterUser||(e.userName||'').toLowerCase().includes(filterUser.toLowerCase());});
   if(filterAction) f = f.filter(function(e){return e.action===filterAction;});
   if(filterEntity) f = f.filter(function(e){return e.entity===filterEntity;});
+  if(filterText) f = f.filter(function(e){return (e.userName||'').toLowerCase().includes(filterText)||(e.entity||'').toLowerCase().includes(filterText)||((e.details&&e.details.description)||'').toLowerCase().includes(filterText)||((e.details&&e.details.field)||'').toLowerCase().includes(filterText)||String(e.entityId||'').includes(filterText)||(e.reason||'').toLowerCase().includes(filterText);});
 
   const actionColors = {
     CREATE:'var(--green)',EDIT:'var(--blue)',STATUS_CHANGE:'var(--amber)',
@@ -6688,6 +6733,7 @@ function renderAuditTrail() {
   return '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center">'
     +'<div class="sec" style="margin-bottom:0">Audit Trail</div>'
     +'<span style="font-size:11px;color:var(--text3)">'+f.length+' registros'+(f.length>200?' (mostrando 200 más recientes)':'')+'</span>'
+    +'<input id="srch-audit" type="text" placeholder="Buscar…" value="'+escH(window.auditFilterText||'')+'" oninput="_srch(\'auditFilterText\',this.value,\'srch-audit\')" style="padding:4px 8px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text);width:140px">'
     +'<select onchange="auditFilterUser=this.value;render()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
     +'<option value="">Todos los usuarios</option>'+userOpts+'</select>'
     +'<select onchange="auditFilterAction=this.value;render()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
@@ -7087,13 +7133,26 @@ function renderStaffFreeTasksWidget(){
 
 // ── Vista de tareas libres completa para staff/sampler ──
 function renderStaffFreeTasks(){
-  var myFT=freeTasks.filter(function(ft){return ft.analystId===currentUser.id;})
-    .sort(function(a,b){return(b.date||'').localeCompare(a.date||'');});
-  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
+  var _sfq=(_staffFTSearch||'').toLowerCase().trim();
+  var myFT=freeTasks.filter(function(ft){
+    if(ft.analystId!==currentUser.id) return false;
+    if(_sfq&&!(
+      (ft.description||'').toLowerCase().includes(_sfq)||
+      (ft.completionComment||'').toLowerCase().includes(_sfq)||
+      (ft.date||'').includes(_sfq)
+    )) return false;
+    return true;
+  }).sort(function(a,b){return(b.date||'').localeCompare(a.date||'');});
+  var html='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">'
     +'<div class="sec" style="margin-bottom:0">Mis tareas libres</div>'
-    +'<button class="btn pri" onclick="openFreeTaskModal(null)">+ Agregar tarea</button>'
+    +'<input id="srch-staffft" type="text" placeholder="Buscar por descripción o fecha…" value="'+escH(_staffFTSearch||'')+'"'
+    +' oninput="_srch(\'_staffFTSearch\',this.value,\'srch-staffft\')"'
+    +' style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)">'
+    +(_sfq?'<button class="btn sm" onclick="_staffFTSearch=\'\';render()">✕ Limpiar</button>':'')
+    +'<button class="btn pri" onclick="openFreeTaskModal(null)">+ Agregar</button>'
     +'</div>';
-  if(myFT.length===0)return html+'<div class="empty" style="padding:32px">Sin tareas libres registradas.</div>';
+  if(myFT.length===0)return html+'<div class="empty" style="padding:32px">'
+    +(_sfq?'Sin resultados para «'+escH(_sfq)+'»':'Sin tareas libres registradas.')+'</div>';
   return html+'<div>'+myFT.map(function(ft){
     var isAssignedBySup=ft.assignedBy&&ft.assignedBy!==currentUser.id;
     var stC=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'||ft.status==='declined'?'var(--red)':ft.status==='pending'?'var(--blue)':'var(--amber)';
@@ -7122,7 +7181,12 @@ function renderStaffFreeTasks(){
 
 // ── Vista principal del muestreador ──
 function renderSamplerView(){
-  var all=activeTasks().filter(function(t){return t.status==='a-ingresar'||t.status==='muestra-ok';});
+  var _smq=(_samplerSearch||'').toLowerCase().trim();
+  var all=activeTasks().filter(function(t){
+    if(t.status!=='a-ingresar'&&t.status!=='muestra-ok') return false;
+    if(_smq&&!(t.producto.toLowerCase().includes(_smq)||(t.lote||'').toLowerCase().includes(_smq))) return false;
+    return true;
+  });
   var myAssigned=all.filter(function(t){return(t.samplerAssignments||[]).some(function(s){return s.sampler===currentUser.id;});});
   var others=all.filter(function(t){return!(t.samplerAssignments||[]).some(function(s){return s.sampler===currentUser.id;});});
 
@@ -7155,7 +7219,14 @@ function renderSamplerView(){
       +'</div>';
   }
 
-  var html='';
+  var searchBar='<div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">'
+    +'<input id="srch-sampler" type="text" placeholder="Buscar por producto o lote…" value="'+escH(_samplerSearch||'')+'"'
+    +' oninput="_srch(\'_samplerSearch\',this.value,\'srch-sampler\')"'
+    +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+    +(_smq?'<button class="btn sm" onclick="_samplerSearch=\'\';render()">✕ Limpiar</button>':'')
+    +'</div>';
+
+  var html=searchBar;
   if(myAssigned.length){
     html+='<div class="sec" style="margin-bottom:8px">📦 Mis asignaciones de muestreo</div>'
       +myAssigned.map(function(t){return taskCard(t,true);}).join('');
@@ -7164,7 +7235,8 @@ function renderSamplerView(){
     html+='<div class="sec" style="margin-top:16px;margin-bottom:8px;color:var(--text3)">Otros productos a ingresar (sin asignación propia)</div>'
       +others.map(function(t){return taskCard(t,false);}).join('');
   }
-  if(!all.length)html='<div class="empty" style="padding:40px">No hay productos "A ingresar" en este momento ✓</div>';
+  if(!all.length)html=searchBar+'<div class="empty" style="padding:40px">'
+    +(_smq?'Sin resultados para «'+escH(_smq)+'»':'No hay productos "A ingresar" en este momento ✓')+'</div>';
   return html;
 }
 
@@ -7512,7 +7584,7 @@ function tRowSupLote(t){
       +(t.status==='reviewed'&&isSupRole()?'<button class="btn sm" style="background:var(--blue);color:#fff;border-color:var(--blue);font-size:11px;font-weight:600;padding:3px 9px" onclick="event.stopPropagation();markApproved('+t.id+')">✓ Aprobar</button>':'')
       +((t.status==='done'||t.status==='reviewed')&&(isSupRole()||isReviewerRole())?'<button class="btn sm" style="background:var(--amber-bg);color:var(--amber-text);border-color:var(--amber);font-size:11px;padding:3px 7px" onclick="event.stopPropagation();markObserved('+t.id+')" title="Observar">⚑ Obs.</button>':'')
       +(isSupRole()?'<button class="btn sm" title="Replanificar" onclick="event.stopPropagation();openReplanSuper('+t.id+')" style="font-size:10px;padding:2px 4px">↺</button>':'')
-      +(isSupRole()||isReviewerRole()?'<button class="btn sm" title="Solicitud inter-lab" onclick="event.stopPropagation();openSolicitudModal('+t.id+')" style="font-size:10px;padding:2px 4px;color:var(--blue)" title="Crear solicitud inter-lab">↗</button>':'')
+      +((isSupRole()||isReviewerRole())&&t.tipo!=='IL'&&t.status!=='reviewed'&&t.status!=='approved'?'<button class="btn sm" title="Solicitud inter-lab" onclick="event.stopPropagation();openSolicitudModal('+t.id+')" style="font-size:10px;padding:2px 4px;color:var(--blue)" title="Crear solicitud inter-lab">↗</button>':'')
       +(isSupRole()?'<button class="btn sm" style="color:var(--text3);padding:2px 4px" title="Eliminar" onclick="event.stopPropagation();deleteTask('+t.id+')">🗑</button>':'')
       +'</div>';
   return row+'</div>';
@@ -7674,7 +7746,7 @@ function tRowAna(t,maOverride){
       ?'<span style="display:inline-flex;align-items:center;gap:3px;font-size:9px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:4px;padding:1px 6px;font-weight:600" title="Solicitud recibida de '+escH((t._interLab&&t._interLab.fromLabName)||'')+'" >🔗 '+escH((t._interLab&&t._interLab.fromLabName)||'Inter-lab')+'</span>'
       :(_ilrActive
         ?'<span class="pill '+_ilrStatusInfo(_ilrActive.status).cls+'" style="font-size:9px;padding:1px 5px" title="Solicitud inter-lab">🔗 '+escH(_ilrStatusInfo(_ilrActive.status).label)+'</span>'
-        :(taskActive?'<button class="btn sm" onclick="openSolicitudModal('+t.id+')" title="Solicitar análisis inter-laboratorio" style="font-size:10px;padding:2px 4px;color:var(--blue)">🔗</button>':[].join(''))))
+        :(taskActive&&t.tipo!=='IL'&&t.status!=='reviewed'&&t.status!=='approved'?'<button class="btn sm" onclick="openSolicitudModal('+t.id+')" title="Solicitar análisis inter-laboratorio" style="font-size:10px;padding:2px 4px;color:var(--blue)">🔗</button>':'')))
     +'</div>'
     +'</div>'
     +(showOverdueWarn
@@ -8526,7 +8598,18 @@ function renderWeek(){
 function renderAnalysts(){
   const isSup=isSupRole();
   if(!ANALYSTS.length) return '<div class="empty">Sin analistas registrados</div>';
-  return ANALYSTS.map(function(a){
+  var _aq=(_analystSearch||'').toLowerCase().trim();
+  var list=_aq
+    ?ANALYSTS.filter(function(a){return a.name.toLowerCase().includes(_aq)||(a.role||'').toLowerCase().includes(_aq);})
+    :ANALYSTS;
+  var searchBar='<div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">'
+    +'<input id="srch-analysts" type="text" placeholder="Buscar por nombre o rol…" value="'+escH(_analystSearch||'')+'"'
+    +' oninput="_srch(\'_analystSearch\',this.value,\'srch-analysts\')"'
+    +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+    +(_aq?'<button class="btn sm" onclick="_analystSearch=\'\';render()">✕ Limpiar</button>':'')
+    +'</div>';
+  if(!list.length) return searchBar+'<div class="empty">Sin analistas para «'+escH(_aq)+'»</div>';
+  return searchBar+list.map(function(a){
     const myT=activeTasks().filter(function(t){return (t.assignments||[]).some(function(x){return x.analyst===a.id;});});
     const pend=myT.filter(function(t){return t.status==='pending'||t.status==='scheduled'||t._dueStatus==='late';}).length;
     const prog=myT.filter(function(t){return t.status==='progress'||t.status==='pending-confirm';}).length;
@@ -8770,19 +8853,34 @@ function renderSolicitudes(){
       });
     }
 
+    var _eq=(_ilrEnvSearch||'').toLowerCase().trim();
+    if(_eq) myReqs=myReqs.filter(function(r){
+      var t2=r.taskId?tasks.find(function(x){return x.id===r.taskId;}):null;
+      return (r.producto||'').toLowerCase().includes(_eq)
+        ||(r.lote||'').toLowerCase().includes(_eq)
+        ||(_ilrLabName(r.destLabId)||'').toLowerCase().includes(_eq)
+        ||(r.analisis||'').toLowerCase().includes(_eq)
+        ||(t2&&t2.producto?t2.producto.toLowerCase().includes(_eq):false);
+    });
+
+    html+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'
+      +(isSup||isRev?'<button class="btn pri sm" onclick="openSolicitudModal(null)">+ Nueva solicitud</button>':'')
+      +'<input id="srch-ilr-env" type="text" placeholder="Buscar por producto, lote, destino o análisis…" value="'+escH(_ilrEnvSearch||'')+'"'
+      +' oninput="_srch(\'_ilrEnvSearch\',this.value,\'srch-ilr-env\')"'
+      +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+      +(_eq?'<button class="btn sm" onclick="_ilrEnvSearch=\'\';render()">✕ Limpiar</button>':'')
+      +'</div>';
+
     if(!myReqs.length){
-      html+='<div class="empty">No hay solicitudes enviadas.</div>';
-      if(isSup||isRev){
-        html+='<div style="margin-top:8px"><button class="btn pri sm" onclick="openSolicitudModal(null)">+ Nueva solicitud</button></div>';
-      }
+      html+='<div class="empty">'+(_eq?'Sin resultados para "'+escH(_eq)+'"':'No hay solicitudes enviadas.')+'</div>';
     } else {
-      if(isSup||isRev){
-        html+='<div style="margin-bottom:10px"><button class="btn pri sm" onclick="openSolicitudModal(null)">+ Nueva solicitud</button></div>';
-      }
-      html+='<div class="tbl"><div class="thead" style="grid-template-columns:2fr 1.2fr 1.4fr .9fr .9fr 1.1fr 1fr 1fr">'
+      var _envActive=myReqs.filter(function(r){return r.status!=='completado';}).sort(function(a,b){return(b.ts||0)-(a.ts||0);});
+      var _envClosed=myReqs.filter(function(r){return r.status==='completado';}).sort(function(a,b){return(b.completedTs||b.ts||0)-(a.completedTs||a.ts||0);});
+      var _colEnv='2fr 1.2fr 1.4fr .9fr .9fr 1.1fr 1fr 1fr';
+      var _theadEnv='<div class="tbl"><div class="thead" style="grid-template-columns:'+_colEnv+'">'
         +'<div>Producto / Lote</div><div>Destino</div><div>Análisis</div><div>Enviado</div><div>Fecha límite</div><div>Estado</div><div>Asignado en destino</div><div>Acciones</div>'
         +'</div>';
-      myReqs.slice().sort(function(a,b){return (b.ts||0)-(a.ts||0);}).forEach(function(req){
+      function _envRow(req){
         var si=_ilrStatusInfo(req.status);
         var destName=_ilrLabName(req.destLabId);
         var sentDate=req.ts?fmtDF(new Date(req.ts).toISOString().slice(0,10)):'—';
@@ -8792,7 +8890,8 @@ function renderSolicitudes(){
         var prodLote=t?(escH(t.producto)+' / <span style="font-family:var(--mono);font-size:11px">'+escH(t.lote)+'</span>'):(req.producto?escH(req.producto)+(req.lote?' / <span style="font-family:var(--mono);font-size:11px">'+escH(req.lote)+'</span>':''):'—');
         var canComplete=req.status==='docs_enviados'&&(isSup||isRev);
         var canDelete=(isSup||isRev)&&req.status!=='completado';
-        html+='<div class="trow" style="grid-template-columns:2fr 1.2fr 1.4fr .9fr .9fr 1.1fr 1fr 1fr;cursor:default">'
+        var isClosed=req.status==='completado';
+        return'<div class="trow" style="grid-template-columns:'+_colEnv+';cursor:default'+(isClosed?';opacity:.7':'')+'">'
           +'<div>'+prodLote+'</div>'
           +'<div style="font-size:11px">'+escH(destName)+'</div>'
           +'<div style="font-size:11px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escH(req.analisis||'')+'">'+escH((req.analisis||'').slice(0,40))+'</div>'
@@ -8806,13 +8905,34 @@ function renderSolicitudes(){
           +(canDelete?'<button class="btn sm" style="color:var(--text3)" onclick="event.stopPropagation();_deleteILR(\''+req.id+'\')" title="Eliminar solicitud">🗑</button>':'')
           +'</div>'
           +'</div>';
-      });
-      html+='</div>';
+      }
+      if(_envActive.length){
+        html+='<div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Activas ('+_envActive.length+')</div>';
+        html+=_theadEnv+_envActive.map(_envRow).join('')+'</div>';
+      }
+      if(_envClosed.length){
+        html+='<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 6px;display:flex;align-items:center;gap:6px">'
+          +'Cerradas ('+_envClosed.length+')'
+          +'<span style="flex:1;border-top:1px solid var(--border);margin-left:6px"></span>'
+          +'</div>';
+        html+=_theadEnv+_envClosed.map(_envRow).join('')+'</div>';
+      }
+      if(!_envActive.length&&!_envClosed.length){
+        html+='<div class="empty">Sin resultados para "'+escH(_eq)+'"</div>';
+      }
     }
   } else {
-    // Tab Recibidas — async load
-    var _rcvContainerId='ilr-rcv-'+Date.now();
-    html+='<div id="'+_rcvContainerId+'"><div style="display:flex;align-items:center;gap:8px;color:var(--text2);padding:20px 0"><span style="font-size:18px;animation:spin 1s linear infinite;display:inline-block">⟳</span> Cargando solicitudes recibidas…</div></div>';
+    // Tab Recibidas — search bar (static) + async results container
+    var _rcvContainerId='ilr-rcv-list';
+    window._ilrRcvArgs={partnerLabs:partnerLabs,containerId:_rcvContainerId,isSup:isSup,isRev:isRev,uid:uid};
+    var _rqStatic=(_ilrRcvSearch||'').toLowerCase().trim();
+    html+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'
+      +'<input id="ilr-rcv-search" type="text" placeholder="Buscar por producto, lote, laboratorio o análisis…" value="'+escH(_ilrRcvSearch||'')+'"'
+      +' oninput="_ilrRcvSearch=this.value;var a=window._ilrRcvArgs;if(a)_loadRecibidas(a.partnerLabs,a.containerId,a.isSup,a.isRev,a.uid)"'
+      +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+      +(_rqStatic?'<button class="btn sm" onclick="_ilrRcvSearch=\'\';var a=window._ilrRcvArgs;if(a)_loadRecibidas(a.partnerLabs,a.containerId,a.isSup,a.isRev,a.uid)">✕ Limpiar</button>':'')
+      +'</div>'
+      +'<div id="'+_rcvContainerId+'"><div style="display:flex;align-items:center;gap:8px;color:var(--text2);padding:20px 0"><span style="font-size:18px;animation:spin 1s linear infinite;display:inline-block">⟳</span> Cargando solicitudes recibidas…</div></div>';
     // Trigger async load after render
     setTimeout(function(){_loadRecibidas(partnerLabs,_rcvContainerId,isSup,isRev,uid);},50);
   }
@@ -8849,32 +8969,52 @@ async function _loadRecibidas(partnerLabs,containerId,isSup,isRev,uid){
     return;
   }
 
-  var html='<div class="tbl"><div class="thead" style="grid-template-columns:2fr 1.2fr 1.4fr .9fr .9fr 1.1fr 1fr 1.2fr">'
+  var _rq=(_ilrRcvSearch||'').toLowerCase().trim();
+  if(_rq) shown=shown.filter(function(req){
+    return (req.producto||'').toLowerCase().includes(_rq)
+      ||(req.lote||'').toLowerCase().includes(_rq)
+      ||(req._fromLabName||'').toLowerCase().includes(_rq)
+      ||(req.analisis||'').toLowerCase().includes(_rq);
+  });
+
+  if(!shown.length){
+    el.innerHTML='<div class="empty">'+(_rq?'Sin resultados para "'+escH(_rq)+'"':'No hay solicitudes recibidas.')+'</div>';
+    return;
+  }
+
+  var _rcvActive=shown.filter(function(r){return r.status!=='completado';}).sort(function(a,b){return(b.ts||0)-(a.ts||0);});
+  var _rcvClosed=shown.filter(function(r){return r.status==='completado';}).sort(function(a,b){return(b.completedTs||b.ts||0)-(a.completedTs||a.ts||0);});
+  var _colRcv='2fr 1.2fr 1.4fr .9fr .9fr 1.1fr 1fr 1.2fr';
+  var _theadRcv='<div class="tbl"><div class="thead" style="grid-template-columns:'+_colRcv+'">'
     +'<div>Producto / Lote</div><div>Origen</div><div>Análisis</div><div>Recibido</div><div>Fecha límite</div><div>Estado</div><div>Asignado a</div><div>Acciones</div>'
     +'</div>';
 
-  shown.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).forEach(function(req){
+  function _rcvRowHtml(req){
     var si=_ilrStatusInfo(req.status);
     var sentDate=req.ts?fmtDF(new Date(req.ts).toISOString().slice(0,10)):'—';
     var limitDate=req.dueDate?fmtDF(req.dueDate):'—';
     var assignedName=req.assignedToName||req.assignedToId||'—';
     var prodLote=req.producto?escH(req.producto)+(req.lote?' / <span style="font-family:var(--mono);font-size:11px">'+escH(req.lote)+'</span>':''):'—';
-    var canEdit=(isSup||isRev)&&req.status!=='completado';
-    var ANALYSTS_LOCAL=USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer';});
-    var analystOpts=ANALYSTS_LOCAL.map(function(a){return'<option value="'+escH(a.id)+'"'+(req.assignedToId===a.id?' selected':'')+'>'+escH(a.name)+'</option>';}).join('');
-    var statusOpts=['pendiente','en_proceso','docs_enviados'].map(function(s){var si2=_ilrStatusInfo(s);return'<option value="'+s+'"'+(req.status===s?' selected':'')+'>'+si2.icon+' '+si2.label+'</option>';}).join('');
-    // Check if a local task already exists for this request
+    var canReceive=isSup&&req.status!=='completado';
+    var canSendDocs=(isSup||isRev)&&req.status!=='completado';
     var localTask=tasks.find(function(t){return t._interLab&&t._interLab.sourceId===req.id&&!t._deleted;});
+    var ltActBtns='';
+    if(localTask){
+      var _ltStatus=localTask.status;
+      if(_ltStatus==='done'&&(isSup||isRev)) ltActBtns+='<button class="btn sm" style="background:var(--blue);color:#fff;border-color:var(--blue);font-size:11px;padding:2px 7px" onclick="event.stopPropagation();markReviewed('+localTask.id+')" title="Revisar tarea IL">✓ Revisar</button>';
+      if((_ltStatus==='done'||_ltStatus==='reviewed')&&(isSup||isRev)) ltActBtns+='<button class="btn sm" style="background:var(--amber-bg);color:var(--amber-text);border-color:var(--amber);font-size:11px;padding:2px 7px" onclick="event.stopPropagation();markObserved('+localTask.id+')" title="Observar">⚑ Obs.</button>';
+      if(_ltStatus==='reviewed'&&isSup) ltActBtns+='<button class="btn sm" style="background:var(--blue);color:#fff;border-color:var(--blue);font-size:11px;padding:2px 7px" onclick="event.stopPropagation();markApproved('+localTask.id+')" title="Aprobar tarea IL">✓ Aprobar</button>';
+    }
     var localTaskHtml=localTask
-      ?'<div style="font-size:10px;background:#f0fdf4;border:1px solid #86efac;border-radius:3px;padding:2px 6px;color:#166534">'
+      ?'<div style="font-size:10px;background:#f0fdf4;border:1px solid #86efac;border-radius:3px;padding:2px 6px;color:#166534;display:flex;align-items:center;gap:5px;flex-wrap:wrap">'
         +'✓ Tarea #'+localTask.id
         +(localTask.assignments&&localTask.assignments.length?' · '+(getU(localTask.assignments[0].analyst)||{name:'?'}).name:'')
         +' <span class="pill '+localTask.status+'" style="font-size:9px">'+statusLabel(localTask.status)+'</span>'
         +' <a href="#" onclick="event.preventDefault();closeModal&&closeModal();openEdit('+localTask.id+')" style="color:#166534;font-weight:600">Ver →</a>'
+        +ltActBtns
         +'</div>'
       :'';
-
-    html+='<div class="trow" style="grid-template-columns:2fr 1.2fr 1.4fr .9fr .9fr 1.1fr 1fr 1.2fr;cursor:default">'
+    return '<div class="trow" style="grid-template-columns:'+_colRcv+';cursor:default'+(req.status==='completado'?';opacity:.7':'')+'">'
       +'<div>'+prodLote+'</div>'
       +'<div style="font-size:11px">'+escH(req._fromLabName||'?')+'</div>'
       +'<div style="font-size:11px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escH(req.analisis||'')+'">'+escH((req.analisis||'').slice(0,40))+'</div>'
@@ -8883,15 +9023,27 @@ async function _loadRecibidas(partnerLabs,containerId,isSup,isRev,uid){
       +'<div><span class="pill '+si.cls+'" style="font-size:10px">'+si.icon+' '+escH(si.label)+'</span>'+(localTask?'<br><span style="font-size:10px;color:var(--text3)">Local: <span class="pill '+localTask.status+'" style="font-size:9px">'+statusLabel(localTask.status)+'</span></span>':'')+'</div>'
       +'<div style="font-size:11px">'+(localTask&&localTask.assignments&&localTask.assignments.length?(getU(localTask.assignments[0].analyst)||{name:'—'}).name:escH(assignedName))+'</div>'
       +'<div onclick="event.stopPropagation()" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">'
-      +(canEdit&&req.status==='pendiente'&&!localTask?'<button class="btn sm suc" onclick="event.stopPropagation();_rcvMarkReceived(\''+escH(req.id)+'\',\''+escH(JSON.stringify(req._fromLab||{}).replace(/'/g,''))+'\')">✓ Recibir y crear tarea</button>':'')
+      +(canReceive&&req.status==='pendiente'&&!localTask?'<button class="btn sm suc" onclick="event.stopPropagation();_rcvMarkReceived(\''+escH(req.id)+'\',\''+escH(JSON.stringify(req._fromLab||{}).replace(/'/g,''))+'\')">✓ Recibir y crear tarea</button>':'')
       +(localTask?'<button class="btn sm pri" onclick="event.stopPropagation();openEdit('+localTask.id+')">📋 Ver tarea</button>':'')
-      +(canEdit&&localTask&&req.status==='en_proceso'?'<button class="btn sm suc" onclick="event.stopPropagation();_rcvSendDocs(\''+escH(req.id)+'\',\''+escH(JSON.stringify(req._fromLab||{}).replace(/'/g,''))+'\')" title="Marcar documentación como enviada al laboratorio emisor">📨 Docs listos</button>':'')
-      +(canEdit&&!localTask?'<button class="btn sm pri" onclick="event.stopPropagation();_openRcvUpdateModal(\''+escH(req.id)+'\',\''+escH(JSON.stringify(req._fromLab).replace(/'/g,''))+'\')">✏ Actualizar</button>':'')
+      +(canSendDocs&&localTask&&req.status==='en_proceso'?'<button class="btn sm suc" onclick="event.stopPropagation();_rcvSendDocs(\''+escH(req.id)+'\',\''+escH(JSON.stringify(req._fromLab||{}).replace(/'/g,''))+'\')" title="Marcar documentación como enviada al laboratorio emisor">📨 Docs listos</button>':'')
+      +(canReceive&&!localTask?'<button class="btn sm pri" onclick="event.stopPropagation();_openRcvUpdateModal(\''+escH(req.id)+'\',\''+escH(JSON.stringify(req._fromLab).replace(/'/g,''))+'\')">✏ Actualizar</button>':'')
       +localTaskHtml
       +'</div>'
       +'</div>';
-  });
-  html+='</div>';
+  }
+
+  var html='';
+  if(_rcvActive.length){
+    html+='<div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Activas ('+_rcvActive.length+')</div>';
+    html+=_theadRcv+_rcvActive.map(_rcvRowHtml).join('')+'</div>';
+  }
+  if(_rcvClosed.length){
+    html+='<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 6px;display:flex;align-items:center;gap:6px">'
+      +'Cerradas ('+_rcvClosed.length+')'
+      +'<span style="flex:1;border-top:1px solid var(--border);margin-left:6px"></span>'
+      +'</div>';
+    html+=_theadRcv+_rcvClosed.map(_rcvRowHtml).join('')+'</div>';
+  }
   if(el)el.innerHTML=html;
 }
 
@@ -9053,8 +9205,27 @@ async function _showILRDetails(reqId){
     +'<div style="display:flex;align-items:center;gap:8px"><span style="color:var(--text2)">Estado:</span> <span class="pill '+si.cls+'" style="font-size:10px">'+si.icon+' '+escH(si.label)+'</span></div>'
     +(req.analisis?'<div><span style="color:var(--text2)">Análisis solicitado:</span> '+escH(req.analisis)+'</div>':'')
     +(req.dueDate?'<div><span style="color:var(--text2)">Fecha límite:</span> <span style="font-family:var(--mono)">'+fmtDF(req.dueDate)+'</span></div>':'')
-    +(req.receivedByName?'<div><span style="color:var(--text2)">Recibido por:</span> '+escH(req.receivedByName)+'</div>':'')
-    +(req.completedTs?'<div><span style="color:var(--text2)">Completado:</span> <span style="font-family:var(--mono)">'+fmtDF(new Date(req.completedTs).toISOString().slice(0,10))+'</span></div>':'')
+    +'</div>'
+    +'<div style="margin-bottom:14px">'
+    +'<div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">Historial de pasos</div>'
+    +'<div style="display:flex;flex-direction:column;gap:0;border-left:2px solid var(--border);padding-left:12px;margin-left:4px">'
+    +(req.ts?'<div style="position:relative;padding-bottom:10px"><div style="position:absolute;left:-17px;top:3px;width:8px;height:8px;border-radius:50%;background:var(--blue)"></div>'
+      +'<div style="font-size:11px;font-weight:600">Solicitud creada</div>'
+      +(req.createdByName?'<div style="font-size:10px;color:var(--text2)">por '+escH(req.createdByName)+'</div>':'')
+      +'<div style="font-size:10px;color:var(--text3);font-family:var(--mono)">'+new Date(req.ts).toLocaleString('es-UY',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div></div>':'')
+    +(req.receivedTs?'<div style="position:relative;padding-bottom:10px"><div style="position:absolute;left:-17px;top:3px;width:8px;height:8px;border-radius:50%;background:var(--green)"></div>'
+      +'<div style="font-size:11px;font-weight:600">Recibida y aceptada</div>'
+      +(req.receivedByName?'<div style="font-size:10px;color:var(--text2)">por '+escH(req.receivedByName)+'</div>':'')
+      +'<div style="font-size:10px;color:var(--text3);font-family:var(--mono)">'+new Date(req.receivedTs).toLocaleString('es-UY',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div></div>':'')
+    +(req.docsTs?'<div style="position:relative;padding-bottom:10px"><div style="position:absolute;left:-17px;top:3px;width:8px;height:8px;border-radius:50%;background:var(--amber)"></div>'
+      +'<div style="font-size:11px;font-weight:600">Documentación enviada</div>'
+      +(req.docsSentByName?'<div style="font-size:10px;color:var(--text2)">por '+escH(req.docsSentByName)+'</div>':'')
+      +'<div style="font-size:10px;color:var(--text3);font-family:var(--mono)">'+new Date(req.docsTs).toLocaleString('es-UY',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div></div>':'')
+    +(req.completedTs?'<div style="position:relative"><div style="position:absolute;left:-17px;top:3px;width:8px;height:8px;border-radius:50%;background:var(--green)"></div>'
+      +'<div style="font-size:11px;font-weight:600">Completada / Confirmada</div>'
+      +((req.completedBy&&getU(req.completedBy))?'<div style="font-size:10px;color:var(--text2)">por '+escH(getU(req.completedBy).name)+'</div>':'')
+      +'<div style="font-size:10px;color:var(--text3);font-family:var(--mono)">'+new Date(req.completedTs).toLocaleString('es-UY',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div></div>':'')
+    +'</div>'
     +'</div>'
     +'<div id="'+mid+'-det" style="margin-bottom:14px"><div style="text-align:center;color:var(--text2);font-size:12px;padding:12px 0">⟳ Cargando detalles del laboratorio destino…</div></div>'
     +'<div class="modal-btns">'
@@ -9154,6 +9325,7 @@ async function _doSolicitudStatusUpdate(req, newStatus, extra){
 function openSolicitudModal(taskId){
   var isSup=isSupRole(),isRev=isReviewerRole(),uid=currentUser.id;
   var t=taskId?tasks.find(function(x){return x.id===taskId;}):null;
+  if(t&&t.tipo==='IL'){alert('Las tareas inter-lab recibidas no pueden generar nuevas solicitudes inter-lab.');return;}
 
   // Build accessible task list for selector (when no taskId)
   var accessibleTasks=[];
@@ -9294,7 +9466,7 @@ async function _saveSolicitud(taskId){
 
   var el=document.getElementById('solicitud-modal');
   if(el)el.remove();
-  _solicitudesSubView='enviadas';
+  _solicitudesSubView='recibidas';
   render();
 }
 
