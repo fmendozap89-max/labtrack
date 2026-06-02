@@ -601,6 +601,9 @@ let _rateLimitUntil  = 0;      // timestamp hasta el cual la API está rate-limi
 let _gistETags       = {};     // path → ETag para conditional GETs (304 = gratis)
 let _lastSuccessfulSync = Date.now(); // ts del último sync exitoso (save o pull)
 const STALE_SYNC_MS  = 5 * 60 * 1000; // 5 minutos sin sync → banner de advertencia
+let _inactivityTimer = null;
+let _inactivityReloadPending = false;
+const INACTIVITY_MS  = 10 * 60 * 1000; // 10 min sin actividad → reload
 
 // ══════════════════════════════════════════════════════════════
 // HTTP helpers
@@ -1014,6 +1017,16 @@ function _hideStaleBanner() {
 let _staleCheckTimer = null;
 function _isSyncStale() {
   return (Date.now() - _lastSuccessfulSync) >= STALE_SYNC_MS;
+}
+function _resetInactivityTimer() {
+  if (_inactivityTimer) clearTimeout(_inactivityTimer);
+  _inactivityTimer = setTimeout(function() {
+    var _m = showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
+      ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
+      ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
+    if (_m) { _inactivityReloadPending = true; }
+    else { window.location.reload(); }
+  }, INACTIVITY_MS);
 }
 function _startStaleWatchdog() {
   if (_staleCheckTimer) clearInterval(_staleCheckTimer);
@@ -5253,6 +5266,13 @@ function recalcLateStatus(){
 
 function render(){
   if(_renderPending)return;
+  // Si había un reload de inactividad pendiente y ya no hay modales, recargar ahora
+  if(_inactivityReloadPending){
+    const _anyModal=showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
+      ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
+      ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
+    if(!_anyModal){ window.location.reload(); return; }
+  }
   // Si había un sync diferido y ya no hay modales abiertos, ejecutarlo ahora
   if(_syncDeferred){
     const _anyModal=showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
@@ -13788,6 +13808,10 @@ document.addEventListener('wheel', function(e){
 
 loadSpConfig();
 _startStaleWatchdog(); // Iniciar vigilancia de sync obsoleto
+['mousemove','keydown','click','touchstart','scroll'].forEach(function(ev){
+  document.addEventListener(ev, _resetInactivityTimer, {passive:true});
+});
+_resetInactivityTimer();
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', gistBoot, {once:true});
 } else {
