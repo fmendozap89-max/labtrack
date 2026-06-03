@@ -5854,7 +5854,7 @@ function renderSugerencias(){
         return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.05)">'
           +'<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">'
           +'<div>'
-          +'<div style="font-size:14px;font-weight:700">'+escH(s.producto)+'</div>'
+          +'<div style="display:flex;align-items:center;gap:8px"><div style="font-size:14px;font-weight:700">'+escH(s.producto)+'</div>'+(s.tipo?sampleTypeBadge(s.tipo):'')+'</div>'
           +'<div style="font-size:12px;font-family:var(--mono);color:var(--text3);margin-top:1px">Lote: '+escH(s.lote)+'</div>'
           +'</div>'
           +(s.priority&&s.priority!=='Normal'?'<span style="background:'+prioBg+';color:'+prioColor+';border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700">'+escH(s.priority)+'</span>':'')
@@ -6024,6 +6024,10 @@ function renderSuggestionModal(){
     +'<p style="font-size:12px;color:var(--text3);margin:0 0 14px">El supervisor recibirá esta sugerencia y confirmará el ingreso.</p>'
     +'<div class="frow"><label>Producto *</label><input id="sug-producto" type="text" placeholder="Nombre del producto o análisis"></div>'
     +'<div class="frow"><label>Lote *</label><input id="sug-lote" type="text" placeholder="Número de lote / código"></div>'
+    +'<div class="frow"><label>Tipo de producto *</label><select id="sug-tipo">'
+      +'<option value="" selected disabled hidden>Seleccionar tipo…</option>'
+      +SAMPLE_TYPES.filter(function(st){return st.id!=='IL';}).map(function(st){return '<option value="'+st.id+'">'+escH(st.title)+'</option>';}).join('')
+      +'</select></div>'
     +'<div class="frow"><label>Prioridad</label><select id="sug-priority"><option>Normal</option><option>Alta</option><option>Urgente</option></select></div>'
     +'<div class="frow"><label>F. Aprobación límite</label><input id="sug-due" type="date"></div>'
     +'<div class="frow"><label>Notas</label><textarea id="sug-notes" style="min-height:60px" placeholder="Observaciones para el supervisor…"></textarea></div>'
@@ -6039,9 +6043,12 @@ function renderSuggestionModal(){
 function submitSuggestion(){
   var prod=((document.getElementById('sug-producto')||{}).value||'').trim();
   var lote=((document.getElementById('sug-lote')||{}).value||'').trim();
+  var tipo=((document.getElementById('sug-tipo')||{}).value||'');
   if(!prod){alert('Indicá el nombre del producto.');return;}
   if(!lote){alert('Indicá el número de lote.');return;}
+  if(!tipo){alert('Seleccioná el tipo de producto.');return;}
   var sug={id:nextSuggId++,producto:prod,lote:lote,
+    tipo:tipo,
     priority:(document.getElementById('sug-priority')||{value:'Normal'}).value||'Normal',
     due:((document.getElementById('sug-due')||{}).value||''),
     notes:((document.getElementById('sug-notes')||{}).value||'').trim(),
@@ -8337,8 +8344,8 @@ function renderCalWeek(sup){
   var rfHtml=(sup||isReviewerRole())?renderCalRoleFilter():'';
   const cols='grid-template-columns:88px repeat(7,minmax(0,1fr))';
   const _calCache={};wd.forEach(d=>{_calCache[d]=mgmtTasks.flatMap(mt=>expandMgmt(mt,d,d));});
-  // Fecha de mañana: solo asignaciones ≥ mañana pueden arrastrarse
-  const _tomorrowStr=(function(){var d=new Date(todayStr+'T12:00:00');d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);})();
+  // Se pueden arrastrar asignaciones desde el día previo en adelante
+  const _yesterdayStr=(function(){var d=new Date(todayStr+'T12:00:00');d.setDate(d.getDate()-1);return d.toISOString().slice(0,10);})();
   return `<div class="filter-row" style="margin-bottom:12px">
     <button class="btn" onclick="weekOffset--;render()">← Anterior</button>
     <span style="font-size:13px;font-weight:600;font-family:var(--mono);min-width:120px;text-align:center">${fmtD(wd[0])} – ${fmtD(wd[6])}</span>
@@ -8350,7 +8357,7 @@ function renderCalWeek(sup){
       <div class="whead" style="${cols}"><div>Usuario</div>${dayLbls.map((d,i)=>`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
       ${rows.map(a=>`<div class="wrow" style="${cols}">
         <div class="wcell-name"><div class="av ${a.av}" style="flex-shrink:0">${escH(a.avInit)}</div>${escH(a.name.split(' ')[0])}</div>
-        ${wd.map(d=>{const dt=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=activeTasks().filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>{const _canDrag=sup&&d>=_tomorrowStr&&t.status==='scheduled';return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ '+'':''}${t._interLab?`<div style="font-size:8px;color:#1d4ed8;font-weight:700;margin-bottom:1px">🔗 ${escH(t._interLab.fromLabName||'Inter-lab')}</div>`:''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`;}).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
+        ${wd.map(d=>{const dt=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=activeTasks().filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};">${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>{const _canDrag=sup&&d>=_yesterdayStr&&t.status==='scheduled';return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ '+'':''}${t._interLab?`<div style="font-size:8px;color:#1d4ed8;font-weight:700;margin-bottom:1px">🔗 ${escH(t._interLab.fromLabName||'Inter-lab')}</div>`:''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`;}).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
       </div>`).join('')}
     </div>
   </div>
@@ -8553,10 +8560,13 @@ var _calDrag={taskId:null,analystId:null,date:null};
 function calDragStart(ev,taskId,analystId,date){
   _calDrag={taskId:taskId,analystId:analystId,date:date};
   ev.dataTransfer.effectAllowed='move';
-  ev.dataTransfer.setData('text/plain',taskId);
+  // Payload autoritativo de ESTE arrastre (no depende del global que puede quedar obsoleto)
+  try{ev.dataTransfer.setData('text/plain',JSON.stringify({taskId:taskId,analystId:analystId,date:date}));}
+  catch(e){ev.dataTransfer.setData('text/plain',String(taskId));}
+  if(ev.currentTarget&&ev.currentTarget.style)ev.currentTarget.style.opacity='0.5';
   // No stopPropagation — permite que el evento burbujee normalmente
 }
-function calDragEnd(ev){ev.target.style.opacity='';}
+function calDragEnd(ev){ev.target.style.opacity='';_calDrag={taskId:null,analystId:null,date:null};}
 function calDragOver(ev,analystId,date){
   // Solo aceptar si hay algo siendo arrastrado
   if(!_calDrag.taskId)return;
@@ -8573,9 +8583,12 @@ function calDrop(ev,newAnalystId,newDate){
   ev.preventDefault();
   ev.currentTarget.style.outline='';
   ev.currentTarget.style.background='';
-  var d=_calDrag;
+  // Usar el payload autoritativo de ESTE arrastre; el global solo es respaldo
+  var d=null;
+  try{var p=JSON.parse(ev.dataTransfer.getData('text/plain')||'null');if(p&&p.taskId!=null)d=p;}catch(e){d=null;}
+  if(!d)d=_calDrag;
   _calDrag={taskId:null,analystId:null,date:null};
-  if(!d.taskId)return;
+  if(!d||d.taskId==null)return;
   if(d.analystId===newAnalystId&&d.date===newDate)return; // misma celda
   var t=tasks.find(function(x){return x.id===d.taskId;});
   if(!t)return;
@@ -8585,9 +8598,15 @@ function calDrop(ev,newAnalystId,newDate){
   // Verificar que el analista destino existe
   var destUser=getU(newAnalystId);
   if(!destUser){alert('Analista destino no encontrado.');return;}
-  // Mover asignación
+  // Mover asignación — evitando duplicados si la celda destino ya tiene esta tarea
+  var dupIdx=assigns.findIndex(function(a,i){return i!==idx&&a.analyst===newAnalystId&&a.date===newDate&&!a._removed;});
   var newAssigns=assigns.slice();
-  newAssigns[idx]=Object.assign({},newAssigns[idx],{analyst:newAnalystId,date:newDate});
+  if(dupIdx>=0){
+    // La celda destino ya tiene una asignación activa de esta tarea: quitar la de origen (no duplicar)
+    newAssigns.splice(idx,1);
+  } else {
+    newAssigns[idx]=Object.assign({},newAssigns[idx],{analyst:newAnalystId,date:newDate});
+  }
   t.assignments=newAssigns;
   t._ts=Date.now();
   auditLog('EDIT','TASK',t.id,{
@@ -10223,7 +10242,7 @@ function renderTaskModal(){
   var t=isEdit?tasks.find(function(x){return x.id===editingTask;}):null;
   // Guard: task may have been deleted
   if(isEdit&&!t){editingTask=null;isEdit=false;}
-  if(!t)t={producto:newTaskPrefill.producto||'',lote:newTaskPrefill.lote||'',created:today(),assignments:[],due:newTaskPrefill.due||'',priority:newTaskPrefill.priority||'Normal',status:'pending',notes:newTaskPrefill.notes||''};
+  if(!t)t={producto:newTaskPrefill.producto||'',lote:newTaskPrefill.lote||'',tipo:newTaskPrefill.tipo||'',created:today(),assignments:[],due:newTaskPrefill.due||'',priority:newTaskPrefill.priority||'Normal',status:'pending',notes:newTaskPrefill.notes||''};
   // Analistas y personal: vista de solo lectura con comentarios
   if(isEdit&&!isSupRole()&&!isReviewerRole()){
     var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
@@ -10473,6 +10492,15 @@ function renderDateAssigns(){
   var html='';
   _anaOrder.forEach(function(analystId){
     var rows=_byAna[analystId];
+    // Ordenar los días del analista de más antiguo a más reciente (fechas YYYY-MM-DD = orden cronológico).
+    // Las filas sin fecha (recién agregadas) quedan al final para no saltar mientras se completan.
+    rows.sort(function(a,b){
+      var da=a.date||'',db=b.date||'';
+      if(!da&&!db)return 0;
+      if(!da)return 1;
+      if(!db)return -1;
+      return da<db?-1:da>db?1:0;
+    });
     var u=getU(analystId);
     // Bloque contenedor por analista
     html+='<div style="background:var(--bg);border-radius:var(--radius);margin-bottom:8px;border:1px solid var(--border2);overflow:hidden">';
@@ -11229,7 +11257,7 @@ function openNewTaskFromSuggestion(suggId){
   var sug=productSuggestions.find(function(s){return s.id===suggId;});
   if(!sug)return;
   editingTask=null;selectedAnalysts=[];analystDates={};multiAssigns=[];
-  newTaskPrefill={suggId:sug.id,producto:sug.producto,lote:sug.lote,due:sug.due||'',priority:sug.priority||'Normal',notes:sug.notes||''};
+  newTaskPrefill={suggId:sug.id,producto:sug.producto,lote:sug.lote,tipo:sug.tipo||'',due:sug.due||'',priority:sug.priority||'Normal',notes:sug.notes||''};
   showModal=true;render();
 }
 function openEdit(id){
