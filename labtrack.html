@@ -1019,14 +1019,10 @@ function _isSyncStale() {
   return (Date.now() - _lastSuccessfulSync) >= STALE_SYNC_MS;
 }
 function _resetInactivityTimer() {
+  _markActivity();
+  _inactivityReloadPending = false; // la actividad cancela una recarga diferida
   if (_inactivityTimer) clearTimeout(_inactivityTimer);
-  _inactivityTimer = setTimeout(function() {
-    var _m = showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
-      ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
-      ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
-    if (_m) { _inactivityReloadPending = true; }
-    else { window.location.reload(); }
-  }, INACTIVITY_MS);
+  _inactivityTimer = setTimeout(_evaluateInactivity, INACTIVITY_MS);
 }
 function _startStaleWatchdog() {
   if (_staleCheckTimer) clearInterval(_staleCheckTimer);
@@ -1039,7 +1035,10 @@ function _startStaleWatchdog() {
 // Cuando el tab vuelve al foco tras estar en segundo plano:
 // si la sesión es obsoleta, disparar sync inmediato para descargar estado actual
 document.addEventListener('visibilitychange', function() {
-  if (document.visibilityState !== 'visible' || !GIST_CONFIG.configured) return;
+  if (document.visibilityState !== 'visible') return;
+  // Robusto a timers congelados en segundo plano: al volver al foco, evaluar inactividad por reloj de pared.
+  _evaluateInactivity();
+  if (!GIST_CONFIG.configured) return;
   if (_isSyncStale()) {
     _showStaleBanner();
     // Solo disparar si no hay un sync ya en curso
@@ -5268,10 +5267,7 @@ function render(){
   if(_renderPending)return;
   // Si había un reload de inactividad pendiente y ya no hay modales, recargar ahora
   if(_inactivityReloadPending){
-    const _anyModal=showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
-      ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
-      ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
-    if(!_anyModal){ window.location.reload(); return; }
+    if(!_anyModalOpen()){ _doInactivityReload(); return; }
   }
   // Si había un sync diferido y ya no hay modales abiertos, ejecutarlo ahora
   if(_syncDeferred){
@@ -6851,28 +6847,60 @@ function recordLoginSuccess(uid) {
   _saveLoginAttempts(loginAttempts);
 }
 
-// ── 21 CFR Part 11: Session inactivity timeout ──
-let _lastActivityTs = Date.now();
-const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 min inactivity
+// ── 21 CFR Part 11: Inactividad — recarga (10 min) + cierre de sesión (30 min) ──
+// Marca de actividad por RELOJ DE PARED, persistida en localStorage para sobrevivir a las
+// recargas por inactividad (si no, cada recarga reiniciaría el reloj y el logout nunca llegaría).
+const _ACT_KEY = 'lt9-activity';
+let _lastActivityTs = (function(){ try{var v=parseInt(localStorage.getItem(_ACT_KEY)||'',10);return isNaN(v)?Date.now():v;}catch(e){return Date.now();} })();
+let _lastActivityPersistTs = 0;
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 min sin actividad → cierre de sesión
 let _sessionTimer = null;
 
-function resetActivityTimer() {
-  _lastActivityTs = Date.now();
+// Actividad REAL del usuario (no la recarga automática). Persistencia throttled para no
+// escribir localStorage en cada mousemove.
+function _markActivity() {
+  var now = Date.now();
+  _lastActivityTs = now;
+  if (now - _lastActivityPersistTs > 5000) {
+    _lastActivityPersistTs = now;
+    try { localStorage.setItem(_ACT_KEY, String(now)); } catch(e) {}
+  }
+}
+function _anyModalOpen() {
+  return showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
+    ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
+    ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
+}
+// Recarga por inactividad: marca para que el próximo arranque NO reinicie el reloj de ocio.
+function _doInactivityReload() {
+  try { sessionStorage.setItem('lt9-inactReload','1'); } catch(e) {}
+  window.location.reload();
+}
+function _doInactivityLogout() {
+  if(!currentUser) return;
+  auditLog('SESSION_TIMEOUT','USER',currentUser.id,{description:'Cierre de sesión por inactividad (30 min): '+currentUser.name},'');
+  try { localStorage.removeItem('lt9-session'); } catch(e) {}
+  currentUser = null;
+  selectedLoginUser = null;
+  loginStep = 1;
+  loginError = 'Sesión cerrada por inactividad (30 min). Por favor ingresá nuevamente.';
+  _inactivityReloadPending = false;
+  _markActivity(); // reiniciar línea base tras el logout
+  render();
+}
+// Evaluación central por reloj de pared: robusta a timers congelados en segundo plano / equipo suspendido.
+function _evaluateInactivity() {
+  if(!currentUser) return;
+  var idle = Date.now() - _lastActivityTs;
+  if (idle >= SESSION_TIMEOUT_MS) { _doInactivityLogout(); return; }
+  if (idle >= INACTIVITY_MS) {
+    if (_anyModalOpen()) { _inactivityReloadPending = true; }
+    else { _doInactivityReload(); }
+  }
 }
 function startSessionWatchdog() {
   if(_sessionTimer) clearInterval(_sessionTimer);
-  _sessionTimer = setInterval(function() {
-    if(!currentUser) return;
-    const idle = Date.now() - _lastActivityTs;
-    if(idle >= SESSION_TIMEOUT_MS) {
-          auditLog('SESSION_TIMEOUT','USER',currentUser.id,{description:'Cierre de sesión por inactividad (30 min): '+currentUser.name},'');
-      currentUser = null;
-      selectedLoginUser = null;
-      loginStep = 1;
-      loginError = 'Sesión cerrada por inactividad (30 min). Por favor ingresá nuevamente.';
-      render();
-    }
-  }, 60000); // check every minute
+  _sessionTimer = setInterval(_evaluateInactivity, 60000); // chequeo por minuto (primer plano)
 }
 
 // ── GLP: Soft delete — never destroy records ──
@@ -13845,7 +13873,15 @@ _startStaleWatchdog(); // Iniciar vigilancia de sync obsoleto
 ['mousemove','keydown','click','touchstart','scroll'].forEach(function(ev){
   document.addEventListener(ev, _resetInactivityTimer, {passive:true});
 });
-_resetInactivityTimer();
+// Inicialización de inactividad: distinguir apertura genuina de recarga por inactividad
+(function _bootInactivity(){
+  var wasInactReload=false;
+  try{ wasInactReload = sessionStorage.getItem('lt9-inactReload')==='1'; sessionStorage.removeItem('lt9-inactReload'); }catch(e){}
+  if(!wasInactReload){ _markActivity(); } // abrir la app cuenta como actividad
+  startSessionWatchdog(); // watchdog de 30 min (antes era código muerto que nunca se iniciaba)
+  if(_inactivityTimer) clearTimeout(_inactivityTimer);
+  _inactivityTimer = setTimeout(_evaluateInactivity, INACTIVITY_MS);
+})();
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', gistBoot, {once:true});
 } else {
