@@ -13315,6 +13315,12 @@ function saveTask(){
     }
     // Supervisor: si eligió un estado explícitamente distinto al actual, respetarlo
     if(isSupRole()&&status&&status!==(_et2?_et2.status:''))_autoStatus=status;
+    // Ingreso de un producto "A ingresar"/"Muestra OK": al pasarlo a un estado temprano,
+    // derivar por programación → con analistas asignados queda "Programado", sin ellos "Ingresado".
+    // Así no se pierde la programación previa al ingresar la muestra.
+    if(isSupRole()&&_et2&&(_et2.status==='a-ingresar'||_et2.status==='muestra-ok')&&(_autoStatus==='pending'||_autoStatus==='scheduled')){
+      _autoStatus=assignments.filter(function(a){return !a._removed;}).length>0?'scheduled':'pending';
+    }
     // Regla: sin analistas activos → estado no puede ser scheduled/progress/pending-confirm
     if(isSupRole()&&assignments.length===0&&['scheduled','progress','pending-confirm','observed'].includes(_autoStatus)){
       _autoStatus='pending';
