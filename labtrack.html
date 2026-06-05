@@ -7467,7 +7467,13 @@ function renderDashboard(){
 
   var pastCombos   =_pendingCombos.filter(function(x){return x.t.status!=='observed'&&x.date<_todayStr;});
   var todayCombos  =_pendingCombos.filter(function(x){return x.t.status==='observed'||x.date===_todayStr;});
-  var upcomingCombos=_pendingCombos.filter(function(x){return x.t.status!=='observed'&&x.date>_todayStr;});
+  var upcomingCombos=_pendingCombos.filter(function(x){return x.t.status!=='observed'&&x.date>_todayStr;})
+    .sort(function(a,b){
+      // Ordenar próximos análisis por fecha (asc) y luego por nombre de producto
+      var d=(a.date||'').localeCompare(b.date||'');
+      if(d!==0)return d;
+      return (a.t.producto||'').localeCompare(b.t.producto||'','es',{sensitivity:'base'});
+    });
 
   // Tareas libres pendientes de aceptación (status==='pending') para "Mi día"
   var _myFTPast=freeTasks.filter(function(ft){return ft.analystId===_myId&&ft.status==='pending'&&(ft.date||'')<_todayStr;});
