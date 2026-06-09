@@ -7567,8 +7567,53 @@ function renderDashboard(){
       +'</div>';
   }
 
+  // Tarjeta de muestra "a ingresar" / "muestra-ok" asignada al analista en "Mi día"
+  function _ingresoCard(t){
+    var isOk=t.status==='muestra-ok';
+    var sa=(t.samplerAssignments||[]).find(function(s){return s.done;});
+    var overdue=!isOk&&t.expectedArrival&&t.expectedArrival<_todayStr;
+    var daysLate=overdue?Math.round((new Date(_todayStr+'T12:00:00')-new Date(t.expectedArrival+'T12:00:00'))/86400000):0;
+    return'<div style="background:var(--surface);border:1px solid '+(overdue?'var(--red)':'var(--border)')+';border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:6px;display:flex;align-items:center;gap:12px">'
+      +'<span style="font-size:20px;flex-shrink:0">'+(isOk?'🧪':'📥')+'</span>'
+      +'<div style="flex:1;min-width:0">'
+      +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;flex-wrap:wrap">'
+      +'<span class="pill '+(isOk?'muestra-ok':'a-ingresar')+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
+      +sampleTypeBadge(t.tipo)
+      +'</div>'
+      +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+' <span style="font-family:var(--mono);font-size:11px;color:var(--text3);font-weight:400">'+escH(t.lote)+'</span></div>'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:1px">'
+        +(t.expectedArrival?'Llegada esperada: <b style="font-family:var(--mono)">'+fmtDDMMYY(t.expectedArrival)+'</b>':'Sin fecha de llegada')
+        +(overdue?'<span style="color:var(--red);font-weight:700;margin-left:4px">⚠ vencida '+daysLate+'d</span>':'')
+        +(isOk&&sa?' · <span style="color:#065f46">Muestreo registrado '+fmtDDMMYY(sa.realArrivalDate)+'</span>':'')
+      +'</div>'
+      +(t.arrivalNotes?'<div style="font-size:11px;color:var(--text3);margin-top:2px">📝 '+escH(t.arrivalNotes)+'</div>':'')
+      +'</div>'
+      +'<div style="display:flex;gap:6px;flex-shrink:0;align-items:center">'
+      +(isOk
+        ?'<span style="font-size:10px;color:#065f46;background:#d1fae5;padding:4px 10px;border-radius:var(--radius);font-weight:600;white-space:nowrap">✓ Pend. recepción</span>'
+        :'<button class="btn sm" style="background:#5b21b6;border-color:#5b21b6;color:#fff;white-space:nowrap" onclick="openSamplingModal('+t.id+')">🧪 Registrar llegada</button>')
+      +'<button class="btn sm" onclick="openEdit('+t.id+')" title="Ver detalle del análisis" style="color:var(--blue)">ℹ</button>'
+      +'</div>'
+      +'</div>';
+  }
+
+  // Muestras "a ingresar" / "muestra-ok" asignadas a este analista (puede registrar la llegada)
+  var _myIngreso=activeTasks().filter(function(t){
+    return (t.status==='a-ingresar'||t.status==='muestra-ok')
+      &&(t.assignments||[]).some(function(a){return a.analyst===_myId&&!a._removed;});
+  }).sort(function(a,b){
+    var sa=a.status==='a-ingresar'?0:1, sb=b.status==='a-ingresar'?0:1;
+    if(sa!==sb)return sa-sb;
+    return (a.expectedArrival||'9999').localeCompare(b.expectedArrival||'9999');
+  });
+
   var _html='';
 
+  // ── MUESTRAS A INGRESAR (asignadas a mí) ──
+  if(_myIngreso.length>0){
+    _html+=_secHdr('📥 Muestras asignadas a ingresar',_myIngreso.length,'#ede9fe','#7c3aed','#5b21b6');
+    _html+=_myIngreso.map(_ingresoCard).join('');
+  }
 
   // ── PASADAS ──
   if(pastCombos.length>0||_myFTPast.length>0||_myMgmtPast.length>0){
