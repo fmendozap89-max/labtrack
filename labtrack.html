@@ -319,7 +319,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
    16.  LOGIN ................................ "── LOGIN ──"
    17.  REVISIÓN Y APROBACIÓN ................ "── REVISIÓN Y APROBACIÓN"
    18.  MÓDULO SUGERENCIAS ................... "── MÓDULO SUGERENCIAS ──"
-   19.  CUMPLIMIENTO NORMATIVO (audit/firmas) "AUDIT TRAIL"
+   19.  REGISTRO DE ACTIVIDAD Y FIRMAS (audit/firmas) "AUDIT TRAIL"
    20.  DASHBOARD ............................ "── DASHBOARD ──"
    21.  VISTA MUESTREADOR / STAFF ............ "── Vista principal del muestreador ──"
    22.  CALENDARIO SEMANAL (WEEK) + drag&drop  "── WEEK ──"
@@ -501,6 +501,10 @@ function isSamplerRole(){return currentUser&&currentUser.role==='sampler';}
 function assignableAnalysts(){return USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer';}).sort(function(a,b){return a.name.localeCompare(b.name,'es');});}
 // ¿El usuario participa como analista (asignado) en esta tarea?
 function _userIsAssignee(t,uid){return (t.assignments||[]).some(function(a){return a.analyst===uid&&!a._removed;});}
+// Analista objetivo de la observación activa (la más reciente). null = todos los asignados.
+function _obsActiveTarget(t){var obs=t&&t.observations;if(!obs||!obs.length)return null;return obs[obs.length-1].targetAnalyst||null;}
+// ¿Este analista debe ver/resolver la observación activa de la tarea?
+function _analystSeesObs(t,uid){var tgt=_obsActiveTarget(t);return !tgt||tgt===uid;}
 
 function rebuildDerived(){
   ANALYSTS=USERS.filter(u=>u.role==='analyst').sort((a,b)=>a.name.localeCompare(b.name,'es'));
@@ -5629,7 +5633,7 @@ async function doLogin(){
   if(!selectedLoginUser){loginError='Seleccioná un usuario.';render();return;}
   const v=(document.getElementById('login-pwd')||{}).value||'';
   const uid=selectedLoginUser.id||selectedLoginUser;
-  // 21 CFR Part 11: bloqueo de cuenta por intentos fallidos
+  // Seguridad: bloqueo de cuenta por intentos fallidos
   if(checkLoginLockout(uid)){
     loginError='Cuenta bloqueada por intentos fallidos. Esperá 15 minutos.';render();return;
   }
@@ -6838,7 +6842,7 @@ function renderAuditTrail() {
 }
 
 
-// ── 21 CFR Part 11: Failed login tracking ──
+// ── Seguridad: Failed login tracking ──
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCKOUT_MS = 15 * 60 * 1000; // 15 min
 
@@ -6872,7 +6876,7 @@ function recordLoginSuccess(uid) {
   _saveLoginAttempts(loginAttempts);
 }
 
-// ── 21 CFR Part 11: Inactividad — recarga (10 min) + cierre de sesión (30 min) ──
+// ── Seguridad: Inactividad — recarga (10 min) + cierre de sesión (30 min) ──
 // Marca de actividad por RELOJ DE PARED, persistida en localStorage para sobrevivir a las
 // recargas por inactividad (si no, cada recarga reiniciaría el reloj y el logout nunca llegaría).
 const _ACT_KEY = 'lt9-activity';
@@ -6944,7 +6948,7 @@ function softDeleteTask(id, reason) {
   closeModal(); saveLS(); render();
 }
 
-// Helper: tasks visible in normal views (soft-deleted records excluded per ALCOA+)
+// Helper: tasks visible in normal views (soft-deleted records excluded)
 // Deleted tasks are preserved in `tasks` array for audit trail but hidden from UI.
 function activeTasks(){return tasks.filter(function(t){return !t._deleted;});}
 
@@ -6998,7 +7002,7 @@ function renderTaskHistory(taskId) {
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">'+rows+'</div>';
 }
 
-// ── 21 CFR Part 11: Data integrity hash ──
+// ── Integridad de datos: hash de control ──
 function computeIntegrityHash(t) {
   // Simple deterministic checksum of critical fields
   // NOTE: Uses DJB2 (non-cryptographic) for synchronous convenience — adequate for
@@ -7025,7 +7029,7 @@ function stampIntegrity(t) {
   t._integrityBy = currentUser ? currentUser.id : '?';
 }
 
-// ── GMP: Edit with mandatory reason ──
+// ── Edición con motivo obligatorio ──
 
 function showTaskHistoryModal(taskId) {
   const t = tasks.find(function(x){return x.id===taskId;});
@@ -7374,7 +7378,7 @@ function renderDashboard(){
     var _revRet=_revBanner;
     // Si el revisor también tiene tareas asignadas, las mostramos abajo
     var _myId2=currentUser.id;
-    var _myRevTasks=activeTasks().filter(function(t){return t.status!=='a-ingresar'&&t.status!=='muestra-ok'&&(t.assignments||[]).some(function(a){return a.analyst===_myId2&&!a._removed;});});
+    var _myRevTasks=activeTasks().filter(function(t){return t.status!=='a-ingresar'&&t.status!=='muestra-ok'&&(t.assignments||[]).some(function(a){return a.analyst===_myId2&&!a._removed;})&&(t.status!=='observed'||_analystSeesObs(t,_myId2));});
     if(_myRevTasks.length>0){
       _revRet+='<div class="sec">Mis análisis asignados</div>';
       _revRet+='<div style="font-size:11px;color:var(--text3);margin:-4px 0 8px">Tareas en las que colaborás como analista — podés iniciarlas y completarlas como un analista.</div>';
@@ -7428,6 +7432,8 @@ function renderDashboard(){
     if(_termSt.includes(t.status))return;
     if(t.status==='pending-confirm')return;
     if(t.status==='observed'){
+      // Solo el analista objetivo de la observación la ve en sus actividades.
+      if(!_analystSeesObs(t,_myId))return;
       var myA=(t.assignments||[]).filter(function(a){return a.analyst===_myId&&!a._removed;});
       if(myA.length)_pendingCombos.push({t:t,a:myA[0],date:myA[0].date||_todayStr});
       return;
@@ -8444,7 +8450,7 @@ function renderCalWeek(sup){
   </div>
   ${!sup?`<div class="sec" style="margin-top:16px">Mis análisis de esta semana</div><div class="tbl">
     <div class="thead" style="grid-template-columns:1.4fr .8fr .7fr .7fr .9fr"><div>Producto / Lote</div><div>Fecha asig.</div><div>Prioridad</div><div>Estado</div><div></div></div>
-    ${activeTasks().filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))).map(t=>tRowsAna(t)).join('')||'<div class="empty">Sin análisis esta semana</div>'}
+    ${activeTasks().filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))&&(t.status!=='observed'||_analystSeesObs(t,currentUser.id))).map(t=>tRowsAna(t)).join('')||'<div class="empty">Sin análisis esta semana</div>'}
   </div>`:''}
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text2)">
     ${sup?'<span style="display:flex;align-items:center;gap:4px;background:var(--bg2);padding:2px 7px;border-radius:10px">✋ Arrastrá un análisis programado a otro día u analista</span>':''}
@@ -10578,7 +10584,7 @@ function renderTaskModal(){
     +'<h3>'+(isEdit?'Editar análisis de lote':(newTaskPrefill.suggId?'Confirmar ingreso sugerido':'Nuevo análisis de lote'))+'</h3>'
     +_reqBanner+_ilBanner+_suggBanner
     +'<div class="form-grid">'
-    +'<div class="frow"><label>Tipo de muestra</label>'+(t.tipo==='IL'?'<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 11px;border:1px solid #1d4ed8;border-radius:20px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8">🔗 IL · Inter-laboratorio</span><input type="hidden" id="f-tipo" value="IL">':renderTipoPillsHtml(t.tipo||''))+'</div>'
+    +'<div class="frow"><label>Tipo de muestra'+(t.tipo==='IL'?'':' <span style="color:var(--red)">*</span>')+'</label>'+(t.tipo==='IL'?'<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 11px;border:1px solid #1d4ed8;border-radius:20px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8">🔗 IL · Inter-laboratorio</span><input type="hidden" id="f-tipo" value="IL">':renderTipoPillsHtml(t.tipo||''))+'</div>'
     +'<div class="frow"><label>Producto</label><input type="text" id="f-prod" value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg"></div>'
     +'<div class="frow"><label>N° de Lote</label><input type="text" id="f-lote" value="'+escH(t.lote||'')+'" placeholder="Ej: L-2024-001"></div>'
     +'<div class="frow"><label>Fecha de creación</label><input type="date" id="f-created" value="'+(t.created||today())+'"></div>'
@@ -11033,6 +11039,17 @@ function confirmImport(){
       grouped[key].rows.push(r);
     });
     groupOrder.forEach(function(k){toImport.push(grouped[k]);});
+    // El tipo de producto es obligatorio: rechazar registros sin un tipo válido.
+    var sinTipo=toImport.filter(function(g){return !SAMPLE_TYPES.find(function(s){return s.id===(g.tipo||'').trim();});});
+    if(sinTipo.length>0){
+      var tiposValidos=SAMPLE_TYPES.map(function(s){return s.id;}).join(', ');
+      var msgTipo='Los siguientes registros no tienen un tipo de producto válido (columna "Tipo") y NO pueden importarse:\n\n'
+        +sinTipo.slice(0,10).map(function(g){return g.producto+' / Lote: '+g.lote+(g.tipo?' (tipo "'+g.tipo+'" no reconocido)':' (sin tipo)');}).join('\n')
+        +(sinTipo.length>10?'\n... y '+(sinTipo.length-10)+' más':'')
+        +'\n\nTipos válidos: '+tiposValidos+'.\n\nCorregí la columna "Tipo" en el archivo e importá de nuevo.';
+      alert(msgTipo);
+      return;
+    }
     if(duplicates.length>0){
       var msg='Los siguientes registros YA EXISTEN y no seran importados (mismo Producto y Lote):\n\n'
         +duplicates.slice(0,10).join('\n')
@@ -12489,9 +12506,9 @@ function deleteTask(id){
   const t=tasks.find(function(x){return x.id===id;});
   if(!t)return;
   if(!isSupRole()){alert('Solo el supervisor puede anular análisis.');return;}
-  if(t.status==='approved'){alert('No se puede anular un análisis aprobado (ALCOA+).');return;}
+  if(t.status==='approved'){alert('No se puede anular un análisis ya aprobado. Si necesita revertirlo, reábralo desde la revisión.');return;}
   requireSignature('Anular análisis','Anular: '+t.producto+' | Lote: '+t.lote,function(reason){
-    // Borrado lógico (ALCOA+: los registros analíticos no se destruyen, se anulan)
+    // Borrado lógico: los registros analíticos no se destruyen, se anulan (trazabilidad interna)
     softDeleteTask(id, reason);
     showModal=false;editingTask=null;_reqEditPrefill=null;
     saveNow().catch(function(e){console.error('saveNow deleteTask:',e);});
@@ -12610,7 +12627,7 @@ function releaseAssignmentDay(taskId, date, motivo, opts){
   if(!a){if(!opts.silent)alert('No se encontró el día a liberar.');return false;}
   var hasWork=(a.realHours>0)||(a.sessions&&a.sessions.length>0)||a._started||a._completedBySup;
   if(hasWork){if(!opts.silent)alert('No se puede liberar un día que ya fue iniciado o tiene horas registradas.');return false;}
-  // Borrado lógico: se conserva para trazabilidad (ALCOA+)
+  // Borrado lógico: se conserva para trazabilidad interna
   a._removed=true;a._removedTs=Date.now();a._removedBy=currentUser.id;a._removeReason=motivo;
   t._ts=Date.now();
   _recalcStatusAfterAssignment(t,false);
@@ -13839,6 +13856,8 @@ function saveTask(){
   const notes=document.getElementById('f-notes').value;
   const tipoEl=document.getElementById('f-tipo');
   const tipo=(tipoEl?tipoEl.value.trim():'');
+  // El tipo de producto (tipo de muestra: PT, MP, etc.) es obligatorio para cualquier ingreso, incluido el supervisor.
+  if(!tipo){alert('El tipo de producto es obligatorio. Seleccioná un tipo de muestra.');return;}
   const _expectedArrivalEl=document.getElementById('f-expected-arrival');
   const _arrivalNotesEl=document.getElementById('f-arrival-notes');
   const expectedArrival=_expectedArrivalEl?_expectedArrivalEl.value:'';
