@@ -2081,6 +2081,8 @@ function fmtDDMMYY(d){if(!d)return'';const p=d.split('-');return p[2]+'/'+p[1]+'
 function dueBadge(t){
   if(!t.due)return'';
   var ds=t._dueStatus||'ok';
+  // Una vez aprobado, la fecha límite ya no aplica: mostrar sólo la fecha sin etiqueta Vencido/Próx. a vencer
+  if(t.status==='approved')return fmtDDMMYY(t.due);
   var label=ds==='late'?'Vencido':ds==='near'?'Próx. a vencer':'';
   if(!label)return fmtDDMMYY(t.due);
   return fmtDDMMYY(t.due)+'<span class="due-badge '+ds+'" style="margin-left:4px">'+label+'</span>';
