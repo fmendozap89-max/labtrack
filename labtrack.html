@@ -447,6 +447,11 @@ function isSupRole(){return currentUser&&currentUser.role==='supervisor';}
 function isStaffRole(){return currentUser&&currentUser.role==='staff';}
 function isSamplerRole(){return currentUser&&currentUser.role==='sampler';}
 function isScheduleUser(){return currentUser&&(['analyst','staff','reviewer','sampler'].includes(currentUser.role));}
+// Usuarios asignables al ANÁLISIS de productos: analistas + revisores (los revisores
+// colaboran con análisis cuando se requiere). ANALYSTS se mantiene para capacidad/personal.
+function assignableAnalysts(){return USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer';}).sort(function(a,b){return a.name.localeCompare(b.name,'es');});}
+// ¿El usuario participa como analista (asignado) en esta tarea?
+function _userIsAssignee(t,uid){return (t.assignments||[]).some(function(a){return a.analyst===uid&&!a._removed;});}
 
 function rebuildDerived(){
   ANALYSTS=USERS.filter(u=>u.role==='analyst').sort((a,b)=>a.name.localeCompare(b.name,'es'));
@@ -1629,10 +1634,12 @@ function isViewAllowed(view, user){
   if(!user||!view)return false;
   var role=user.role;
   // Views restricted to supervisor only
-  var supOnly=['admin','audittrail','historial','informes','rrhh','aprobados'];
+  // 'notificaciones' (módulo "Solicitudes" de cambios de horario) es exclusivo del supervisor:
+  // el revisor no gestiona solicitudes de horario del equipo (req. permisos revisor).
+  var supOnly=['admin','audittrail','historial','informes','rrhh','aprobados','notificaciones'];
   if(supOnly.includes(view)&&role!=='supervisor')return false;
   // Views restricted to supervisor + reviewer
-  var supRevOnly=['especiales','revision','notificaciones'];
+  var supRevOnly=['especiales','revision'];
   if(supRevOnly.includes(view)&&role!=='supervisor'&&role!=='reviewer')return false;
   if(view==='solicitudesIL'&&role!=='supervisor'&&role!=='reviewer')return false;
   return true;
@@ -1984,6 +1991,10 @@ function taskDisplayStatus(t){
   var doneCount=assigns.filter(function(a){return (a.realHours>0)||(a.sessions&&a.sessions.length>0)||!!a._completedBySup;}).length;
   if(doneCount>0&&doneCount<assigns.length) return 'partial';
   return s;
+}
+// ¿Hay porciones (analista/día) completadas por el analista y pendientes de confirmación del supervisor?
+function _hasPendingConfirm(t){
+  return (t.assignments||[]).some(function(a){return !a._removed&&a._pendingConfirm===true&&!a._supervisorConfirmed;});
 }
 // Revierte el estado del producto cuando se agrega/replanifica una actividad de análisis.
 // fromReplan=true: fuerza reversión en tareas 'observed' aunque ya tengan horas (el analista debe rehacer el trabajo).
@@ -3172,9 +3183,11 @@ function getNotifBadge(){
   var confC=0;
   if(isSup){
     tasks.forEach(function(t){
-      if(t.status!=='pending-confirm')return;
+      // Confirmación por porción: incluir tareas en curso con porciones ya completadas.
+      if(t.status!=='pending-confirm'&&t.status!=='progress')return;
       var pend=(t.assignments||[]).filter(function(a){return !a._removed&&a._pendingConfirm===true&&!a._supervisorConfirmed;});
-      if(!pend.length)pend=(t.assignments||[]).filter(function(a){return !a._removed&&!a._supervisorConfirmed&&(a.realHours>0||(a.sessions&&a.sessions.length>0));});
+      // Fallback legado: solo para tareas totalmente completas (pending-confirm)
+      if(!pend.length&&t.status==='pending-confirm')pend=(t.assignments||[]).filter(function(a){return !a._removed&&!a._supervisorConfirmed&&(a.realHours>0||(a.sessions&&a.sessions.length>0));});
       confC+=pend.length;
     });
   }
@@ -3208,7 +3221,8 @@ function getNotifBadge(){
     if(n.status!=='pending'||n.forUserId!==uid) return false;
     return ['sampling_rejected','replan_rejected','planification_accepted',
             'planification_rejected','hours_rejected','free_task_declined',
-            'free_task_rejected','schedule_rejected','product_suggestion_response'].indexOf(n.type)>=0;
+            'free_task_rejected','schedule_rejected','product_suggestion_response',
+            'reviewer_approval_decision'].indexOf(n.type)>=0;
   }).length;
   // Product suggestion notifications (supervisor sees pending suggestions)
   var suggC=isSup
@@ -3237,7 +3251,8 @@ function getNotifBadge(){
   }
   var ilrC=(isSup||isRev)?replanNotifs.filter(function(n){return n.type==='interlab_request'&&n.status==='pending';}).length:0;
   var ilrDocsC=(isSup||isRev)?replanNotifs.filter(function(n){return n.type==='ilr_docs_sent'&&n.status==='pending'&&!(n.readBy||[]).includes(uid);}).length:0;
-  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC+samplingC+responseC+overdueC+suggC+mgmtC+ilrC+ilrDocsC;
+  var revApprC=isSup?replanNotifs.filter(function(n){return n.type==='reviewer_approval'&&n.status==='pending';}).length:0;
+  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC+samplingC+responseC+overdueC+suggC+mgmtC+ilrC+ilrDocsC+revApprC;
 }
 function renderNotifBtn(){
   var totalAlerts=getNotifBadge();
@@ -5050,14 +5065,14 @@ function renderEstabilidades(){
     var actBtns='';
     if(estabTab==='activas'){
       // Acciones supervisor / revisor
-      if(t.status==='pending-confirm'&&sup)actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();confirmDone('+t.id+')" style="font-size:10px;padding:2px 6px" title="Confirmar completado">✓</button>';
+      if(sup&&(t.status==='pending-confirm'||_hasPendingConfirm(t)))actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();confirmDone('+t.id+')" style="font-size:10px;padding:2px 6px" title="Confirmar horas completadas">✓</button>';
       if(t.status==='done')actBtns+='<button class="btn sm" onclick="event.stopPropagation();markReviewed('+t.id+')" style="background:var(--green);color:#fff;font-size:10px;padding:2px 6px">✓ Revisar</button>';
       if((t.status==='done'||t.status==='reviewed')&&(sup||rev))actBtns+='<button class="btn sm" onclick="event.stopPropagation();markObserved('+t.id+')" style="background:var(--orange,#f59e0b);color:#fff;font-size:10px;padding:2px 6px">⚑ Obs.</button>';
       if(t.status==='reviewed'&&sup)actBtns+='<button class="btn sm" onclick="event.stopPropagation();markApproved('+t.id+')" style="background:var(--blue);color:#fff;font-size:10px;padding:2px 6px">✓ Aprobar</button>';
       if(sup&&assigns.length>0)actBtns+='<button class="btn sm" title="Replanificar" onclick="event.stopPropagation();openReplanSuper('+t.id+')" style="font-size:10px;padding:2px 4px">↺</button>';
       if(sup)actBtns+='<button class="btn sm" style="color:var(--text3);padding:2px 4px" title="Eliminar" onclick="event.stopPropagation();deleteTask('+t.id+')">🗑</button>';
       // Acciones analista asignado
-      if(currentUser&&currentUser.role==='analyst'){
+      if(currentUser&&(currentUser.role==='analyst'||currentUser.role==='reviewer')){
         var _myAE=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
         if(_myAE.length>0){
           var _tdE=today();var _tdDE=new Date(_tdE+'T12:00:00');
@@ -5159,14 +5174,14 @@ function renderLimpVal(){
     var actBtns='';
     if(limpvalTab==='activas'){
       // Acciones supervisor / revisor
-      if(t.status==='pending-confirm'&&sup)actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();confirmDone('+t.id+')" style="font-size:10px;padding:2px 6px" title="Confirmar completado">✓</button>';
+      if(sup&&(t.status==='pending-confirm'||_hasPendingConfirm(t)))actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();confirmDone('+t.id+')" style="font-size:10px;padding:2px 6px" title="Confirmar horas completadas">✓</button>';
       if(t.status==='done')actBtns+='<button class="btn sm" onclick="event.stopPropagation();markReviewed('+t.id+')" style="background:var(--green);color:#fff;font-size:10px;padding:2px 6px">✓ Revisar</button>';
       if((t.status==='done'||t.status==='reviewed')&&(sup||rev))actBtns+='<button class="btn sm" onclick="event.stopPropagation();markObserved('+t.id+')" style="background:var(--orange,#f59e0b);color:#fff;font-size:10px;padding:2px 6px">⚑ Obs.</button>';
       if(t.status==='reviewed'&&sup)actBtns+='<button class="btn sm" onclick="event.stopPropagation();markApproved('+t.id+')" style="background:var(--blue);color:#fff;font-size:10px;padding:2px 6px">✓ Aprobar</button>';
       if(sup&&assigns.length>0)actBtns+='<button class="btn sm" title="Replanificar" onclick="event.stopPropagation();openReplanSuper('+t.id+')" style="font-size:10px;padding:2px 4px">↺</button>';
       if(sup)actBtns+='<button class="btn sm" style="color:var(--text3);padding:2px 4px" title="Eliminar" onclick="event.stopPropagation();deleteTask('+t.id+')">🗑</button>';
       // Acciones analista asignado
-      if(currentUser&&currentUser.role==='analyst'){
+      if(currentUser&&(currentUser.role==='analyst'||currentUser.role==='reviewer')){
         var _myAL=(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
         if(_myAL.length>0){
           var _tdL=today();var _tdDL=new Date(_tdL+'T12:00:00');
@@ -5719,14 +5734,19 @@ function renderRevision(){
   var _isSup=isSupRole();
   var _isRev=isReviewerRole();
   if(!_isSup&&!_isRev) return '<div class="empty">Acceso restringido</div>';
-  if(typeof window.revisionTab==='undefined') window.revisionTab='revision';
+  if(typeof window.revisionTab==='undefined') window.revisionTab='revisar';
   var _tab=window.revisionTab;
+  if(_tab==='revision') _tab=window.revisionTab='revisar'; // migración del id antiguo
   var aprobCount=activeTasks().filter(function(t){return t.status==='approved';}).length;
+  var _cntDone=activeTasks().filter(function(t){return t.status==='done';}).length;
+  var _cntRev=activeTasks().filter(function(t){return t.status==='reviewed';}).length;
+  function _rvTab(id,label,cnt){return '<button onclick="window.revisionTab=\''+id+'\';render()" style="padding:8px 16px;border:none;background:none;cursor:pointer;font-size:13px;font-weight:600;border-bottom:2px solid '+(_tab===id?'var(--blue)':'transparent')+';color:'+(_tab===id?'var(--blue)':'var(--text2)')+';margin-bottom:-2px">'+label+' <span style="font-size:11px;font-weight:400;color:var(--text3)">('+cnt+')</span></button>';}
   var tabBar='<div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:2px solid var(--border);padding-bottom:0">'
-    +'<button onclick="window.revisionTab=\'revision\';render()" style="padding:8px 16px;border:none;background:none;cursor:pointer;font-size:13px;font-weight:600;border-bottom:2px solid '+(_tab==='revision'?'var(--blue)':'transparent')+';color:'+(_tab==='revision'?'var(--blue)':'var(--text2)')+';margin-bottom:-2px">📋 En revisión</button>'
-    +(_isSup?'<button onclick="window.revisionTab=\'aprobados\';render()" style="padding:8px 16px;border:none;background:none;cursor:pointer;font-size:13px;font-weight:600;border-bottom:2px solid '+(_tab==='aprobados'?'var(--blue)':'transparent')+';color:'+(_tab==='aprobados'?'var(--blue)':'var(--text2)')+';margin-bottom:-2px">✅ Aprobados <span style="font-size:11px;font-weight:400;color:var(--text3)">('+aprobCount+')</span></button>':'')
+    +_rvTab('revisar','📋 Para revisar',_cntDone)
+    +_rvTab('aprobar','✓ Para aprobar',_cntRev)
+    +_rvTab('aprobados','✅ Aprobados',aprobCount)
     +'</div>';
-  if(_tab==='aprobados'&&_isSup) return tabBar+renderAprobados();
+  if(_tab==='aprobados') return tabBar+renderAprobados();
   if(typeof window.revSearch==='undefined') window.revSearch='';
   var q=(window.revSearch||'').toLowerCase().trim();
   function mQ(t){return !q||t.producto.toLowerCase().includes(q)||(t.lote||'').toLowerCase().includes(q);}
@@ -5759,20 +5779,8 @@ function renderRevision(){
     +'</div>';
   var thd='<div class="thead" style="'+cols+'"><div>Producto / Lote</div><div>Analistas</div><div style="text-align:center">H. Real</div><div style="text-align:center">Vto</div><div></div></div>';
   var html=tabBar+searchHtml+_tipoFilterBar();
-  // Para revisar
-  html+='<div style="margin-bottom:20px">';
-  html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
-    +'<div style="font-weight:700;font-size:14px;color:var(--blue)">📋 Para revisar <span style="font-size:13px;font-weight:400">('+doneT.length+')</span></div>'
-    +(doneT.length>0?'<div style="font-size:11px;color:var(--text3)">Completados pendientes de revisión</div>':'')
-    +'</div>';
-  html+=doneT.length===0?'<div class="empty">Sin productos para revisar ✓</div>'
-    :'<div class="tbl">'+thd+doneT.map(function(t){
-      var rowActions='<button class="btn sm pri" onclick="event.stopPropagation();markReviewed('+t.id+')">✓ Revisar</button>'
-        +'<button class="btn sm dan" onclick="event.stopPropagation();markObserved('+t.id+')">⚑ Obs.</button>';
-      return tRow(t,rowActions);
-    }).join('')+'</div>';
-  html+='</div>';
-  // Observados
+  if(_tab==='revisar'){
+  // Observados primero — facilitan la gestión (requieren corrección del analista)
   if(observedT.length>0){
     html+='<div style="margin-bottom:20px">';
     html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
@@ -5782,8 +5790,28 @@ function renderRevision(){
     html+='<div class="tbl">'+thd+observedT.map(function(t){return tRow(t,'<button class="btn sm" onclick="event.stopPropagation();openEdit('+t.id+')">Ver detalle</button>');}).join('')+'</div>';
     html+='</div>';
   }
-  // Para aprobar (supervisor only)
-  if(_isSup){
+  // Para revisar
+  html+='<div style="margin-bottom:20px">';
+  html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
+    +'<div style="font-weight:700;font-size:14px;color:var(--blue)">📋 Para revisar <span style="font-size:13px;font-weight:400">('+doneT.length+')</span></div>'
+    +(doneT.length>0?'<div style="font-size:11px;color:var(--text3)">Completados pendientes de revisión</div>':'')
+    +'</div>';
+  html+=doneT.length===0?'<div class="empty">Sin productos para revisar ✓</div>'
+    :'<div class="tbl">'+thd+doneT.map(function(t){
+      var rowActions;
+      if(_isRev&&_userIsAssignee(t,currentUser.id)){
+        rowActions='<span style="font-size:10px;color:var(--text3)" title="Segregación de funciones: participaste como analista">— Participaste como analista —</span>'
+          +'<button class="btn sm" onclick="event.stopPropagation();openEdit('+t.id+')">Ver</button>';
+      } else {
+        rowActions='<button class="btn sm pri" onclick="event.stopPropagation();markReviewed('+t.id+')">✓ Revisar</button>'
+          +'<button class="btn sm dan" onclick="event.stopPropagation();markObserved('+t.id+')">⚑ Obs.</button>';
+      }
+      return tRow(t,rowActions);
+    }).join('')+'</div>';
+  html+='</div>';
+  } // fin pestaña "Para revisar"
+  // Para aprobar
+  if(_tab==='aprobar'){
     html+='<div style="margin-bottom:20px">';
     html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
       +'<div style="font-weight:700;font-size:14px;color:var(--green)">✓ Para aprobar <span style="font-size:13px;font-weight:400">('+reviewedT.length+')</span></div>'
@@ -5795,16 +5823,33 @@ function renderRevision(){
         var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
         var hReal=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
         var revName=_reviewerName(t);
+        var _ra=!!t._revApproved;
+        var _raName=t._revApprovedByName||(t._revApprovedBy?(getU(t._revApprovedBy)||{}).name:'')||'';
+        var _acts='';
+        if(_isSup){
+          _acts+=(_ra
+            ?'<button class="btn sm suc" onclick="event.stopPropagation();markApproved('+t.id+')">✓ Confirmar</button>'
+             +'<button class="btn sm dan" onclick="event.stopPropagation();rejectReviewerApproval('+t.id+')">✗ Rechazar</button>'
+            :'<button class="btn sm suc" onclick="event.stopPropagation();markApproved('+t.id+')">✓ Aprobar</button>');
+        } else if(_isRev){
+          if(_userIsAssignee(t,currentUser.id)){
+            _acts+='<span style="font-size:10px;color:var(--text3)" title="Segregación de funciones: participaste como analista">— Participaste como analista —</span>';
+          } else {
+            _acts+=(_ra
+              ?'<span class="pill" style="font-size:10px;background:var(--green-bg);color:var(--green-text);padding:2px 8px">✓ Aprob. enviada</span>'
+              :'<button class="btn sm suc" onclick="event.stopPropagation();reviewerApprove('+t.id+')">✓ Aprobar</button>'
+               +'<button class="btn sm dan" onclick="event.stopPropagation();markObserved('+t.id+')">⚑ Obs.</button>');
+          }
+        }
+        _acts+='<button class="btn sm" onclick="event.stopPropagation();openEdit('+t.id+')">Ver</button>';
         return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
           +'<div class="cell-trunc"><div style="font-weight:600">'+escH(t.producto)+'</div>'
           +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3)">'+escH(t.lote||'')+'</div></div>'
-          +'<div style="font-size:12px">'+(revName?escH(revName):'<span style="color:var(--text3)">—</span>')+'</div>'
+          +'<div style="font-size:12px">'+(revName?escH(revName):'<span style="color:var(--text3)">—</span>')
+          +(_ra?'<div style="font-size:10px;color:var(--green-text);margin-top:1px">✅ Aprob. revisor: '+escH(_raName||'—')+'</div>':'')+'</div>'
           +'<div style="font-family:var(--mono);font-size:11px;text-align:center">'+(hReal>0?hReal+'h':'—')+'</div>'
           +'<div style="font-family:var(--mono);font-size:11px;text-align:center">'+fmtD(t.due)+'</div>'
-          +'<div style="display:flex;gap:4px">'
-          +'<button class="btn sm suc" onclick="event.stopPropagation();markApproved('+t.id+')">✓ Aprobar</button>'
-          +'<button class="btn sm" onclick="event.stopPropagation();openEdit('+t.id+')">Ver</button>'
-          +'</div>'
+          +'<div style="display:flex;gap:4px;flex-wrap:wrap">'+_acts+'</div>'
           +'</div>';
       }).join('')+'</div>';
     html+='</div>';
@@ -7088,14 +7133,13 @@ function renderShell(){
   ]:isReviewer?[
     {id:'dashboard',label:'Mi día',icon:'🏠'},
     {id:'revision',label:'Revisión',icon:'✅',badge:reviewPendC>0?reviewPendC:'',bc:'w'},
-    {id:'tasks',label:'Análisis',icon:'🔬',badge:reviewPendC>0?reviewPendC:'',bc:'w'},
+    {id:'tasks',label:'Análisis',icon:'🔬',badge:(function(){var n=activeTasks().length;return n>0?n:'';})(),bc:'w'},
     {id:'pending',label:'Pendientes',icon:'⏰'},
     {id:'sugerencias',label:'Ingresos',icon:'💡',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
     {id:'week',label:'Calendario equipo',icon:'📅'},
     {id:'cronograma',label:'Mi cronograma',icon:'🗓',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
     {id:'especiales',label:'Especiales',icon:'🧪'},
     {id:'mgmt',label:'Gestión',icon:'🗂'},
-    {id:'notificaciones',label:'Solicitudes',icon:'🔔',badge:(()=>{const p=scheduleRequests.filter(r=>r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
     {id:'solicitudesIL',label:'Sol. Inter-lab',icon:'🔗',badge:(()=>{var c=(window._incomingILRCount||0);return c>0?c:'';})(),bc:'w'},
   ]:isSamplerRole()?[
     {id:'dashboard',label:'Mi día',icon:'🏠'},
@@ -7402,18 +7446,20 @@ function renderDashboard(){
     var _revRet=_revBanner;
     // Si el revisor también tiene tareas asignadas, las mostramos abajo
     var _myId2=currentUser.id;
-    var _myRevTasks=activeTasks().filter(function(t){return (t.assignments||[]).some(function(a){return a.analyst===_myId2&&!a._removed;});});
+    var _myRevTasks=activeTasks().filter(function(t){return t.status!=='a-ingresar'&&t.status!=='muestra-ok'&&(t.assignments||[]).some(function(a){return a.analyst===_myId2&&!a._removed;});});
     if(_myRevTasks.length>0){
       _revRet+='<div class="sec">Mis análisis asignados</div>';
-      _revRet+='<div class="tbl"><div class="thead" style="grid-template-columns:2fr 1fr 1fr 1fr"><div>Producto / Lote</div><div>F. límite</div><div>Estado</div><div>Prioridad</div></div>';
-      _revRet+=_myRevTasks.map(function(t){
-        return'<div class="trow" style="grid-template-columns:2fr 1fr 1fr 1fr" onclick="openEdit('+t.id+')">'
-          +'<div><div class="cell-trunc" style="font-weight:500">'+escH(t.producto)+'</div><div class="cell-sub cell-trunc">'+escH(t.lote||'')+'</div></div>'
-          +'<div style="font-size:11px">'+(t.due?dueBadge(t):'<span style="color:var(--text3)">—</span>')+'</div>'
-          +'<div><span class="pill '+t.status+'" style="font-size:10px">'+statusLabel(t.status)+'</span></div>'
-          +'<div><span class="pill '+(t.priority||'Normal').toLowerCase()+'" style="font-size:10px">'+(t.priority||'Normal')+'</span></div>'
-          +'</div>';
-      }).join('');
+      _revRet+='<div style="font-size:11px;color:var(--text3);margin:-4px 0 8px">Tareas en las que colaborás como analista — podés iniciarlas y completarlas como un analista.</div>';
+      _revRet+='<div class="tbl"><div class="thead" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr"><div>Producto / Lote</div><div>Fecha</div><div>Horas</div><div>Estado</div><div>Acciones</div></div>';
+      // Una fila por asignación (analista/día), ordenadas por fecha descendente (reciente arriba)
+      var _revRows=[];
+      _myRevTasks.forEach(function(t){
+        var _myA=(t.assignments||[]).filter(function(a){return a.analyst===_myId2&&!a._removed;});
+        if(!_myA.length){_revRows.push({t:t,ma:null,d:t.due||''});}
+        else _myA.forEach(function(ma){_revRows.push({t:t,ma:ma,d:ma.date||t.due||''});});
+      });
+      _revRows.sort(function(a,b){return (b.d||'').localeCompare(a.d||'');});
+      _revRet+=_revRows.map(function(r){return tRowAna(r.t,r.ma);}).join('');
       _revRet+='</div>';
     }
     return _revRet;
@@ -7904,7 +7950,7 @@ function _srch(varName,value,inputId){
 }
 function renderTasks(){
   const sup=isSupRole()||isReviewerRole();
-  const aOpts=ANALYSTS.map(function(a){return'<option value="'+a.id+'">'+escH(a.name)+'</option>';}).join('');
+  const aOpts=assignableAnalysts().map(function(a){return'<option value="'+a.id+'">'+escH(a.name)+(a.role==='reviewer'?' (rev.)':'')+'</option>';}).join('');
   const viewToggle=sup?'<div style="display:flex;gap:3px;background:var(--bg2);border-radius:var(--radius);padding:2px">'
     +'<button class="btn sm" onclick="tasksView=\'lote\';render()" style="'+(tasksView==='lote'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">Por lote</button>'
     +'<button class="btn sm" onclick="tasksView=\'analista\';render()" style="'+(tasksView==='analista'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">Por analista</button>'
@@ -8942,6 +8988,22 @@ function _ilrLabName(labId){
   if(e)return e.name;
   return labId||'—';
 }
+// ¿La solicitud va a un laboratorio externo (que no usa la app)?
+function _ilrIsExternal(req){
+  if(!req)return false;
+  if(externalLabs.some(function(e){return e.id===req.destLabId;}))return true;
+  return /^ext_/.test(req.destLabId||'');
+}
+// Seguimiento simple de un laboratorio externo: esperando informe → informe
+// disponible → revisado → aprobado. 'overdue' marca atraso vs. fecha estimada.
+function _ilrExtStep(req){
+  if(req.extApprovedDate) return {label:'Aprobado',cls:'approved',icon:'✓',overdue:false};
+  if(req.extReviewedDate) return {label:'Revisado',cls:'done',icon:'🔎',overdue:false};
+  if(req.extReportDate)   return {label:'Informe disponible',cls:'scheduled',icon:'📄',overdue:false};
+  var est=req.extEstReportDate||req.dueDate||'';
+  var overdue=!!est&&est<today();
+  return {label:'Esperando informe',cls:overdue?'late':'near',icon:overdue?'⚠':'⏳',overdue:overdue,est:est};
+}
 
 function renderSolicitudes(){
   var isSup=isSupRole();
@@ -9000,25 +9062,33 @@ function renderSolicitudes(){
         +'</div>';
       function _envRow(req){
         var si=_ilrStatusInfo(req.status);
+        var ext=_ilrIsExternal(req);
+        var es=ext?_ilrExtStep(req):null;
         var destName=_ilrLabName(req.destLabId);
         var sentDate=req.ts?fmtDF(new Date(req.ts).toISOString().slice(0,10)):'—';
         var limitDate=req.dueDate?fmtDF(req.dueDate):'—';
-        var assignedName=req.assignedToName||req.assignedToId||'—';
+        var assignedName=req.assignedToName||req.assignedToId||(ext?'Lab externo':'—');
         var t=req.taskId?tasks.find(function(x){return x.id===req.taskId;}):null;
         var prodLote=t?(escH(t.producto)+' / <span style="font-family:var(--mono);font-size:11px">'+escH(t.lote)+'</span>'):(req.producto?escH(req.producto)+(req.lote?' / <span style="font-family:var(--mono);font-size:11px">'+escH(req.lote)+'</span>':''):'—');
         var canComplete=req.status==='docs_enviados'&&(isSup||isRev);
         var canDelete=(isSup||isRev)&&req.status!=='completado';
         var isClosed=req.status==='completado';
+        var statusCell=ext
+          ?'<span class="pill '+es.cls+'" style="font-size:10px">'+es.icon+' '+escH(es.label)+'</span>'
+            +(es.overdue?'<div style="font-size:10px;color:var(--red);margin-top:2px">Estimada: '+fmtDF(es.est)+' · atrasado</div>'
+              :(es.est&&es.label==='Esperando informe'?'<div style="font-size:10px;color:var(--text3);margin-top:2px">Estimada: '+fmtDF(es.est)+'</div>':''))
+          :'<span class="pill '+si.cls+'" style="font-size:10px">'+si.icon+' '+escH(si.label)+'</span>'+(req.status==='docs_enviados'?'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-left:4px;animation:pulse 1.2s infinite"></span>':'');
         return'<div class="trow" style="grid-template-columns:'+_colEnv+';cursor:default'+(isClosed?';opacity:.7':'')+'">'
           +'<div>'+prodLote+'</div>'
-          +'<div style="font-size:11px">'+escH(destName)+'</div>'
+          +'<div style="font-size:11px">'+escH(destName)+(ext?' <span style="font-size:9px;color:var(--text3)">(externo)</span>':'')+'</div>'
           +'<div style="font-size:11px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escH(req.analisis||'')+'">'+escH((req.analisis||'').slice(0,40))+'</div>'
           +'<div style="font-size:11px;font-family:var(--mono)">'+sentDate+'</div>'
           +'<div style="font-size:11px;font-family:var(--mono)">'+limitDate+'</div>'
-          +'<div><span class="pill '+si.cls+'" style="font-size:10px">'+si.icon+' '+escH(si.label)+'</span>'+(req.status==='docs_enviados'?'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-left:4px;animation:pulse 1.2s infinite"></span>':'')+'</div>'
+          +'<div>'+statusCell+'</div>'
           +'<div style="font-size:11px">'+escH(assignedName)+'</div>'
           +'<div onclick="event.stopPropagation()" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">'
-          +((isSup||isRev)?'<button class="btn sm" onclick="event.stopPropagation();_showILRDetails(\''+req.id+'\')" title="Ver detalles de seguimiento">🔍 Detalles</button>':'')
+          +(ext&&(isSup||isRev)?'<button class="btn sm pri" onclick="event.stopPropagation();_openExtTrackModal(\''+req.id+'\')" title="Seguimiento del laboratorio externo">📋 Seguimiento</button>':'')
+          +(!ext&&(isSup||isRev)?'<button class="btn sm" onclick="event.stopPropagation();_showILRDetails(\''+req.id+'\')" title="Ver detalles de seguimiento">🔍 Detalles</button>':'')
           +(canComplete?'<button class="btn sm suc" onclick="event.stopPropagation();_markILRCompleto(\''+req.id+'\')" title="Confirmar recepción y cerrar">✓ Confirmar recepción</button>':'')
           +(canDelete?'<button class="btn sm" style="color:var(--text3)" onclick="event.stopPropagation();_deleteILR(\''+req.id+'\')" title="Eliminar solicitud">🗑</button>':'')
           +'</div>'
@@ -9422,6 +9492,61 @@ function _deleteILR(reqId){
   interLabRequests=interLabRequests.filter(function(r){return r.id!==reqId;});
   saveLS();saveNow().catch(function(e){console.error('_deleteILR:',e);});
   render();
+}
+
+// Seguimiento manual simple de una solicitud enviada a laboratorio externo.
+function _openExtTrackModal(reqId){
+  if(!isSupRole()&&!isReviewerRole()){alert('Solo el supervisor o el revisor pueden actualizar el seguimiento.');return;}
+  var req=interLabRequests.find(function(r){return r.id===reqId;});
+  if(!req)return;
+  var _inp='width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);box-sizing:border-box;margin-top:2px;font-size:12px';
+  var destName=_ilrLabName(req.destLabId);
+  var prod=req.producto||((req.taskId&&(tasks.find(function(x){return x.id===req.taskId;})||{}).producto))||'';
+  var div=document.createElement('div');
+  div.id='ext-track-modal';
+  div.innerHTML='<div style="position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center" onclick="if(event.target===this)this.remove()">'
+    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:22px;width:420px;max-width:95vw;box-shadow:0 8px 32px rgba(0,0,0,.28)">'
+    +'<h4 style="margin:0 0 4px;font-size:15px">Seguimiento — laboratorio externo</h4>'
+    +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(prod)+(req.lote?' — Lote: <span style="font-family:var(--mono)">'+escH(req.lote)+'</span>':'')+' → <b>'+escH(destName)+'</b></p>'
+    +'<label style="font-size:11px;font-weight:600;color:var(--text2)">📅 Fecha estimada de informe <span style="color:var(--text3);font-weight:400">(para detectar atrasos)</span></label>'
+    +'<input type="date" id="et-est" value="'+(req.extEstReportDate||req.dueDate||'')+'" style="'+_inp+'">'
+    +'<label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-top:10px">📄 Informe disponible (recibido)</label>'
+    +'<input type="date" id="et-report" value="'+(req.extReportDate||'')+'" style="'+_inp+'">'
+    +'<label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-top:10px">🔎 Revisado (laboratorio solicitante)</label>'
+    +'<input type="date" id="et-reviewed" value="'+(req.extReviewedDate||'')+'" style="'+_inp+'">'
+    +'<label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-top:10px">✓ Aprobado (laboratorio solicitante)</label>'
+    +'<input type="date" id="et-approved" value="'+(req.extApprovedDate||'')+'" style="'+_inp+'">'
+    +'<label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-top:10px">Nota (opcional)</label>'
+    +'<textarea id="et-note" placeholder="Ej: el laboratorio confirmó el envío del informe…" style="'+_inp+';min-height:48px;resize:vertical">'+escH(req.extNote||'')+'</textarea>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">'
+    +'<button class="btn" onclick="document.getElementById(\'ext-track-modal\').remove()">Cancelar</button>'
+    +'<button class="btn pri" onclick="_saveExtTrack(\''+req.id+'\')">Guardar seguimiento</button>'
+    +'</div></div></div>';
+  document.body.appendChild(div);
+}
+function _saveExtTrack(reqId){
+  var req=interLabRequests.find(function(r){return r.id===reqId;});
+  if(!req)return;
+  var g=function(id){var el=document.getElementById(id);return el?el.value:'';};
+  req.extEstReportDate=g('et-est')||null;
+  req.extReportDate=g('et-report')||null;
+  req.extReviewedDate=g('et-reviewed')||null;
+  req.extApprovedDate=g('et-approved')||null;
+  req.extNote=(g('et-note')||'').trim()||null;
+  // Coherencia de estado: aprobado → cerrado; en otro caso permanece activa
+  if(req.extApprovedDate){
+    req.status='completado';
+    if(!req.completedTs){req.completedTs=Date.now();req.completedBy=currentUser.id;}
+  } else {
+    if(req.status==='completado'){req.completedTs=null;req.completedBy=null;}
+    req.status='enviado';
+  }
+  req.ts=req.ts||Date.now();
+  req._ts=Date.now();
+  var m=document.getElementById('ext-track-modal');if(m)m.remove();
+  auditLog('EDIT','ILR',req.id,{description:'Seguimiento lab externo: '+(req.producto||'')+' '+(req.lote||'')+' → '+_ilrLabName(req.destLabId)},'');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('_saveExtTrack:',e);});
 }
 
 async function _doSolicitudStatusUpdate(req, newStatus, extra){
@@ -10321,9 +10446,9 @@ function renderTaskModal(){
   var t=isEdit?tasks.find(function(x){return x.id===editingTask;}):null;
   // Guard: task may have been deleted
   if(isEdit&&!t){editingTask=null;isEdit=false;}
-  if(!t)t={producto:newTaskPrefill.producto||'',lote:newTaskPrefill.lote||'',tipo:newTaskPrefill.tipo||'',created:today(),assignments:[],due:newTaskPrefill.due||'',priority:newTaskPrefill.priority||'Normal',status:'pending',notes:newTaskPrefill.notes||''};
-  // Analistas y personal: vista de solo lectura con comentarios
-  if(isEdit&&!isSupRole()&&!isReviewerRole()){
+  if(!t)t={producto:newTaskPrefill.producto||'',lote:newTaskPrefill.lote||'',tipo:newTaskPrefill.tipo||'',created:newTaskPrefill.created||today(),assignments:[],due:newTaskPrefill.due||'',priority:newTaskPrefill.priority||'Normal',status:newTaskPrefill.status||'pending',notes:newTaskPrefill.notes||'',samplerAssignments:newTaskPrefill.samplerAssignments||[],expectedArrival:newTaskPrefill.expectedArrival||'',arrivalNotes:newTaskPrefill.arrivalNotes||''};
+  // Analistas, personal y revisor: vista de solo lectura (el revisor no modifica datos del producto)
+  if(isEdit&&!isSupRole()){
     var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
     var anaNames=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:22px;height:22px;font-size:9px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':''}).join('');
     var commentsHtml=renderTaskComments(t);
@@ -10364,6 +10489,7 @@ function renderTaskModal(){
       +'<div style="grid-column:1/-1;display:flex;align-items:center;gap:6px"><span style="color:var(--text3)">Analistas </span>'+anaNames+'</div>'
       +(t.notes?'<div style="grid-column:1/-1"><span style="color:var(--text3)">Notas </span>'+escH(t.notes)+'</div>':'')
       +'</div>'
+      +(isReviewerRole()?renderHoursSummaryBlock(t):'')
       +(commentsHtml||'<div style="color:var(--text3);font-size:12px;text-align:center;padding:16px 0">Sin comentarios registrados para este análisis</div>')
       +_ilrBlock
       +'<div class="modal-btns"><button class="btn" onclick="closeModal()">Cerrar</button></div>'
@@ -10380,9 +10506,10 @@ function renderTaskModal(){
   var selSet=new Set(selectedAnalysts);
   var realTotal=(t.assignments||[]).filter(function(a){return !a._removed;}).reduce(function(s,a){return s+(a.realHours||0);},0);
 
-  var analChecks=[...ANALYSTS].sort(function(a,b){return a.name.localeCompare(b.name,'es');}).map(function(a){
-    return'<div class="ana-check'+(selSet.has(a.id)?' selected':'')+'" onclick="toggleAna(\''+a.id+'\')">'
-      +'<div class="av '+a.av+'">'+escH(a.avInit)+'</div>'+escH(a.name)+'</div>';
+  var analChecks=assignableAnalysts().map(function(a){
+    var _isRev=a.role==='reviewer';
+    return'<div class="ana-check'+(selSet.has(a.id)?' selected':'')+'" onclick="toggleAna(\''+a.id+'\')"'+(_isRev?' title="Revisor — puede colaborar en análisis"':'')+'>'
+      +'<div class="av '+a.av+'">'+escH(a.avInit)+'</div>'+escH(a.name)+(_isRev?' <span style="font-size:9px;color:var(--text3);font-weight:600">(rev.)</span>':'')+'</div>';
   }).join('');
 
   var _suggBanner='';
@@ -10451,15 +10578,17 @@ function renderTaskModal(){
     +'<div class="frow form-full"><label>Analistas asignados</label>'
     +'<div class="analysts-check">'+analChecks+'</div>'
     +'</div>'
-    +(isEdit&&isSupRole()&&SAMPLERS.length?'<div class="frow form-full"><label>Muestreador asignado <span style="font-size:11px;color:var(--text3)">(opcional — para productos "A ingresar")</span></label>'
+    +(isSupRole()&&SAMPLERS.length?'<div class="frow form-full"><label>Muestreador asignado <span style="font-size:11px;color:var(--text3)">(opcional — para productos "A ingresar")</span></label>'
     +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
     +(()=>{
       var curSamplers=(t.samplerAssignments||[]).filter(function(s){return !s.removed;}).map(function(s){return s.sampler;});
-      return'<button class="btn sm'+(curSamplers.length===0?' active':'')+'" onclick="setSamplerAssign('+t.id+',null)" style="'+(curSamplers.length===0?'background:var(--bg2);font-weight:600':'')+'">— Sin muestreador</button>'
+      var _saNone=isEdit?'setSamplerAssign('+t.id+',null)':'setNewSamplerAssign(null)';
+      return'<button class="btn sm'+(curSamplers.length===0?' active':'')+'" onclick="'+_saNone+'" style="'+(curSamplers.length===0?'background:var(--bg2);font-weight:600':'')+'">— Sin muestreador</button>'
       +SAMPLERS.map(function(u){
         var isSel=curSamplers.includes(u.id);
         var sa=isSel?(t.samplerAssignments||[]).find(function(s){return s.sampler===u.id;}):null;
-        return'<button class="btn sm" onclick="setSamplerAssign('+t.id+',\''+u.id+'\')" style="'+(isSel?'background:#d1fae5;border-color:#059669;color:#065f46;font-weight:600':'')+'"><div class="av '+u.av+'" style="width:16px;height:16px;font-size:7px;display:inline-flex;align-items:center;justify-content:center;margin-right:3px">'+escH(u.avInit)+'</div>'+escH(u.name)+(sa&&sa.done?' ✓':'')+'</button>';
+        var _saFn=isEdit?'setSamplerAssign('+t.id+',\''+u.id+'\')':'setNewSamplerAssign(\''+u.id+'\')';
+        return'<button class="btn sm" onclick="'+_saFn+'" style="'+(isSel?'background:#d1fae5;border-color:#059669;color:#065f46;font-weight:600':'')+'"><div class="av '+u.av+'" style="width:16px;height:16px;font-size:7px;display:inline-flex;align-items:center;justify-content:center;margin-right:3px">'+escH(u.avInit)+'</div>'+escH(u.name)+(sa&&sa.done?' ✓':'')+'</button>';
       }).join('');
     })()
     +'</div>'
@@ -11352,7 +11481,7 @@ function setFSearch(v){filterSearch=v;render();}
 function setFS(v){filterStatus=v;render();}
 function markDone(id,assignDate){
   const t=tasks.find(x=>x.id===id);if(!t)return;
-  if(currentUser.role==='analyst'){
+  if(currentUser.role==='analyst'||currentUser.role==='reviewer'){
     if(t.status==='observed'){
       // Re-envío tras observación
       // Modal inline para comentario + checkbox replanificar
@@ -11507,6 +11636,7 @@ function markReviewed(id){
   const t=tasks.find(function(x){return x.id===id;});
   if(!t)return;
   if(t.status!=='done'){alert('Solo se pueden revisar análisis completados.');return;}
+  if(isReviewerRole()&&_userIsAssignee(t,currentUser.id)){alert('No podés revisar un análisis en el que participaste como analista (segregación de funciones). Debe revisarlo otra persona.');return;}
   var rvDiv=document.createElement('div');
   rvDiv.innerHTML='<div style="position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center">'
     +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:22px;width:360px;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
@@ -11675,6 +11805,18 @@ function markApproved(id){
           lote:t.lote,
           approvedDate:t.approvedDate,lateApproval:t.due&&t.approvedDate>t.due
         },reason);
+        // Si venía con pre-aprobación del revisor: resolver su notificación y avisarle la confirmación
+        if(t._revApproved){
+          var _raId=t._revApprovedBy;
+          replanNotifs.forEach(function(n){if(n.type==='reviewer_approval'&&n.taskId===id&&n.status==='pending'){n.status='resolved';n.resolvedTs=Date.now();}});
+          if(_raId){
+            replanNotifs.push({id:nextNotifId++,type:'reviewer_approval_decision',
+              taskId:id,producto:t.producto,lote:t.lote,decision:'approved',
+              forUserId:_raId,confirmedByName:currentUser.name,
+              status:'pending',ts:Date.now(),_ts:Date.now()});
+          }
+          t._revApproved=false; // se conserva _revApprovedBy/Name/Ts como registro histórico
+        }
         saveLS();render();
         showToast('✅ Aprobado','success');
         saveNow().catch(e=>console.error('saveNow approved:',e));
@@ -11682,12 +11824,81 @@ function markApproved(id){
     );
   };
 }
+// El revisor pre-aprueba un análisis revisado: queda en 'reviewed' marcado como
+// aprobado por el revisor y se notifica al supervisor para su confirmación final.
+function reviewerApprove(id){
+  if(!isReviewerRole()){alert('Solo el Revisor puede usar esta acción.');return;}
+  const t=tasks.find(function(x){return x.id===id;});
+  if(!t)return;
+  if(t.status!=='reviewed'){alert('Solo se pueden aprobar análisis revisados.');return;}
+  if(_userIsAssignee(t,currentUser.id)){alert('No podés aprobar un análisis en el que participaste como analista (segregación de funciones).');return;}
+  if(t._revApproved){alert('Ya enviaste la aprobación de este análisis al supervisor.');return;}
+  requireSignature(
+    'Aprobar análisis (revisor)',
+    'Aprobación del revisor: '+t.producto+' '+t.lote+' — se enviará al supervisor para su confirmación.',
+    function(reason){
+      t._revApproved=true;
+      t._revApprovedBy=currentUser.id;
+      t._revApprovedByName=currentUser.name;
+      t._revApprovedTs=Date.now();
+      t._revApprovedDate=today();
+      t._ts=Date.now();
+      stampIntegrity(t);
+      replanNotifs.push({id:nextNotifId++,type:'reviewer_approval',taskId:id,
+        producto:t.producto,lote:t.lote,byName:currentUser.name,by:currentUser.id,
+        status:'pending',ts:Date.now(),_ts:Date.now()});
+      auditLog('REVIEWER_APPROVE','TASK',id,{
+        field:'_revApproved',oldVal:'',newVal:'true',
+        description:'Aprobación del revisor (pendiente de confirmación del supervisor): '+t.producto+' '+t.lote,
+        lote:t.lote
+      },reason);
+      saveLS();render();
+      showToast('✓ Aprobación enviada al supervisor','success');
+      saveNow().catch(function(e){console.error('saveNow reviewerApprove:',e);});
+    }
+  );
+}
+// El supervisor rechaza la pre-aprobación del revisor: el producto permanece en 'reviewed'.
+function rejectReviewerApproval(id){
+  if(!isSupRole()){alert('Solo el Supervisor puede confirmar o rechazar aprobaciones del revisor.');return;}
+  const t=tasks.find(function(x){return x.id===id;});
+  if(!t)return;
+  if(!t._revApproved){alert('Este análisis no tiene una aprobación de revisor pendiente.');return;}
+  requireSignature(
+    'Rechazar aprobación del revisor',
+    'Rechazo de aprobación: '+t.producto+' '+t.lote+' — el producto permanece en estado Revisado.',
+    function(reason){
+      var revId=t._revApprovedBy;
+      t._revApproved=false;
+      delete t._revApprovedBy; delete t._revApprovedByName;
+      delete t._revApprovedTs; delete t._revApprovedDate;
+      t._ts=Date.now();
+      stampIntegrity(t);
+      replanNotifs.forEach(function(n){if(n.type==='reviewer_approval'&&n.taskId===id&&n.status==='pending'){n.status='resolved';n.resolvedTs=Date.now();}});
+      if(revId){
+        replanNotifs.push({id:nextNotifId++,type:'reviewer_approval_decision',
+          taskId:id,producto:t.producto,lote:t.lote,decision:'rejected',
+          forUserId:revId,rejectedByName:currentUser.name,reason:reason||'',
+          status:'pending',ts:Date.now(),_ts:Date.now()});
+      }
+      auditLog('REVIEWER_APPROVE_REJECT','TASK',id,{
+        field:'_revApproved',oldVal:'true',newVal:'false',
+        description:'Supervisor rechazó la aprobación del revisor: '+t.producto+' '+t.lote,
+        lote:t.lote
+      },reason);
+      saveLS();render();
+      showToast('Aprobación del revisor rechazada — permanece Revisado','warn');
+      saveNow().catch(function(e){console.error('saveNow rejectRevApproval:',e);});
+    }
+  );
+}
 
 function markObserved(id){
   const t=tasks.find(x=>x.id===id);if(!t)return;
   if(currentUser.role!=='supervisor'&&currentUser.role!=='reviewer'){
     alert('Solo el Supervisor o el Revisor pueden observar un análisis.');return;
   }
+  if(isReviewerRole()&&_userIsAssignee(t,currentUser.id)){alert('No podés observar un análisis en el que participaste como analista (segregación de funciones).');return;}
   if(!['done','reviewed'].includes(t.status)){
     alert('Solo se pueden observar análisis completados o revisados.');return;
   }
@@ -12581,11 +12792,13 @@ function renderNotifPanel(){
   var confirmPend=[];
   if(isSup){
     tasks.forEach(function(t){
-      if(t.status!=='pending-confirm') return;
+      // Confirmación por porción: incluir tareas en curso con porciones ya completadas.
+      if(t.status!=='pending-confirm'&&t.status!=='progress') return;
       var pending=(t.assignments||[]).filter(function(a){
         return !a._removed && a._pendingConfirm===true && !a._supervisorConfirmed;
       });
-      if(pending.length===0){
+      // Fallback legado: solo para tareas totalmente completas (pending-confirm)
+      if(pending.length===0 && t.status==='pending-confirm'){
         pending=(t.assignments||[]).filter(function(a){
           return !a._removed && !a._supervisorConfirmed
             && (a.realHours>0||(a.sessions&&a.sessions.length>0));
@@ -12638,7 +12851,7 @@ function renderNotifPanel(){
     if(n.status!=='pending'||n.forUserId!==uid) return false;
     return ['sampling_rejected','replan_rejected','planification_accepted',
             'planification_rejected','hours_rejected','free_task_declined',
-            'free_task_rejected','schedule_rejected'].indexOf(n.type)>=0;
+            'free_task_rejected','schedule_rejected','reviewer_approval_decision'].indexOf(n.type)>=0;
   }).length;
   var samplingDoneBadge=isSup
     ?replanNotifs.filter(function(n){return n.type==='sampling_done'&&n.status!=='resolved'&&isUnread(n);}).length
@@ -12667,6 +12880,10 @@ function renderNotifPanel(){
     :[];
   var pendSuggPanelC=isSup?productSuggestions.filter(function(s){return s.status==='pending';}).length:0;
   var suggRespPanelC=!isSup?replanNotifs.filter(function(n){return n.type==='product_suggestion_response'&&n.forUserId===uid&&n.status==='pending';}).length:0;
+  var revApprNotifs=isSup
+    ?replanNotifs.filter(function(n){return n.type==='reviewer_approval'&&n.status==='pending';})
+        .sort(function(a,b){return(b.ts||0)-(a.ts||0);})
+    :[];
   const totalBadge=myObsNotifs.filter(isUnread).length
     +pendReplan.filter(isUnread).length+schedPend.length+schedApproved.length+confirmPend.length
     +resubmitBadge
@@ -12675,7 +12892,7 @@ function renderNotifPanel(){
     }).length)
     +planReqNotifs.filter(isUnread).length+responseNotifBadge+samplingDoneBadge+overdueAlerts.length
     +ilrNotifs.length+docsNotifs.filter(isUnread).length
-    +pendSuggPanelC+suggRespPanelC;
+    +pendSuggPanelC+suggRespPanelC+revApprNotifs.length;
 
   if(!showNotifPanel){return '';}
 
@@ -12739,6 +12956,20 @@ function renderNotifPanel(){
   }
 
   // ── Solicitudes inter-lab recibidas (supervisor / revisor) ──
+  if(revApprNotifs.length>0){
+    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:#f0fdf4">'
+      +'<div style="font-size:12px;font-weight:700;color:#065f46;margin-bottom:8px">✅ Aprobaciones del revisor ('+revApprNotifs.length+')</div>';
+    revApprNotifs.forEach(function(n){
+      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid #22c55e">'
+        +'<div style="font-size:12px;font-weight:600">'+escH(n.producto||'')+(n.lote?' <span style="font-family:var(--mono);color:var(--text3);font-size:11px">'+escH(n.lote)+'</span>':'')+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin:3px 0">Aprobado por revisor: <b>'+escH(n.byName||'')+'</b> — pendiente de su confirmación</div>'
+        +'<div style="font-size:10px;color:var(--text3);margin:4px 0">'+new Date(n.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div>'
+        +'<button class="btn sm pri" onclick="showNotifPanel=false;window.revisionTab=\'aprobar\';setView(\'revision\')" style="font-size:10px">→ Ver en Para aprobar</button>'
+        +'</div>';
+    });
+    html+='</div>';
+  }
+
   if(ilrNotifs.length>0){
     html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:#eff6ff">'
       +'<div style="font-size:12px;font-weight:700;color:#1d4ed8;margin-bottom:8px">🔗 Solicitudes inter-lab recibidas ('+ilrNotifs.length+')</div>';
@@ -13157,7 +13388,7 @@ function renderNotifPanel(){
     if(n.status!=='pending'||n.forUserId!==uid) return false;
     return ['sampling_rejected','replan_rejected','planification_accepted',
             'planification_rejected','hours_rejected','free_task_declined',
-            'free_task_rejected','schedule_rejected'].indexOf(n.type)>=0;
+            'free_task_rejected','schedule_rejected','reviewer_approval_decision'].indexOf(n.type)>=0;
   }).sort(function(a,b){return b.ts-a.ts;});
 
   if(responseNotifs.length>0){
@@ -13236,6 +13467,20 @@ function renderNotifPanel(){
         if(n.dateStr)detail+='<br>Fecha: '+fmtDDMMYY(n.dateStr);
         if(n.proposed&&n.proposed.startTime)detail+=' · '+n.proposed.startTime+' – '+n.proposed.endTime;
         if(n.proposed&&n.proposed.type==='overtime')detail+=' · Horas extra: '+(n.proposed.extraHours||'?')+'h';
+
+      } else if(n.type==='reviewer_approval_decision'){
+        if(n.decision==='approved'){
+          icon='✅'; title='Aprobación confirmada';
+          cardColor='var(--green-bg)'; borderColor='var(--green)';
+          detail='El supervisor confirmó tu aprobación'+(n.confirmedByName?' — Por: '+escH(n.confirmedByName):'');
+        } else {
+          icon='❌'; title='Aprobación no confirmada';
+          cardColor='var(--red-bg)'; borderColor='var(--red)';
+          detail=(n.reason?'Motivo: '+escH(n.reason):'Sin motivo especificado')+(n.rejectedByName?' — Por: '+escH(n.rejectedByName):'');
+        }
+        if(n.producto)title+=': '+escH(n.producto)+(n.lote?' — '+escH(n.lote):'');
+        var rtRA=tasks.find(function(x){return x.id===n.taskId;});
+        if(rtRA)goBtn='<button class="btn sm" onclick="showNotifPanel=false;openEdit('+rtRA.id+')" style="font-size:10px;margin-top:4px">🔍 Ver análisis</button>';
 
       }
 
@@ -13336,6 +13581,42 @@ function setSamplerAssign(taskId, samplerId){
     }
   }
   t._ts=Date.now();
+  render();
+}
+function setNewSamplerAssign(samplerId){
+  // Modo creación: el producto aún no existe en `tasks`. Apila la selección en
+  // newTaskPrefill y preserva los valores tipeados en el formulario (snapshot)
+  // para que render() no los pierda, igual que setSamplerAssign en edición.
+  var g=function(id){var el=document.getElementById(id);return el?el.value:null;};
+  var _snap={producto:g('f-prod'),lote:g('f-lote'),status:g('f-status'),notes:g('f-notes'),
+    due:g('f-due'),created:g('f-created'),priority:g('f-prio'),
+    expectedArrival:g('f-expected-arrival'),arrivalNotes:g('f-arrival-notes'),samplerNote:g('f-sampler-note')};
+  if(_snap.producto!=null) newTaskPrefill.producto=_snap.producto;
+  if(_snap.lote!=null)     newTaskPrefill.lote=_snap.lote;
+  if(_snap.status!=null)   newTaskPrefill.status=_snap.status;
+  if(_snap.notes!=null)    newTaskPrefill.notes=_snap.notes;
+  if(_snap.due!=null)      newTaskPrefill.due=_snap.due;
+  if(_snap.created!=null)  newTaskPrefill.created=_snap.created;
+  if(_snap.priority!=null) newTaskPrefill.priority=_snap.priority;
+  if(_snap.expectedArrival!=null) newTaskPrefill.expectedArrival=_snap.expectedArrival;
+  if(_snap.arrivalNotes!=null)    newTaskPrefill.arrivalNotes=_snap.arrivalNotes;
+  if(_snap.samplerNote!=null)     newTaskPrefill._samplerNote=_snap.samplerNote;
+  if(!newTaskPrefill.samplerAssignments) newTaskPrefill.samplerAssignments=[];
+  var arr=newTaskPrefill.samplerAssignments.filter(function(s){return !s.removed;});
+  if(samplerId===null){
+    newTaskPrefill.samplerAssignments=[];
+  } else if(arr.some(function(s){return s.sampler===samplerId;})){
+    // Toggle off
+    newTaskPrefill.samplerAssignments=arr.filter(function(s){return s.sampler!==samplerId;});
+  } else {
+    // Un solo muestreador activo a la vez (coherente con setSamplerAssign)
+    newTaskPrefill.samplerAssignments=[{
+      id:nextNotifId++,sampler:samplerId,
+      assignedBy:currentUser.id,assignedTs:Date.now(),
+      done:false,doneAt:null,realArrivalDate:null,lotNotes:null,
+      assignedNote:newTaskPrefill._samplerNote||'',_ts:Date.now()
+    }];
+  }
   render();
 }
 function saveTask(){
@@ -13465,6 +13746,16 @@ function saveTask(){
       t.producto=prod;t.lote=lote;t.created=created;t.due=due;
       t.priority=priority;t.notes=notes;t.tipo=tipo||'';
       t.assignments=finalAssignments;
+      // Coherencia (Req 4): si tras la edición queda una porción (analista/día) sin horas,
+      // un estado "completado" (done/pending-confirm/reviewed/approved/observed) es incoherente.
+      // Se degrada a 'progress' (se mostrará "Completado parcial" si hay porciones mixtas).
+      // No aplica si el supervisor ya cargó horas para todas las porciones.
+      var _hasPendingPortion=finalAssignments.some(function(a){
+        return !a._removed&&!(a.realHours>0||(a.sessions&&a.sessions.length>0)||a._completedBySup);
+      });
+      if(isSupRole()&&_hasPendingPortion&&['done','pending-confirm','reviewed','approved','observed'].includes(_autoStatus)){
+        _autoStatus='progress';
+      }
       // Arrival fields for a-ingresar
       if(_autoStatus==='a-ingresar'||t.status==='a-ingresar'||t.status==='muestra-ok'){
         t.expectedArrival=expectedArrival||t.expectedArrival||'';
@@ -13494,7 +13785,7 @@ function saveTask(){
       }
     }
   }
-  else{var _newT={id:nextId++,producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes,tipo:tipo||'',samplerAssignments:[]};if(_autoStatus==='a-ingresar'){if(expectedArrival)_newT.expectedArrival=expectedArrival;if(arrivalNotes)_newT.arrivalNotes=arrivalNotes;}tasks.push(_newT);
+  else{var _newSamp=(newTaskPrefill.samplerAssignments||[]).filter(function(s){return !s.removed;});var _snote=(document.getElementById('f-sampler-note')||{}).value;if(_snote!=null&&_newSamp[0])_newSamp[0].assignedNote=_snote;var _newT={id:nextId++,producto:prod,lote,created,assignments,due,priority,status:_autoStatus,notes,tipo:tipo||'',samplerAssignments:_newSamp};if(_autoStatus==='a-ingresar'){if(expectedArrival)_newT.expectedArrival=expectedArrival;if(arrivalNotes)_newT.arrivalNotes=arrivalNotes;}tasks.push(_newT);
     // If created from a suggestion, mark suggestion confirmed and notify suggester
     if(newTaskPrefill.suggId){
       var _pfSug=productSuggestions.find(function(s){return s.id===newTaskPrefill.suggId;});
@@ -13938,6 +14229,12 @@ if (document.readyState === 'loading') {
 } else {
   gistBoot();
 }
+// Red de seguridad: si el arranque no completó (carga lenta/parcial del archivo o
+// fallo silencioso en gistBoot), reintentar una vez para no quedar atascado en "Cargando…".
+setTimeout(function(){
+  var el=document.getElementById('app');
+  if(el && el.textContent==='Cargando...'){ try{ gistBoot(); }catch(e){ console.error('boot retry:',e); } }
+}, 2500);
 
 function openOvertimeForSup(analystId, dateStr){
   const u=getU(analystId);
