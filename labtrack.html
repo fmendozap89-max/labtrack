@@ -12,8 +12,11 @@
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow:hidden;-webkit-text-size-adjust:100%}
 body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
-.login-wrap{min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;background:linear-gradient(150deg,#eef0f5 0%,#f0ede8 60%,#e8eef2 100%)}
-.login-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px 28px;width:100%;max-width:380px;box-shadow:var(--shadow-md);box-sizing:border-box;border-top:3px solid var(--blue)}
+/* max-height+overflow: body tiene overflow:hidden, el login debe scrollear por sí mismo
+   cuando el contenido supera el viewport (ej: widget de conexión en iPhone) */
+.login-wrap{min-height:100vh;min-height:100dvh;max-height:100vh;max-height:100dvh;overflow-y:auto;-webkit-overflow-scrolling:touch;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;background:linear-gradient(150deg,#eef0f5 0%,#f0ede8 60%,#e8eef2 100%)}
+/* margin:auto (no align-items) permite alcanzar el tope del card al scrollear si desborda */
+.login-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px 28px;width:100%;max-width:380px;box-shadow:var(--shadow-md);box-sizing:border-box;border-top:3px solid var(--blue);margin:auto}
 .login-logo{display:flex;align-items:center;gap:10px;margin-bottom:14px}
 .login-logo .icon{display:none}
 .login-logo .name{font-size:18px;font-weight:700;letter-spacing:-.03em}
@@ -200,6 +203,11 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 ::-webkit-scrollbar-thumb{background:rgba(0,0,0,.18);border-radius:6px}
 ::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.28)}
 * {scrollbar-width:thin;scrollbar-color:rgba(0,0,0,.18) transparent}
+/* Barra de scroll horizontal SUPERIOR sincronizada (réplica de la inferior en contenedores anchos).
+   En móvil se oculta: el desplazamiento táctil no usa barras. */
+.hscroll-top{overflow-x:auto;overflow-y:hidden;margin-bottom:2px}
+.hscroll-top>div{height:1px}
+@media(max-width:767px){.hscroll-top{display:none}}
 
 /* ── CHIP (calendar chips) ── */
 .chip{padding:3px 7px;border-radius:5px;font-size:10px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
@@ -424,7 +432,7 @@ var activeLabId=null;
 // ── Solicitudes inter-laboratorio ──
 var interLabRequests=[];
 var externalLabs=[];
-var _solicitudesSubView='recibidas';
+var _solicitudesSubView='enviadas';
 var _partnerLabCache={};
 let modalTab='paste',pastePreview=[];
 let replanNotifs=[];
@@ -572,7 +580,7 @@ function applySnapshot(json){
       workdayConfig.guideUrl=d.workdayConfig.guideUrl||'';
       if(d.workdayConfig._ts)workdayConfig._ts=d.workdayConfig._ts;
     }
-    USERS.forEach(u=>{if(!passwords[u.id])passwords[u.id]='labtrack123';});
+    USERS.forEach(u=>{if(!passwords[u.id])passwords[u.id]=_DEFAULT_PWD_HASH||'labtrack123';});
     auditTrail=Array.isArray(d.auditTrail)?d.auditTrail:[];
     interLabRequests=d.interLabRequests||[];
     externalLabs=d.externalLabs||[];
@@ -789,8 +797,8 @@ async function _flushAuditBuffer() {
       : (gist.files[GIST_FILE_AUDIT]?.content || '[]');
     let existing = [];
     try { existing = JSON.parse(raw); } catch(e) {}
-    // Prepend nuevos (más reciente primero), cap 200 entradas
-    const merged = [...toFlush, ...existing].slice(0, 200);
+    // Prepend nuevos (más reciente primero), cap 1000 entradas (~200 KB, holgado para gist)
+    const merged = [...toFlush, ...existing].slice(0, 1000);
     await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
       files: { [GIST_FILE_AUDIT]: { content: JSON.stringify(merged) } }
     });
@@ -1148,6 +1156,9 @@ async function pushNotifToPartnerGist(partnerLab, notif) {
     var partnerData = JSON.parse(content);
     partnerData.replanNotifs = partnerData.replanNotifs || [];
     partnerData.replanNotifs.push(notif);
+    // Bump savedAt: sin esto el lab receptor nunca aplica el cambio en sesión
+    // (gate remoteTs > _lastRemoteTs) y su próximo save lo sobrescribe.
+    partnerData.savedAt = Date.now();
     var patch = await fetch(GIST_API + '/' + partnerLab.gistId, {
       method: 'PATCH',
       headers: {
@@ -1181,7 +1192,10 @@ async function updateRequestInPartnerGist(partnerLab, reqId, updates) {
     var reqs = partnerData.interLabRequests || [];
     var req = reqs.find(function(x){ return x.id === reqId; });
     if (!req) return false;
-    Object.assign(req, updates, { ts: Date.now() });
+    // _ts (no ts): ts es la fecha de envío mostrada en la UI; _ts decide el merge
+    Object.assign(req, updates, { _ts: Date.now() });
+    // Bump savedAt para que los clientes del lab de origen apliquen y mergeen el cambio
+    partnerData.savedAt = Date.now();
     var patch = await fetch(GIST_API + '/' + partnerLab.gistId, {
       method: 'PATCH',
       headers: {
@@ -1262,6 +1276,8 @@ async function gistSyncFromRemote() {
     _hideStaleBanner();
     if(!currentUser) _restoreSession();
     render(); // siempre refrescar — puede haber audit trail nuevo
+    // Badge de solicitudes inter-lab recibidas (usa cache 5 min — costo API acotado)
+    _refreshIncomingILR().catch(function(e){console.warn('_refreshIncomingILR:',e);});
   } catch(e) {
     console.error('gistSync:', e);
     gistStatus = 'error';
@@ -1883,7 +1899,7 @@ async function cloudRestore() {
     +'<h3 style="margin:0 0 6px;font-size:15px">⏮ Recuperar versión anterior</h3>'
     +'<div style="font-size:12px;color:var(--text2);margin-bottom:14px">Gist: '+escH(GIST_CONFIG.gistId.slice(0,16))+'…</div>'
     +'<div id="restore-list" style="font-size:13px;color:var(--text2)">Cargando historial…</div>'
-    +'<div style="margin-top:16px;text-align:right"><button class="btn" onclick="this.closest(\'div[style*=fixed]\').remove()">Cerrar</button></div>'
+    +'<div style="margin-top:16px;text-align:right"><button class="btn" onclick="this.closest(\'.modal-overlay,div[style*=fixed]\').remove()">Cerrar</button></div>'
     +'</div>';
   document.body.appendChild(overlay);
   try{
@@ -1897,7 +1913,7 @@ async function cloudRestore() {
       var label=i===0?'<span style="font-size:10px;font-weight:700;padding:1px 6px;background:var(--blue);color:#fff;border-radius:8px;margin-left:6px">actual</span>':'';
       rows+='<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg)">'
         +'<div><span style="font-weight:500">'+dt+'</span>'+label+'<br><span style="font-size:10px;color:var(--text3);font-family:var(--mono)">'+sha.slice(0,12)+'</span></div>'
-        +(i>0?'<button class="btn sm" onclick="_previewGistVersion(\''+sha+'\',\''+dt+'\',this.closest(\'div[style*=fixed]\'))">Vista previa</button>':'<span class="u-sm3">versión actual</span>')
+        +(i>0?'<button class="btn sm" onclick="_previewGistVersion(\''+sha+'\',\''+dt+'\',this.closest(\'.modal-overlay,div[style*=fixed]\'))">Vista previa</button>':'<span class="u-sm3">versión actual</span>')
         +'</div>';
     }
     rows+='</div>';
@@ -2322,16 +2338,19 @@ function renderRrhh(){
   if(!isSupRole()) return '<div class="empty">Acceso restringido</div>';
   const conflicts=checkAbsenceConflicts();
   return`
-  <div style="display:flex;gap:6px;margin-bottom:14px;background:var(--bg2);border-radius:var(--radius);padding:3px;flex-wrap:wrap">
-    <button class="btn sm" onclick="rrhhTab='schedules';render()" style="${rrhhTab==='schedules'?'background:var(--surface);font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.08)':'border:none;background:transparent'}">Horarios</button>
-    <button class="btn sm" onclick="rrhhTab='workdays';render()" style="${rrhhTab==='workdays'?'background:var(--surface);font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.08)':'border:none;background:transparent'}">Días laborables</button>
-    <button class="btn sm" onclick="rrhhTab='absences';render()" style="${rrhhTab==='absences'?'background:var(--surface);font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.08)':'border:none;background:transparent'}">Ausencias</button>
-    <button class="btn sm" onclick="rrhhTab='abstypes';render()" style="${rrhhTab==='abstypes'?'background:var(--surface);font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.08)':'border:none;background:transparent'}">Tipos de ausencia</button>
-    <button class="btn sm" onclick="rrhhTab='conflicts';render()" style="position:relative;${rrhhTab==='conflicts'?'background:var(--surface);font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.08)':'border:none;background:transparent'}">
+  <div class="tab-bar" style="flex-wrap:wrap">
+    <div class="tab${rrhhTab==='schedules'?' active':''}" onclick="rrhhTab='schedules';render()">Horarios</div>
+    <div class="tab${rrhhTab==='workdays'?' active':''}" onclick="rrhhTab='workdays';render()">Días laborables</div>
+    <div class="tab${rrhhTab==='absences'?' active':''}" onclick="rrhhTab='absences';render()">Ausencias</div>
+    <div class="tab${rrhhTab==='abstypes'?' active':''}" onclick="rrhhTab='abstypes';render()">Tipos de ausencia</div>
+    <div class="tab${rrhhTab==='conflicts'?' active':''}" onclick="rrhhTab='conflicts';render()" style="position:relative">
       Conflictos${conflicts.length>0?`<span style="position:absolute;top:-3px;right:-4px;background:var(--red);color:#fff;border-radius:50%;width:14px;height:14px;font-size:8px;display:flex;align-items:center;justify-content:center;font-weight:700">${conflicts.length}</span>`:''}
-    </button>
+    </div>
+    <div class="tab${rrhhTab==='solicitudes'?' active':''}" onclick="rrhhTab='solicitudes';render()" style="position:relative" title="Solicitudes de cambio de horario del equipo">
+      Solicitudes${(()=>{const p=scheduleRequests.filter(r=>r.status==='pending').length;return p>0?`<span style="position:absolute;top:-3px;right:-4px;background:var(--red);color:#fff;border-radius:50%;width:14px;height:14px;font-size:8px;display:flex;align-items:center;justify-content:center;font-weight:700">${p}</span>`:'';})()}
+    </div>
   </div>
-  ${rrhhTab==='schedules'?renderSchedulesTab():rrhhTab==='workdays'?renderWorkdaysTab():rrhhTab==='absences'?renderAbsencesTab():rrhhTab==='abstypes'?renderAbsTypesTab():renderConflictsTab(conflicts)}`;
+  ${rrhhTab==='schedules'?renderSchedulesTab():rrhhTab==='workdays'?renderWorkdaysTab():rrhhTab==='absences'?renderAbsencesTab():rrhhTab==='abstypes'?renderAbsTypesTab():rrhhTab==='solicitudes'?renderNotificaciones():renderConflictsTab(conflicts)}`;
 }
 
 const SCHED_TYPES=[
@@ -2916,21 +2935,22 @@ function handleWorkdayClick(dateStr){
 }
 function renderExtraWorkdayModal(){
   const existing=getExtraEntry(extraModalDate);
-  const selAnalysts=existing?[...(existing.analysts==='all'?ANALYSTS.map(a=>a.id):existing.analysts)]:[];
+  const selAnalysts=existing?[...(existing.analysts==='all'?assignableAnalysts().map(a=>a.id):existing.analysts)]:[];
   const note=existing?existing.note||'':'';
   return`<div class="modal-overlay" onclick="if(event.target===this){showExtraModal=false;render()}"><div class="modal" style="width:400px">
     <h3>Excepción: día laborable</h3>
     <div style="background:var(--bg);border-radius:var(--radius);padding:8px 12px;margin-bottom:14px;font-family:var(--mono);font-size:13px;font-weight:600">${fmtDF(extraModalDate)}</div>
-    <div class="frow"><label>¿Qué analistas trabajan este día?</label>
+    <div class="frow"><label>¿Quiénes trabajan este día? (analistas y revisores)</label>
       <div style="display:flex;flex-direction:column;gap:4px;margin-top:4px">
         <label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px">
           <input type="checkbox" id="extra-all" onchange="toggleAllExtra(this.checked)" style="width:16px;height:16px">
-          <span style="font-weight:500">Todos los analistas</span>
+          <span style="font-weight:500">Todos (analistas y revisores)</span>
         </label>
-        ${[...ANALYSTS].sort((a,b)=>a.name.localeCompare(b.name,'es')).map(a=>`<label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;font-size:13px">
+        ${assignableAnalysts().map(a=>`<label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;font-size:13px">
           <input type="checkbox" class="extra-ana" value="${a.id}" ${selAnalysts.includes(a.id)?'checked':''} style="width:15px;height:15px">
           <div class="av ${a.av}" style="width:20px;height:20px;font-size:8px">${escH(a.avInit)}</div>
-          ${escH(a.name)}
+          <span style="flex:1">${escH(a.name)}</span>
+          ${a.role==='reviewer'?'<span style="font-size:9px;padding:1px 6px;border-radius:8px;background:var(--blue-bg);color:var(--blue-text)">Revisor</span>':''}
         </label>`).join('')}
       </div>
     </div>
@@ -2951,7 +2971,7 @@ function confirmExtraWorkday(){
   let analysts;
   if(all){analysts='all';}
   else{analysts=[...document.querySelectorAll('.extra-ana:checked')].map(cb=>cb.value);}
-  if(!all&&(!analysts||analysts.length===0)){alert('Seleccioná al menos un analista.');return;}
+  if(!all&&(!analysts||analysts.length===0)){alert('Seleccioná al menos una persona (analista o revisor).');return;}
   saveExtraWorkday(extraModalDate,analysts,note);
   showExtraModal=false;render();
 }
@@ -3367,7 +3387,7 @@ function renderFreeTasksTable(isSup){
 
   var html='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">';
   // Create button (supervisor = assign to anyone; non-sup = register own task)
-  html+='<button class="btn pri" onclick="openFreeTaskModal(null)" style="font-size:13px;padding:7px 14px">'+(isSup?'+ Nueva actividad libre':'+ Registrar tarea libre')+'</button>';
+  html+='<button class="btn pri" onclick="openFreeTaskModal(null)" style="font-size:13px;padding:7px 14px" title="'+(isSup?'Asignar una tarea de una sola vez a cualquier miembro del equipo':'Registrar una tarea puntual realizada o por realizar')+'">'+(isSup?'+ Nueva tarea única':'+ Registrar tarea única')+'</button>';
   // Text search
   html+='<input id="srch-ft" type="text" placeholder="Buscar por descripción, comentario o usuario…" value="'+escH(_ftSearch||'')+'"'
     +' oninput="_srch(\'_ftSearch\',this.value,\'srch-ft\')"'
@@ -3375,8 +3395,9 @@ function renderFreeTasksTable(isSup){
   // Analyst filter (supervisor only)
   if(isSup){
     html+='<select onchange="window.ftFilterAnalyst=this.value;render()" style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;background:var(--surface)">'
-      +'<option value="">Todos los analistas</option>'
-      +ANALYSTS.map(function(a){return'<option value="'+a.id+'"'+(fa===a.id?' selected':'')+'>'+escH(a.name)+'</option>';}).join('')
+      +'<option value="">Todos los usuarios</option>'
+      // Misma población que el modal de asignación (no solo analistas)
+      +USERS.filter(function(u){return['analyst','staff','reviewer','sampler'].includes(u.role);}).sort(function(a,b){return a.name.localeCompare(b.name,'es');}).map(function(a){return'<option value="'+a.id+'"'+(fa===a.id?' selected':'')+'>'+escH(a.name)+'</option>';}).join('')
       +'</select>';
   }
   // Month filter
@@ -3394,7 +3415,7 @@ function renderFreeTasksTable(isSup){
   html+='</div>';
 
   if(list.length===0){
-    return html+'<div class="empty">Sin tareas libres para los filtros seleccionados</div>';
+    return html+'<div class="empty">Sin tareas únicas para los filtros seleccionados</div>';
   }
 
   // Table
@@ -3433,6 +3454,27 @@ function renderFreeTasksTable(isSup){
   return html;
 }
 
+// Fila de tarea única (libre) integrada en la agenda de gestión (vista Lista).
+// Conserva los flujos propios de las tareas libres; la gestión completa vive
+// en la pestaña "Tareas únicas".
+function _ftAgendaRow(ft,isSup){
+  var u=getU(ft.analystId);
+  var stColor=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'||ft.status==='declined'?'var(--red)':ft.status==='pending'?'var(--blue)':'var(--amber)';
+  var stLabel=ft.status==='confirmed'?'✓ '+(ft.realHours||ft.hours||0)+'h confirmada':ft.status==='rejected'?'✗ Rechazada':ft.status==='declined'?'✗ Declinada':ft.status==='pending'?((ft.suggestedHours||ft.hours||0)+'h · pendiente'):'⏳ '+(ft.realHours||ft.hours||0)+'h por confirmar';
+  var canEdit=isSup||ft.analystId===currentUser.id;
+  return '<div class="trow" style="grid-template-columns:1.2fr .9fr .8fr 1.1fr .65fr .65fr .85fr"'+(canEdit?' onclick="openFreeTaskModal('+ft.id+')" title="Abrir la tarea única"':'')+'>'
+    +'<div><span style="font-size:11px;padding:2px 8px;border-radius:10px;font-weight:600;background:#e0e7ff;color:#3730a3">🎯 Única</span></div>'
+    +'<div style="font-family:var(--mono);font-size:12px">'+fmtDF(ft.date)+'</div>'
+    +'<div><div class="av-stack"><div class="av '+u.av+'" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div></div><div style="font-size:10px;color:var(--text2)">'+escH((u.name||'').split(' ')[0])+'</div></div>'
+    +'<div style="font-size:10px;font-weight:700;font-family:var(--mono);color:'+stColor+'">'+stLabel+'</div>'
+    +'<div class="u-sm2">Única</div>'
+    +'<div style="font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escH(ft.description||'')+'">'+escH(ft.description||'')+'</div>'
+    +'<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">'
+    +(isSup&&ft.status==='pending-confirm'?'<button class="btn sm suc" onclick="event.stopPropagation();confirmFreeTask('+ft.id+')" title="Validar las horas registradas y cerrar la tarea" style="font-size:10px;padding:3px 6px">✓</button>':'')
+    +(canEdit?'<button class="btn sm" onclick="event.stopPropagation();openFreeTaskModal('+ft.id+')" title="Ver / editar la tarea única" style="font-size:10px;padding:3px 6px">✎</button>':'')
+    +'</div>'
+    +'</div>';
+}
 function renderMgmtModule(){
   const isSup=currentUser.role==='supervisor';
   const wd=getWeekDates(weekOffset);
@@ -3443,13 +3485,13 @@ function renderMgmtModule(){
   const _tabBtn=(view,label)=>`<button class="btn sm" onclick="mgmtView='${view}';render()" style="${mgmtView===view?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">${label}</button>`;
   const _mainTabs=(tab2Label)=>`<div style="display:flex;gap:8px;align-items:center;margin-bottom:${_inDefined?'8':'12'}px">
     <div style="background:var(--bg2);border-radius:var(--radius);padding:3px;display:flex;gap:4px">
-      <button class="btn sm" onclick="mgmtView='freetasks';render()" style="${!_inDefined?'background:var(--surface);box-shadow:var(--shadow-sm);font-weight:600':'border:none;background:transparent'}">Actividades libres</button>
-      <button class="btn sm" onclick="if(mgmtView==='freetasks')mgmtView='list';render()" style="${_inDefined?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}">${tab2Label}</button>
+      <button class="btn sm" onclick="mgmtView='freetasks';render()" style="${!_inDefined?'background:var(--surface);box-shadow:var(--shadow-sm);font-weight:600':'border:none;background:transparent'}" title="Actividades de una sola vez (tareas libres): asignación, registro de horas y confirmación">🎯 Tareas únicas</button>
+      <button class="btn sm" onclick="if(mgmtView==='freetasks')mgmtView='list';render()" style="${_inDefined?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent'}" title="Actividades recurrentes por categoría; la agenda (Lista/Semana/Mes) incluye también las tareas únicas">${tab2Label}</button>
     </div>
   </div>`;
 
   if(!isSup){
-    return _mainTabs('Actividades de gestión')+`
+    return _mainTabs('🔁 Recurrentes')+`
     ${_inDefined?`<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
       <div style="background:var(--bg2);border-radius:var(--radius);padding:2px;display:flex;gap:2px">
         ${_tabBtn('list','Lista')}${_tabBtn('calendar','Semana')}${_tabBtn('month','Mes')}
@@ -3458,7 +3500,7 @@ function renderMgmtModule(){
     ${mgmtView==='freetasks'?renderFreeTasksTable(false):mgmtView==='calendar'?renderMgmtWeek(false,wd,weekOccs):mgmtView==='month'?renderMgmtMonth(false):renderMgmtList(false,weekOccs,myOccs)}`;
   }
 
-  return _mainTabs('Actividades definidas')+`
+  return _mainTabs('🔁 Recurrentes')+`
   ${_inDefined?`<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
     <div style="background:var(--bg2);border-radius:var(--radius);padding:2px;display:flex;gap:2px">
       ${_tabBtn('defined','Definidas')}${_tabBtn('list','Lista')}${_tabBtn('calendar','Semana')}${_tabBtn('month','Mes')}${_tabBtn('categories','⚙ Categorías')}
@@ -3480,10 +3522,11 @@ function renderMgmtList(isSup, weekOccs, myOccs){
   </div>`;
 
   // Compute shown occurrences based on period
-  let periodOccs, periodLabel, prevBtn, nextBtn;
+  let periodOccs, periodLabel, prevBtn, nextBtn, _pFrom, _pTo;
   if(mgmtListPeriod==='week'){
     periodOccs=isSup?weekOccs:myOccs;
     periodLabel=`${fmtD(wd[0])} – ${fmtD(wd[6])}`;
+    _pFrom=wd[0];_pTo=wd[6];
     prevBtn=`<button class="btn sm" onclick="weekOffset--;render()">←</button>`;
     nextBtn=`<button class="btn sm" onclick="weekOffset++;render()">→</button>`;
   } else {
@@ -3494,6 +3537,7 @@ function renderMgmtList(isSup, weekOccs, myOccs){
     const allOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,from,to));
     periodOccs=isSup?allOccs:allOccs.filter(o=>(o.analysts||[]).includes(currentUser.id));
     periodLabel=monthLabel;
+    _pFrom=from;_pTo=to;
     prevBtn=`<button class="btn sm" onclick="monthOffset--;render()">←</button>`;
     nextBtn=`<button class="btn sm" onclick="monthOffset++;render()">→</button>`;
   }
@@ -3507,6 +3551,19 @@ function renderMgmtList(isSup, weekOccs, myOccs){
       return (cat.label||'').toLowerCase().includes(_mlq)||analNames.toLowerCase().includes(_mlq)||(o.notes||'').toLowerCase().includes(_mlq);
     });
   }
+
+  // Tareas únicas (libres) del período — integradas a la agenda de gestión
+  var _ftPeriod=freeTasks.filter(function(ft){
+    if(ft._deleted)return false;
+    if(!isSup&&ft.analystId!==currentUser.id)return false;
+    if(!ft.date||ft.date<_pFrom||ft.date>_pTo)return false;
+    if(_mlq){
+      var un=(getU(ft.analystId).name||'').toLowerCase();
+      if(!((ft.description||'').toLowerCase().includes(_mlq)||un.includes(_mlq)||(ft.notes||'').toLowerCase().includes(_mlq)||'única'.includes(_mlq)))return false;
+    }
+    return true;
+  }).map(function(ft){return {_ft:ft,occDate:ft.date};});
+  periodOccs=periodOccs.concat(_ftPeriod).sort(function(a,b){return (a.occDate||'').localeCompare(b.occDate||'');});
 
   return`
   <div style="display:flex;align-items:center;margin-bottom:10px;gap:6px;flex-wrap:wrap">
@@ -3532,6 +3589,7 @@ function renderMgmtList(isSup, weekOccs, myOccs){
         <div>Categoría</div><div>Fecha</div><div>Analista(s)</div><div>Dedicación / Realizado</div><div>Frecuencia</div><div>Nota</div><div></div>
       </div>
       ${periodOccs.slice(0,50).map(o=>{
+        if(o._ft)return _ftAgendaRow(o._ft,isSup);
         const cat=getMgmtCat(o.category);
         const analAvs=(o.analysts||[]).map(id=>{const u=getU(id);return`<div class="av ${u.av}" title="${escH(u.name)}">${escH(u.avInit)}</div>`;}).join('');
         const analNames=(o.analysts||[]).map(id=>getU(id).name.split(' ')[0]).join(', ')||'—';
@@ -4072,7 +4130,7 @@ function showDayActivitiesModal(dateStr){
     var st=t.status;
     var stColor=st==='done'?'var(--green)':st==='progress'?'var(--blue)':st==='pending-confirm'?'var(--amber)':'var(--text3)';
     var stIcon=st==='done'?'✓':st==='progress'?'▶':st==='pending-confirm'?'⏳':'○';
-    rows+='<div onclick="(function(){var d=this.closest(\'div[style*=fixed]\');if(d&&d.parentElement)document.body.removeChild(d.parentElement)}).call(this);openEdit('+t.id+')" '
+    rows+='<div onclick="(function(){var d=this.closest(\'.modal-overlay,div[style*=fixed]\');if(d&&d.parentElement)document.body.removeChild(d.parentElement)}).call(this);openEdit('+t.id+')" '
       +'style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--radius);margin-bottom:5px;background:#d4ede0;border-left:3px solid #1e5c35;cursor:pointer">'
       +'<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600;color:#1e5c35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+'</div>'
       +'<div style="font-size:11px;color:#1e5c35;opacity:.75;font-family:var(--mono)">'+escH(t.lote)+'</div></div>'
@@ -4090,11 +4148,11 @@ function showDayActivitiesModal(dateStr){
   if(!rows)rows='<div style="font-size:12px;color:var(--text3);text-align:center;padding:14px 0">Sin actividades</div>';
   var total=myTasks.length+dayMgmt.length;
   var dv=document.createElement('div');
-  dv.innerHTML='<div style="position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px" onclick="if(event.target===this)document.body.removeChild(this.parentElement)">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:18px;width:min(440px,94vw);max-height:80vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.25)">'
+  dv.innerHTML='<div class="modal-overlay" style="z-index:600" onclick="if(event.target===this)document.body.removeChild(this.parentElement)">'
+    +'<div class="modal" style="width:min(440px,calc(100vw - 32px))">'
     +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
     +'<h4 style="margin:0">Actividades · '+escH(fmtDF(dateStr))+'</h4>'
-    +'<button class="btn sm" onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)">✕</button>'
+    +'<button class="btn sm" onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)">✕</button>'
     +'</div>'
     +'<div style="font-size:11px;color:var(--text3);margin-bottom:8px">'+total+' actividad'+(total!==1?'es':'')+'</div>'
     +rows
@@ -4283,16 +4341,16 @@ function renderMySchedMonth(a, def){
 
 function requestOvertime(dateStr){
   var otDiv=document.createElement('div');
-  otDiv.innerHTML='<div style="position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:22px;width:360px;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
-    +'<h4 style="margin:0 0 14px">Solicitar hora extra</h4>'
+  otDiv.innerHTML='<div class="modal-overlay" style="z-index:500">'
+    +'<div class="modal" style="width:min(360px,calc(100vw - 32px))">'
+    +'<h3>Solicitar hora extra</h3>'
     +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">Fecha: '+dateStr+'</p>'
     +'<div class="frow"><label>Horas extra *</label>'
     +'<input type="number" id="ot-hrs" min="0.5" max="24" step="0.5" value="2" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></div>'
     +'<div class="frow" style="margin-top:10px"><label>Motivo *</label>'
     +'<textarea id="ot-reason" rows="3" style="width:100%;resize:vertical;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></textarea></div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
-    +'<button onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
+    +'<button onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
     +'<button onclick="window._doOvertime(\''+dateStr+'\')" class="btn pri">Solicitar</button>'
     +'</div></div></div>';
   document.body.appendChild(otDiv);
@@ -4537,9 +4595,9 @@ function openMgmtComplModal(mgmtId,occDate){
   }
 
   var div=document.createElement('div');
-  div.innerHTML='<div style="position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center" id="mc-backdrop">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:22px;width:440px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
-    +'<div style="font-weight:700;font-size:15px;margin-bottom:4px">Registrar actividad realizada</div>'
+  div.innerHTML='<div class="modal-overlay" style="z-index:500" id="mc-backdrop">'
+    +'<div class="modal" style="width:min(440px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">Registrar actividad realizada</h3>'
     +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">'
     +'<span style="font-size:12px;padding:2px 8px;border-radius:10px;font-weight:600;background:'+cat.color+';color:'+cat.text+'">'+escH(cat.label)+'</span>'
     +'<span style="font-size:12px;color:var(--text2);font-family:var(--mono)">'+fmtDF(occDate)+'</span>'
@@ -4897,6 +4955,19 @@ function getWeekDates(off){
 function getBiweekDates(off){
   return getWeekDates(off).concat(getWeekDates(off+1));
 }
+// Ventanas del calendario del equipo: 3 días (desde hoy — foco inmediato), 7 y 14
+// (alineadas a semana, empiezan lunes) y 35 (5 semanas completas — grilla uniforme,
+// sin bordes irregulares de mes). Anterior/Siguiente avanzan una ventana completa.
+function getCalDates(view, off){
+  if(view==='3d'){
+    var base=new Date(today()+'T12:00:00');
+    base.setDate(base.getDate()+off*3-1); // centrada en hoy: ayer · hoy · mañana
+    return Array.from({length:3},function(_,i){var x=new Date(base);x.setDate(base.getDate()+i);return x.toISOString().slice(0,10);});
+  }
+  if(view==='biweek')return getBiweekDates(off*2);
+  if(view==='5w')return Array.from({length:5},function(_,w){return getWeekDates(off*5+w);}).reduce(function(a,b){return a.concat(b);},[]);
+  return getWeekDates(off);
+}
 function weekDayLabel(dateStr){
   const dt=new Date(dateStr+'T12:00:00');
   return DAY_NAMES[dt.getDay()]+' '+String(dt.getDate()).padStart(2,'0')+'/'+String(dt.getMonth()+1).padStart(2,'0');
@@ -4905,6 +4976,38 @@ function weekDayLabel(dateStr){
 // ── RENDER ──
 let _lastHtml='';
 let _renderPending=false;
+
+// ── Barra de scroll horizontal SUPERIOR sincronizada ──
+// Los contenedores anchos (calendario, tablas con scroll) tienen su barra nativa
+// abajo; esta réplica arriba permite desplazarse sin ir al fondo del contenedor.
+// La vertical se mantiene solo a la derecha: la rueda ya cubre ese eje y moverla
+// rompe la convención del sistema operativo.
+function _syncTopScrollbars(){
+  var cands=document.querySelectorAll('.week-grid,.tbl,div[style*="overflow-x"]');
+  cands.forEach(function(el){
+    if(el.classList.contains('hscroll-top'))return;
+    var ox=getComputedStyle(el).overflowX;
+    if(ox!=='auto'&&ox!=='scroll')return;
+    var prev=el.previousElementSibling;
+    var hasBar=prev&&prev.classList&&prev.classList.contains('hscroll-top');
+    if(el.scrollWidth<=el.clientWidth+2){
+      if(hasBar)prev.remove();
+      return;
+    }
+    var bar=hasBar?prev:null;
+    if(!bar){
+      bar=document.createElement('div');
+      bar.className='hscroll-top';
+      bar.appendChild(document.createElement('div'));
+      el.parentNode.insertBefore(bar,el);
+      bar.addEventListener('scroll',function(){el.scrollLeft=bar.scrollLeft;});
+      el.addEventListener('scroll',function(){bar.scrollLeft=el.scrollLeft;});
+    }
+    bar.firstElementChild.style.width=el.scrollWidth+'px';
+    bar.scrollLeft=el.scrollLeft;
+  });
+}
+window.addEventListener('resize',function(){clearTimeout(window._hsTimer);window._hsTimer=setTimeout(_syncTopScrollbars,150);});
 
 // ── SORT STATE ──
 let taskSort='due';
@@ -4942,11 +5045,41 @@ function sortTasks(arr,sortCol,dir){
   });
 }
 
+// ── Filtro de mes para listas históricas grandes ──
+// Default: mes actual (elección del usuario). Ítems sin fecha siempre visibles.
+// Solo aplica a listas de HISTORIAL (aprobados, audit) — nunca a colas activas,
+// donde ocultar trabajo pendiente/atrasado sería riesgoso.
+let listMonthFilter={};
+function _lmKey(ds){return (ds||'').slice(0,7);}
+function _lmCurrent(){return today().slice(0,7);}
+function monthFilterSelect(viewId,items,getDate,defAll){
+  var sel=listMonthFilter[viewId]||(defAll?'all':_lmCurrent());
+  var months={};items.forEach(function(it){var k=_lmKey(getDate(it));if(k&&k.length===7)months[k]=true;});
+  var cur=_lmCurrent();months[cur]=true;
+  var keys=Object.keys(months).sort().reverse();
+  var opts=keys.map(function(k){
+    var lbl=new Date(k+'-15T12:00:00').toLocaleDateString('es',{month:'long',year:'numeric'});
+    return '<option value="'+k+'"'+(sel===k?' selected':'')+'>'+lbl+(k===cur?' (actual)':'')+'</option>';
+  }).join('');
+  return '<select onchange="listMonthFilter[\''+viewId+'\']=this.value;render()" title="Filtrar por mes" style="padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)">'
+    +opts+'<option value="all"'+(sel==='all'?' selected':'')+'>Todos los meses</option></select>';
+}
+function monthFilterApply(viewId,items,getDate,defAll){
+  var sel=listMonthFilter[viewId]||(defAll?'all':_lmCurrent());
+  if(sel==='all')return items;
+  return items.filter(function(it){var k=_lmKey(getDate(it));return !k||k===sel;});
+}
+
 function renderAprobados(){
-  var approved=sortTasks(activeTasks().filter(function(t){return t.status==='approved';}),taskSort,taskSortDir);
+  var approvedFull=activeTasks().filter(function(t){return t.status==='approved';});
+  var approved=sortTasks(approvedFull,taskSort,taskSortDir);
   if(typeof window.aprobSearch==='undefined')window.aprobSearch='';
   var q=window.aprobSearch.toLowerCase().trim();
   if(q)approved=approved.filter(function(t){return t.producto.toLowerCase().includes(q)||t.lote.toLowerCase().includes(q);});
+  var _apGet=function(t){return t.approvedDate||(t.approvedTs?new Date(t.approvedTs).toISOString().slice(0,10):'')||t.due||'';};
+  var _apPre=approved.length;
+  approved=monthFilterApply('aprobados',approved,_apGet);
+  var _apHidden=_apPre-approved.length;
 
   var _isSupApro=isSupRole();
   var cols=_isSupApro?'grid-template-columns:1.4fr 0.5fr 0.8fr 0.75fr 0.75fr 0.6fr 0.8fr 0.6fr':'grid-template-columns:1.4fr 0.5fr 0.8fr 0.75fr 0.75fr 0.6fr 0.8fr 0.6fr';
@@ -4974,9 +5107,14 @@ function renderAprobados(){
         +SAMPLE_TYPES.map(function(st){return'<option value="'+st.id+'"'+(t.tipo===st.id?' selected':'')+'>'+st.label+'</option>';}).join('')
         +'</select></div>'
       :'<div>'+sampleTypeBadge(t.tipo)+'</div>';
+    var _cmts=[];
+    if(t.reviewComment)_cmts.push('Revisión: '+t.reviewComment);
+    if(t.approvalComment)_cmts.push('Aprobación: '+t.approvalComment);
     return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
       +'<div><div class="cell-trunc" style="font-weight:500;font-size:12px">'+escH(t.producto)+'</div>'
-      +'<div class="cell-sub cell-trunc" style="font-size:10px">'+escH(t.lote)+'</div></div>'
+      +'<div class="cell-sub cell-trunc" style="font-size:10px">'+escH(t.lote)+'</div>'
+      +(_cmts.length?'<div style="font-size:10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escH(_cmts.join(' — '))+'">💬 '+escH(_cmts.join(' · ').slice(0,50))+(_cmts.join(' · ').length>50?'…':'')+'</div>':'')
+      +'</div>'
       +tipoCell
       +'<div style="display:flex;gap:2px;flex-wrap:wrap">'+(anaAv||'—')+'</div>'
       +'<div class="u-mono11">'+(t.due?fmtDDMMYY(t.due):'—')+'</div>'
@@ -4991,7 +5129,8 @@ function renderAprobados(){
     +'<input id="srch-aprobados" type="text" placeholder="Buscar producto o lote…" value="'+escH(window.aprobSearch||'')+'"'
     +' style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface)"'
     +' oninput="_srch(\'aprobSearch\',this.value,\'srch-aprobados\')">'
-    +(q?'<button class="btn sm" onclick="window.aprobSearch=\'\';render()">✕ Limpiar</button>':'')
+    +monthFilterSelect('aprobados',approvedFull,_apGet)
+    +((q||(listMonthFilter['aprobados']&&listMonthFilter['aprobados']!==_lmCurrent()))?'<button class="btn sm" onclick="window.aprobSearch=\'\';delete listMonthFilter[\'aprobados\'];render()" title="Restablecer búsqueda y mes">✕ Limpiar filtros</button>':'')
     +'<div style="display:flex;gap:5px;margin-left:auto">'
     +'<button class="btn sm" onclick="copyAprobados(this)">📋 Copiar</button>'
     +'<button class="btn sm" onclick="doExportAprobados()">↓ Excel</button>'
@@ -4999,10 +5138,12 @@ function renderAprobados(){
     +'</div>';
 
   return'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
-    +'<div class="sec" style="margin-bottom:0">✅ Análisis aprobados ('+approved.length+')</div>'
+    +'<div class="sec" style="margin-bottom:0">✅ Análisis aprobados ('+approved.length+')'
+    +(_apHidden>0?' <span style="font-weight:400;font-size:11px;color:var(--text3)">· '+_apHidden+' en otros meses — <a href="#" onclick="event.preventDefault();listMonthFilter[\'aprobados\']=\'all\';render()" style="color:var(--blue)">ver todos</a></span>':'')
+    +'</div>'
     +'</div>'
     +search
-    +(approved.length===0?'<div class="empty">No hay análisis aprobados aún</div>':'<div class="tbl">'+hdr+approved.map(aRow).join('')+'</div>');
+    +(approved.length===0?'<div class="empty">No hay análisis aprobados '+(_apHidden>0?'en el mes seleccionado':'aún')+'</div>':'<div class="tbl">'+hdr+approved.map(aRow).join('')+'</div>');
 }
 
 function doExportAprobados(){
@@ -5022,13 +5163,16 @@ function doExportAprobados(){
       'F. aprobación':t.approvedDate?fmtDF(t.approvedDate):'',
       'Prioridad':t.priority||'Normal',
       'Horas reales':realH||'',
+      'Revisado por':_reviewerName(t),
+      'Comentario revisión':t.reviewComment||'',
       'Aprobado por':_approverName(t),
+      'Comentario aprobación':t.approvalComment||'',
       'Notas':t.notes||''
     };
   });
   var wb=XLSX.utils.book_new();
   var ws=xlsxSheet(rows);
-  ws['!cols']=[{wch:24},{wch:14},{wch:8},{wch:20},{wch:28},{wch:16},{wch:16},{wch:10},{wch:10},{wch:18},{wch:30}];
+  ws['!cols']=[{wch:24},{wch:14},{wch:8},{wch:20},{wch:28},{wch:16},{wch:16},{wch:10},{wch:10},{wch:18},{wch:30},{wch:18},{wch:30},{wch:30}];
   XLSX.utils.book_append_sheet(wb,ws,'Aprobados');
   xlsxDownload(wb,'aprobados_'+today()+'.xlsx');
   });
@@ -5092,9 +5236,9 @@ function renderEstabilidades(){
     if(estabTab==='activas'){
       // Acciones supervisor / revisor
       if(sup&&(t.status==='pending-confirm'||_hasPendingConfirm(t)))actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();confirmDone('+t.id+')" style="font-size:10px;padding:2px 6px" title="Confirmar horas completadas">✓</button>';
-      if(t.status==='done')actBtns+='<button class="btn sm" onclick="event.stopPropagation();markReviewed('+t.id+')" style="background:var(--green);color:#fff;font-size:10px;padding:2px 6px">✓ Revisar</button>';
-      if((t.status==='done'||t.status==='reviewed')&&(sup||rev))actBtns+='<button class="btn sm" onclick="event.stopPropagation();markObserved('+t.id+')" style="background:var(--orange,#f59e0b);color:#fff;font-size:10px;padding:2px 6px">⚑ Obs.</button>';
-      if(t.status==='reviewed'&&sup)actBtns+='<button class="btn sm" onclick="event.stopPropagation();markApproved('+t.id+')" style="background:var(--blue);color:#fff;font-size:10px;padding:2px 6px">✓ Aprobar</button>';
+      if(t.status==='done')actBtns+='<button class="btn sm" onclick="event.stopPropagation();markReviewed('+t.id+')" style="background:var(--green);color:#fff;font-size:10px;padding:2px 6px" title="Marcar el análisis como revisado — pasa a aprobación">✓ Revisar</button>';
+      if((t.status==='done'||t.status==='reviewed')&&(sup||rev))actBtns+='<button class="btn sm" onclick="event.stopPropagation();markObserved('+t.id+')" style="background:var(--orange);color:#fff;font-size:10px;padding:2px 6px" title="Observar — devuelve el análisis al analista con un comentario">⚑ Obs.</button>';
+      if(t.status==='reviewed'&&sup)actBtns+='<button class="btn sm" onclick="event.stopPropagation();markApproved('+t.id+')" style="background:var(--blue);color:#fff;font-size:10px;padding:2px 6px" title="Aprobación final — cierra el análisis">✓ Aprobar</button>';
       if(sup&&assigns.length>0)actBtns+='<button class="btn sm" title="Replanificar" onclick="event.stopPropagation();openReplanSuper('+t.id+')" style="font-size:10px;padding:2px 4px">↺</button>';
       if(sup)actBtns+='<button class="btn sm" style="color:var(--text3);padding:2px 4px" title="Eliminar" onclick="event.stopPropagation();deleteTask('+t.id+')">🗑</button>';
       // Acciones analista asignado
@@ -5201,9 +5345,9 @@ function renderLimpVal(){
     if(limpvalTab==='activas'){
       // Acciones supervisor / revisor
       if(sup&&(t.status==='pending-confirm'||_hasPendingConfirm(t)))actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();confirmDone('+t.id+')" style="font-size:10px;padding:2px 6px" title="Confirmar horas completadas">✓</button>';
-      if(t.status==='done')actBtns+='<button class="btn sm" onclick="event.stopPropagation();markReviewed('+t.id+')" style="background:var(--green);color:#fff;font-size:10px;padding:2px 6px">✓ Revisar</button>';
-      if((t.status==='done'||t.status==='reviewed')&&(sup||rev))actBtns+='<button class="btn sm" onclick="event.stopPropagation();markObserved('+t.id+')" style="background:var(--orange,#f59e0b);color:#fff;font-size:10px;padding:2px 6px">⚑ Obs.</button>';
-      if(t.status==='reviewed'&&sup)actBtns+='<button class="btn sm" onclick="event.stopPropagation();markApproved('+t.id+')" style="background:var(--blue);color:#fff;font-size:10px;padding:2px 6px">✓ Aprobar</button>';
+      if(t.status==='done')actBtns+='<button class="btn sm" onclick="event.stopPropagation();markReviewed('+t.id+')" style="background:var(--green);color:#fff;font-size:10px;padding:2px 6px" title="Marcar el análisis como revisado — pasa a aprobación">✓ Revisar</button>';
+      if((t.status==='done'||t.status==='reviewed')&&(sup||rev))actBtns+='<button class="btn sm" onclick="event.stopPropagation();markObserved('+t.id+')" style="background:var(--orange);color:#fff;font-size:10px;padding:2px 6px" title="Observar — devuelve el análisis al analista con un comentario">⚑ Obs.</button>';
+      if(t.status==='reviewed'&&sup)actBtns+='<button class="btn sm" onclick="event.stopPropagation();markApproved('+t.id+')" style="background:var(--blue);color:#fff;font-size:10px;padding:2px 6px" title="Aprobación final — cierra el análisis">✓ Aprobar</button>';
       if(sup&&assigns.length>0)actBtns+='<button class="btn sm" title="Replanificar" onclick="event.stopPropagation();openReplanSuper('+t.id+')" style="font-size:10px;padding:2px 4px">↺</button>';
       if(sup)actBtns+='<button class="btn sm" style="color:var(--text3);padding:2px 4px" title="Eliminar" onclick="event.stopPropagation();deleteTask('+t.id+')">🗑</button>';
       // Acciones analista asignado
@@ -5348,6 +5492,7 @@ function render(){
     el.innerHTML=h;
     if(showModal)setTimeout(renderDateAssigns,30);
     renderSpBadge();
+    _syncTopScrollbars();
     }catch(err){
       console.error('render error:',err);
       const el2=document.getElementById('app');
@@ -5362,6 +5507,25 @@ async function hashPassword(plain){
   const buf=await crypto.subtle.digest('SHA-256',enc.encode(plain));
   const hex=Array.from(new Uint8Array(buf)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
   return '$sha256$'+hex;
+}
+// Hash del password default, precalculado para poder sembrar hasheado en applySnapshot (sync)
+let _DEFAULT_PWD_HASH=null;
+hashPassword('labtrack123').then(function(h){_DEFAULT_PWD_HASH=h;}).catch(function(){});
+// Migración: hashear en reposo cualquier contraseña que haya quedado en texto plano.
+// doLogin compara por hash cuando el valor tiene prefijo $sha256$, así que es transparente.
+async function _migratePlainPasswords(){
+  var changed=false;
+  var ids=Object.keys(passwords||{});
+  for(var i=0;i<ids.length;i++){
+    var uid=ids[i],v=passwords[uid];
+    if(typeof v==='string'&&v&&!v.startsWith('$sha256$')){
+      passwords[uid]=await hashPassword(v);
+      if(!passwords_ts)passwords_ts={};
+      passwords_ts[uid]=Date.now();
+      changed=true;
+    }
+  }
+  if(changed){saveLS();saveNow().catch(function(e){console.error('pwd-migrate:',e);});}
 }
 
 function renderLogin(){
@@ -5441,7 +5605,7 @@ function renderLogin(){
     if(_discoverState==='loading'){
       _discoverSection='<div style="text-align:center;padding:12px;font-size:12px;color:var(--text2)">⏳ Buscando laboratorios…</div>';
     } else if(_discoverState&&_discoverState.error){
-      _discoverSection='<div style="background:#fef2f2;border-radius:var(--radius);padding:9px 12px;font-size:12px;color:#dc2626;margin-top:8px">⚠ '+escH(_discoverState.error)+'</div>';
+      _discoverSection='<div style="background:var(--red-bg);border-radius:var(--radius);padding:9px 12px;font-size:12px;color:var(--red-text);margin-top:8px">⚠ '+escH(_discoverState.error)+'</div>';
     } else if(_discoverState&&_discoverState.labs){
       _discoverSection='<div style="margin-top:10px;margin-bottom:4px">'
         +'<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px">Seleccioná tu laboratorio:</div>'
@@ -5658,6 +5822,7 @@ async function doLogin(){
     currentView=firstViewForRole(currentUser);
     recordLoginSuccess(uid);
     auditLog('LOGIN','USER',uid,{description:'Inicio de sesión: '+currentUser.name},'');
+    _migratePlainPasswords().catch(function(e){console.warn('pwd-migrate:',e);});
     // Forzar cambio de contraseña si nunca fue cambiada (default)
     if(currentUser._mustChangePwd){
       try{localStorage.setItem('lt9-session',JSON.stringify({uid:uid,ts:Date.now()}));}catch(e){}
@@ -5775,6 +5940,11 @@ function renderRevision(){
   var doneT=activeTasks().filter(function(t){return t.status==='done'&&mQ(t)&&_tipoMatch(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
   var reviewedT=activeTasks().filter(function(t){return t.status==='reviewed'&&mQ(t)&&_tipoMatch(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
   var observedT=activeTasks().filter(function(t){return t.status==='observed'&&mQ(t)&&_tipoMatch(t);}).sort(function(a,b){return(a.due||'').localeCompare(b.due||'');});
+  // Filtro de mes opcional (por fecha límite; default: todos)
+  var _rvGet=function(t){return t.due||t.created||'';};
+  doneT=monthFilterApply('revision',doneT,_rvGet,true);
+  reviewedT=monthFilterApply('revision',reviewedT,_rvGet,true);
+  observedT=monthFilterApply('revision',observedT,_rvGet,true);
   var cols='grid-template-columns:1.6fr 0.9fr 0.7fr 0.65fr 1fr';
   function tRow(t,actions){
     var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
@@ -5793,11 +5963,16 @@ function renderRevision(){
       +'<div style="display:flex;gap:4px;flex-wrap:wrap">'+actions+'</div>'
       +'</div>';
   }
-  var searchHtml='<div style="position:relative;margin-bottom:16px">'
+  var searchHtml='<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">'
+    +'<div style="position:relative;flex:1">'
     +'<input id="srch-revision" type="text" placeholder="Buscar por producto o lote…" value="'+escH(window.revSearch||'')+'"'
     +' oninput="_srch(\'revSearch\',this.value,\'srch-revision\')"'
     +' style="width:100%;padding:8px 36px 8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text);box-sizing:border-box">'
     +(window.revSearch?'<span onclick="window.revSearch=\'\';render()" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:var(--text3);font-size:20px;line-height:1;user-select:none">×</span>':'')
+    +'</div>'
+    +monthFilterSelect('revision',activeTasks(),_rvGet,true)
+    +((q||_tipoFilter.length||(listMonthFilter['revision']&&listMonthFilter['revision']!=='all'))
+      ?'<button class="btn sm" onclick="window.revSearch=\'\';_tipoFilter=[];delete listMonthFilter[\'revision\'];render()" title="Restablecer búsqueda, tipo y mes">✕ Limpiar filtros</button>':'')
     +'</div>';
   var thd='<div class="thead" style="'+cols+'"><div>Producto / Lote</div><div>Analistas</div><div class="u-tac">H. Real</div><div class="u-tac">Vto</div><div></div></div>';
   var html=tabBar+searchHtml+_tipoFilterBar();
@@ -5825,8 +6000,8 @@ function renderRevision(){
         rowActions='<span class="u-xs3" title="Segregación de funciones: participaste como analista">— Participaste como analista —</span>'
           +'<button class="btn sm" onclick="event.stopPropagation();openEdit('+t.id+')">Ver</button>';
       } else {
-        rowActions='<button class="btn sm pri" onclick="event.stopPropagation();markReviewed('+t.id+')">✓ Revisar</button>'
-          +'<button class="btn sm dan" onclick="event.stopPropagation();markObserved('+t.id+')">⚑ Obs.</button>';
+        rowActions='<button class="btn sm pri" onclick="event.stopPropagation();markReviewed('+t.id+')" title="Marcar el análisis como revisado — pasa a aprobación">✓ Revisar</button>'
+          +'<button class="btn sm dan" onclick="event.stopPropagation();markObserved('+t.id+')" title="Observar — devuelve el análisis al analista con un comentario">⚑ Obs.</button>';
       }
       return tRow(t,rowActions);
     }).join('')+'</div>';
@@ -5866,9 +6041,13 @@ function renderRevision(){
         _acts+='<button class="btn sm" onclick="event.stopPropagation();openEdit('+t.id+')">Ver</button>';
         return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
           +'<div class="cell-trunc"><div style="font-weight:600">'+escH(t.producto)+'</div>'
-          +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3)">'+escH(t.lote||'')+'</div></div>'
+          +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3)">'+escH(t.lote||'')+'</div>'
+          +(t.reviewComment?'<div style="font-size:10px;color:var(--green-text);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="Comentario de revisión: '+escH(t.reviewComment)+'">💬 '+escH(t.reviewComment.slice(0,45))+(t.reviewComment.length>45?'…':'')+'</div>':'')
+          +'</div>'
           +'<div style="font-size:12px">'+(revName?escH(revName):'<span class="u-fg3">—</span>')
-          +(_ra?'<div style="font-size:10px;color:var(--green-text);margin-top:1px">✅ Aprob. revisor: '+escH(_raName||'—')+'</div>':'')+'</div>'
+          +(_ra?'<div style="font-size:10px;color:var(--green-text);margin-top:1px">✅ Aprob. revisor: '+escH(_raName||'—')+'</div>':'')
+          +(_ra&&t._revApprovedComment?'<div style="font-size:10px;color:var(--text2);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="Comentario del revisor al aprobar: '+escH(t._revApprovedComment)+'">💬 '+escH(t._revApprovedComment.slice(0,40))+(t._revApprovedComment.length>40?'…':'')+'</div>':'')
+          +'</div>'
           +'<div style="font-family:var(--mono);font-size:11px;text-align:center">'+(hReal>0?hReal+'h':'—')+'</div>'
           +'<div style="font-family:var(--mono);font-size:11px;text-align:center">'+fmtD(t.due)+'</div>'
           +'<div style="display:flex;gap:4px;flex-wrap:wrap">'+_acts+'</div>'
@@ -6459,6 +6638,18 @@ function mergeSnapshot(local, remote) {
     });
     merged.replanNotifs = Object.values(rnMap);
 
+    // ── InterLab requests: merge by id, keep newer ──
+    // Efectivo ts = max(ts, _ts, completedTs): el lab receptor actualiza vía
+    // updateRequestInPartnerGist (_ts) y el emisor localmente (ts/completedTs).
+    function _ilrEff(r){ return Math.max(r.ts||0, r._ts||0, r.completedTs||0); }
+    var ilrMap = {};
+    (R.interLabRequests||[]).forEach(function(r){ ilrMap[r.id] = r; });
+    (L.interLabRequests||[]).forEach(function(r){
+      var rr = ilrMap[r.id];
+      if(!rr || _ilrEff(r) > _ilrEff(rr)) ilrMap[r.id] = r;
+    });
+    merged.interLabRequests = Object.values(ilrMap).filter(function(r){ return !r._deleted; });
+
     // ── MgmtTasks: merge by id ──
     var mtMap = {};
     (R.mgmtTasks||[]).forEach(function(t){ mtMap[t.id] = t; });
@@ -6720,7 +6911,7 @@ function requireSignature(action, label, callback) {
     + '<textarea id="sig-reason" placeholder="Ej: Resultados verificados, análisis conforme a especificaciones" rows="3" style="width:100%;margin-top:4px;padding:8px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg2);color:var(--text);font-size:13px;box-sizing:border-box;resize:vertical"></textarea></div>'
     + '<div id="sig-err" style="color:var(--red);font-size:12px;margin-bottom:8px;display:none"></div>'
     + '<div style="display:flex;gap:8px;justify-content:flex-end">'
-    + '<button onclick="this.closest(\'div[style*=fixed]\').remove()" style="padding:8px 16px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px">Cancelar</button>'
+    + '<button onclick="this.closest(\'.modal-overlay,div[style*=fixed]\').remove()" style="padding:8px 16px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px">Cancelar</button>'
     + '<button id="sig-confirm" style="padding:8px 16px;border:none;border-radius:var(--radius);background:var(--blue);color:#fff;cursor:pointer;font-size:13px;font-weight:600">Confirmar y firmar</button>'
     + '</div></div>';
   document.body.appendChild(overlay);
@@ -6779,6 +6970,10 @@ function renderAuditTrail() {
   if(filterAction) f = f.filter(function(e){return e.action===filterAction;});
   if(filterEntity) f = f.filter(function(e){return e.entity===filterEntity;});
   if(filterText) f = f.filter(function(e){return (e.userName||'').toLowerCase().includes(filterText)||(e.entity||'').toLowerCase().includes(filterText)||((e.details&&e.details.description)||'').toLowerCase().includes(filterText)||((e.details&&e.details.field)||'').toLowerCase().includes(filterText)||String(e.entityId||'').includes(filterText)||(e.reason||'').toLowerCase().includes(filterText);});
+  const _auGet=function(e){return e.ts?new Date(e.ts).toISOString().slice(0,10):'';};
+  const _auPre=f.length;
+  f=monthFilterApply('audittrail',f,_auGet);
+  const _auHidden=_auPre-f.length;
 
   const actionColors = {
     CREATE:'var(--green)',EDIT:'var(--blue)',STATUS_CHANGE:'var(--amber)',
@@ -6831,6 +7026,9 @@ function renderAuditTrail() {
     +'<option value="TASK">Análisis</option><option value="USER">Usuario</option>'
     +'<option value="SCHEDULE">Horario</option><option value="ABSENCE">Ausencia</option>'
     +'</select>'
+    +monthFilterSelect('audittrail',entries,_auGet)
+    +(_auHidden>0?'<span style="font-size:11px;color:var(--text3)">'+_auHidden+' en otros meses</span>':'')
+    +((filterUser||filterAction||filterEntity||filterText||(listMonthFilter['audittrail']&&listMonthFilter['audittrail']!==_lmCurrent()))?'<button class="btn sm" onclick="auditFilterUser=\'\';auditFilterAction=\'\';auditFilterEntity=\'\';window.auditFilterText=\'\';delete listMonthFilter[\'audittrail\'];render()" title="Restablecer todos los filtros">✕ Limpiar filtros</button>':'')
     +'<button class="btn sm" onclick="exportAuditCSV()" style="margin-left:auto">&#11015; Exportar CSV</button>'
     +'</div>'
     +'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">'
@@ -7045,7 +7243,7 @@ function showTaskHistoryModal(taskId) {
   overlay.innerHTML = '<div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px;max-width:540px;width:95%;max-height:80vh;display:flex;flex-direction:column">'
     +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
     +'<h3 style="margin:0;font-size:14px">Historial de versiones — '+escH(t.producto)+' '+escH(t.lote)+'</h3>'
-    +'<button onclick="this.closest(\'div[style*=fixed]\').remove()" style="border:none;background:none;font-size:18px;cursor:pointer;color:var(--text3)">✕</button>'
+    +'<button onclick="this.closest(\'.modal-overlay,div[style*=fixed]\').remove()" style="border:none;background:none;font-size:18px;cursor:pointer;color:var(--text3)">✕</button>'
     +'</div>'
     +'<div style="margin-bottom:12px;padding:8px 10px;background:var(--bg2);border-radius:var(--radius)">'+integrityBadge+'</div>'
     +'<div style="overflow-y:auto">'+renderTaskHistory(taskId)+'</div>'
@@ -7083,23 +7281,17 @@ function renderShell(){
     {id:'tasks',label:'Análisis',icon:'🔬',badge:pendC>0?pendC:'',bc:'w'},
     {id:'pending',label:'Pendientes',icon:'⏰',badge:(()=>{const pc=activeTasks().filter(t=>t.status==='pending-confirm').length;const sc=productSuggestions.filter(s=>s.status==='pending').length;return lateC>0||pc>0||sc>0?(lateC+pc+sc):'';})(),bc:'d'},
     {id:'revision',label:'Revisión',icon:'✅',badge:(()=>{const d=activeTasks().filter(t=>t.status==='done').length,r=activeTasks().filter(t=>t.status==='reviewed').length,o=activeTasks().filter(t=>t.status==='observed').length;const tot=d+r+o;return tot>0?tot:'';})(),bc:'w'},
-    {id:'sugerencias',label:'Ingresos',icon:'💡',badge:(()=>{const sc=productSuggestions.filter(s=>s.status==='pending').length;return sc>0?sc:'';})(),bc:'w'},
     {id:'especiales',label:'Especiales',icon:'🧪',badge:(()=>{const c=activeTasks().filter(t=>(t.tipo==='EE'||t.tipo==='Limp'||t.tipo==='Val')&&t.status!=='approved').length;return c>0?c:'';})()},
     {id:'mgmt',label:'Gestión',icon:'🗂'},
     {id:'week',label:'Calendario',icon:'📅'},
     {id:'informes',label:'Informes',icon:'📊'},
-    {id:'rrhh',label:'Personal',icon:'👥',badge:(()=>{const c=checkAbsenceConflicts();return c.length>0?c.length:'';})(),bc:'d'},
-    {id:'notificaciones',label:'Solicitudes',icon:'🔔',badge:(()=>{const p=scheduleRequests.filter(r=>r.status==="pending").length;return p>0?p:"";})(),bc:'w'},
+    {id:'rrhh',label:'Personal',icon:'👥',badge:(()=>{const c=checkAbsenceConflicts().length;const p=scheduleRequests.filter(r=>r.status==='pending').length;const t=c+p;return t>0?t:'';})(),bc:'d'},
     {id:'solicitudesIL',label:'Sol. Inter-lab',icon:'🔗',badge:(()=>{var c=(window._incomingILRCount||0);return c>0?c:'';})(),bc:'w'},
-    {id:'historial',label:'Historial notificaciones',icon:'📜'},
     {id:'admin',label:'Administración',icon:'⚙'},
-    {id:'audittrail',label:'Audit Trail',icon:'🔍'},
   ]:isReviewer?[
     {id:'dashboard',label:'Mi día',icon:'🏠'},
     {id:'revision',label:'Revisión',icon:'✅',badge:reviewPendC>0?reviewPendC:'',bc:'w'},
     {id:'tasks',label:'Análisis',icon:'🔬',badge:(function(){var n=activeTasks().length;return n>0?n:'';})(),bc:'w'},
-    {id:'pending',label:'Pendientes',icon:'⏰'},
-    {id:'sugerencias',label:'Ingresos',icon:'💡',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
     {id:'week',label:'Calendario equipo',icon:'📅'},
     {id:'cronograma',label:'Mi cronograma',icon:'🗓',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
     {id:'especiales',label:'Especiales',icon:'🧪'},
@@ -7119,12 +7311,10 @@ function renderShell(){
     {id:'dashboard',label:'Mi día',icon:'🏠',badge:actionC>0?actionC:'',bc:'d'},
     {id:'tasks',label:'Mis análisis',icon:'🔬'},
     {id:'mgmt',label:'Gestión',icon:'🗂'},
-    {id:'pending',label:'Pendientes',icon:'⏰'},
-    {id:'sugerencias',label:'Ingresos',icon:'💡',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
     {id:'cronograma',label:'Mi cronograma',icon:'🗓',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ];
-  const titles={dashboard:sup?'Panel general':'Mi día',tasks:(sup||isReviewerRole())?'Análisis / Lotes':'Mis análisis',pendientes:'Ensayos pendientes',review:'Revisión de análisis',revision:'Revisión y Aprobación',sugerencias:'Ingresos',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',audittrail:'Audit Trail',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración',historial:'Historial de notificaciones',sampler:'A ingresar — Muestreo',freeTasks:'Mis tareas libres',estabilidades:'Estabilidades',limpval:'Limpiezas & Validaciones',solicitudesIL:'Solicitudes inter-laboratorio'};
-  const content=({dashboard:renderDashboard,aprobados:renderAprobados,tasks:renderTasks,pending:renderPendientesList,pendientes:renderPendientesList,week:renderWeek,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderRevision,revision:renderRevision,sugerencias:renderSugerencias,informes:renderInformes,notificaciones:renderNotificaciones,historial:renderHistorialNotif,admin:renderAdmin,audittrail:renderAuditTrail,sampler:renderSamplerView,freeTasks:renderStaffFreeTasks,especiales:renderEspeciales,estabilidades:renderEstabilidades,limpval:renderLimpVal,solicitudesIL:renderSolicitudes}[currentView]||renderDashboard)();
+  const titles={dashboard:sup?'Panel general':'Mi día',tasks:(sup||isReviewerRole())?'Análisis / Lotes':'Mis análisis',pendientes:'Ensayos pendientes',review:'Revisión de análisis',revision:'Revisión y Aprobación',sugerencias:'Ingresos',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',audittrail:'Audit Trail',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración',historial:'Historial de notificaciones',sampler:'A ingresar — Muestreo',freeTasks:'Mis tareas únicas',estabilidades:'Estabilidades',limpval:'Limpiezas & Validaciones',solicitudesIL:'Solicitudes inter-laboratorio'};
+  const content=({dashboard:renderDashboard,aprobados:renderAprobados,tasks:renderTasksModule,pending:renderPendientesList,pendientes:renderPendientesList,week:renderWeek,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderRevision,revision:renderRevision,sugerencias:renderSugerencias,informes:renderInformes,notificaciones:renderNotificaciones,historial:renderHistorialNotif,admin:renderAdminModule,audittrail:renderAuditTrail,sampler:renderSamplerView,freeTasks:renderStaffFreeTasks,especiales:renderEspeciales,estabilidades:renderEstabilidades,limpval:renderLimpVal,solicitudesIL:renderSolicitudes}[currentView]||renderDashboard)();
   return`<div class="shell">
     <div class="sidebar">
       <div class="sb-header">
@@ -7175,7 +7365,7 @@ function renderStaffFreeTasks(){
     return true;
   }).sort(function(a,b){return(b.date||'').localeCompare(a.date||'');});
   var html='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">'
-    +'<div class="sec" style="margin-bottom:0">Mis tareas libres</div>'
+    +'<div class="sec" style="margin-bottom:0">Mis tareas únicas</div>'
     +'<input id="srch-staffft" type="text" placeholder="Buscar por descripción o fecha…" value="'+escH(_staffFTSearch||'')+'"'
     +' oninput="_srch(\'_staffFTSearch\',this.value,\'srch-staffft\')"'
     +' style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)">'
@@ -7183,7 +7373,7 @@ function renderStaffFreeTasks(){
     +'<button class="btn pri" onclick="openFreeTaskModal(null)">+ Agregar</button>'
     +'</div>';
   if(myFT.length===0)return html+'<div class="empty" style="padding:32px">'
-    +(_sfq?'Sin resultados para «'+escH(_sfq)+'»':'Sin tareas libres registradas.')+'</div>';
+    +(_sfq?'Sin resultados para «'+escH(_sfq)+'»':'Sin tareas únicas registradas.')+'</div>';
   return html+'<div>'+myFT.map(function(ft){
     var isAssignedBySup=ft.assignedBy&&ft.assignedBy!==currentUser.id;
     var stC=ft.status==='confirmed'?'var(--green)':ft.status==='rejected'||ft.status==='declined'?'var(--red)':ft.status==='pending'?'var(--blue)':'var(--amber)';
@@ -7286,7 +7476,7 @@ function renderDashboard(){
     const filterLabel={'':`Todos (${_at.length})`,'pending':`Pendientes (${pend})`,'progress':`En curso (${prog})`,'late':`Vencidos (${late})`,'done':`Completados p/revisar (${done})`};
     return`
       ${_tipoFilterBar()}<div class="stats-row">
-        <div class="scard" onclick="dashFilter='';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter===''?';box-shadow:0 0 0 2px var(--navy,#1a4f8a)':''}">
+        <div class="scard" onclick="dashFilter='';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter===''?';box-shadow:0 0 0 2px var(--blue)':''}">
           <div class="scard-lbl">LOTES TOTALES</div><div class="scard-val">${_at.length}</div></div>
         ${aIngresar>0?`<div class="scard" onclick="currentView='pending';window.pendingStatusFilter='a-ingresar';render()" style="cursor:pointer;transition:box-shadow .15s;border-color:#d8b4fe">
           <div class="scard-lbl" style="color:#5b21b6">A INGRESAR</div><div class="scard-val" style="color:#5b21b6">${aIngresar}${aIngresarOverdue>0?`<span style="font-size:12px;color:var(--red);margin-left:4px">⚠${aIngresarOverdue}</span>`:''}
@@ -7341,7 +7531,7 @@ function renderDashboard(){
         +(!isOk?'<div style="margin-top:8px"><button class="btn sm pri" style="background:#059669;border-color:#059669" onclick="openSamplingModal('+t.id+')">✓ Registrar muestreo</button></div>':'<div style="margin-top:6px;font-size:11px;color:#065f46;background:#d1fae5;padding:4px 10px;border-radius:var(--radius);display:inline-block">✓ Muestreo registrado — pendiente aprobación supervisor</div>')
         +'</div>';
     }).join('')}</div>`:''}
-    ${myFT.length?`<div class="sec" style="margin-bottom:6px">Tareas libres pendientes</div>
+    ${myFT.length?`<div class="sec" style="margin-bottom:6px">Tareas únicas pendientes</div>
     <div class="tbl">${myFT.map(ft=>`<div class="trow" onclick="openFreeTaskModal(${ft.id})">`
       +`<div style="font-size:12px">${escH(ft.description||'')}</div>`
       +`<div class="u-mono11">${ft.date?fmtDDMMYY(ft.date):'—'}</div>`
@@ -7455,7 +7645,7 @@ function renderDashboard(){
       return (a.t.producto||'').localeCompare(b.t.producto||'','es',{sensitivity:'base'});
     });
 
-  // Tareas libres pendientes de aceptación (status==='pending') para "Mi día"
+  // Tareas únicas pendientes de aceptación (status==='pending') para "Mi día"
   var _myFTPast=freeTasks.filter(function(ft){return ft.analystId===_myId&&ft.status==='pending'&&(ft.date||'')<_todayStr;});
   var _myFTToday=freeTasks.filter(function(ft){return ft.analystId===_myId&&ft.status==='pending'&&(ft.date||'')=== _todayStr;});
   var _myFTUpcoming=freeTasks.filter(function(ft){return ft.analystId===_myId&&ft.status==='pending'&&(ft.date||'')>_todayStr;});
@@ -7629,7 +7819,7 @@ function tRowSupLote(t){
   var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
   var realTotal=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
   var ds=taskDisplayStatus(t);
-  var _ilrSup=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id;});
+  var _ilrSup=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id&&!r._deleted;});
   var obsTitle=t.observations&&t.observations.length
     ?escH(t.observations.map(function(o,i){return '#'+(i+1)+' '+(o.byName||'')+': '+(o.comment||'');}).join('\n')):'';
   var row='<div class="trow-sup" onclick="openEdit('+t.id+')">';
@@ -7744,9 +7934,9 @@ function openReplanSuper(taskId){
       +'<span class="av '+u.av+'" style="width:22px;height:22px;font-size:9px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;font-weight:700;margin-right:8px">'+escH(u.avInit)+'</span>'
       +escH(u.name)+'</button>';
   }).join('');
-  pickDiv.innerHTML='<div style="position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px;width:320px;box-shadow:0 8px 32px rgba(0,0,0,.25)">'
-    +'<h4 style="margin:0 0 4px">Replanificar</h4>'
+  pickDiv.innerHTML='<div class="modal-overlay" style="z-index:600">'
+    +'<div class="modal" style="width:min(320px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">Replanificar</h3>'
     +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(t.producto)+' — '+escH(t.lote)+'<br>Seleccioná el analista a replanificar:</p>'
     +btns
     +'<button class="btn" style="width:100%;margin-top:2px" onclick="_replanPickClose()">Cancelar</button>'
@@ -7809,7 +7999,7 @@ function tRowAna(t,maOverride){
   var daysLateAssign=ma&&ma.date?Math.round((new Date(todayStr+'T12:00:00').getTime()-new Date(ma.date+'T12:00:00').getTime())/86400000):0;
   var showOverdueWarn=daysLateAssign>=2&&!iThisAssignDone&&!iThisAssignPendConf&&(t.status==='pending'||t.status==='scheduled'||t.status==='progress');
 
-  var _ilrActive=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id;});
+  var _ilrActive=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id&&!r._deleted;});
   return'<div>'
     +'<div class="trow" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr'+(showOverdueWarn?';border-left:3px solid var(--amber)':'')+'">'
     +'<div><div class="cell-trunc">'+escH(t.producto)+'</div><div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+'<span>'+escH(t.lote)+'</span></div></div>'
@@ -7863,7 +8053,7 @@ function _doSearchRender(){
     const el=document.getElementById('app');
     if(!el)return;
     const html=renderShell();
-    if(html!==_lastHtml){_lastHtml=html;el.innerHTML=html;attachLogin&&attachLogin();}
+    if(html!==_lastHtml){_lastHtml=html;el.innerHTML=html;attachLogin&&attachLogin();_syncTopScrollbars();}
     const inp=document.getElementById('search-bar-input');
     if(inp){const v=filterSearch;inp.focus();inp.value=v;inp.setSelectionRange(v.length,v.length);}
   },80);
@@ -7878,7 +8068,7 @@ function _srch(varName,value,inputId){
     const app=document.getElementById('app');
     if(!app)return;
     const html=renderShell();
-    if(html!==_lastHtml){_lastHtml=html;app.innerHTML=html;attachLogin&&attachLogin();}
+    if(html!==_lastHtml){_lastHtml=html;app.innerHTML=html;attachLogin&&attachLogin();_syncTopScrollbars();}
     const el=document.getElementById(inputId);
     if(el){const v=window[varName]||'';el.focus();el.value=v;el.setSelectionRange(v.length,v.length);}
   },60);
@@ -7909,6 +8099,9 @@ function renderTasks(){
   if(filterTipo){if(filterTipo==='none')f=f.filter(function(t){return !(t.tipo||'');});else f=f.filter(function(t){return (t.tipo||'')===filterTipo;});}
   if(filterSearch){var fs2=filterSearch.toLowerCase();f=f.filter(function(t){return t.producto.toLowerCase().includes(fs2)||t.lote.toLowerCase().includes(fs2);});}
   f=f.filter(_tipoMatch);
+  // Filtro de mes opcional (por fecha de ingreso; default: todos)
+  var _tkGet=function(t){return t.created||t.due||'';};
+  f=monthFilterApply('tasks',f,_tkGet,true);
   if(!sup){
     // ── Historial de análisis — solo lectura, ordenado por fecha DESC ──
     var theadHist='<div class="thead" style="grid-template-columns:1.8fr .8fr .55fr .9fr">'
@@ -7956,6 +8149,9 @@ function renderTasks(){
     +'<option value="approved"'+(filterStatus==='approved'?' selected':'')+'>Aprobado</option>'
     +'<option value="observed"'+(filterStatus==='observed'?' selected':'')+'>Observado</option>'
     +'</select>'
+    +monthFilterSelect('tasks',sup?activeTasks():activeTasks().filter(isMyTask),_tkGet,true)
+    +((filterAnalyst||filterStatus||filterSearch||_tipoFilter.length||(listMonthFilter['tasks']&&listMonthFilter['tasks']!=='all'))
+      ?'<button class="btn sm" onclick="filterAnalyst=\'\';filterStatus=\'\';filterSearch=\'\';_tipoFilter=[];delete listMonthFilter[\'tasks\'];render()" title="Restablecer todos los filtros">✕ Limpiar filtros</button>':'')
     +viewToggle
     +'<span class="count-lbl">'+f.length+' lote'+(f.length!==1?'s':'')+(filterSearch?' — «'+escH(filterSearch)+'»':'')+'</span>'
     +(sup?'<button id="copybtn-tbl-tasks" class="btn sm" onclick="copyTableToClipboard(\'tbl-tasks\')" style="margin-left:auto">📋 Copiar</button>':'')
@@ -7967,7 +8163,7 @@ function tRowAnaHist(t,ma){
   var md=ma?ma.date:t.due;
   var maRealH=ma?((ma.sessions||[]).reduce(function(s,e){return s+(e.hours||0);},0)||(ma.realHours||0)):0;
   var lastObs=t.observations&&t.observations.length?t.observations[t.observations.length-1]:{};
-  var _ilrA=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id;});
+  var _ilrA=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id&&!r._deleted;});
   return'<div class="trow" onclick="openEdit('+t.id+')" style="grid-template-columns:1.8fr .8fr .55fr .9fr;cursor:pointer">'
     +'<div><div class="cell-trunc" style="font-weight:600">'+escH(t.producto)+'</div>'
     +'<div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+'<span class="u-mono11">'+escH(t.lote)+'</span></div></div>'
@@ -7993,7 +8189,7 @@ function taskCard(t, showReplanBtn){
     });
     return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:8px">'      +'<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">'      +'<div style="flex:1">'      +'<div style="font-weight:600;font-size:13px">'+escH(t.producto)+'</div>'      +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3);margin-top:1px">'      +escH(t.lote)+(t.due?' · Vence: '+fmtDF(t.due):'')      +(myA?' · Asignado: '+fmtDF(myA.date):'')      +'</div>'      +(t.notes?'<div style="font-size:11px;color:var(--text2);margin-top:3px">'+escH(t.notes)+'</div>':'')      +'</div>'      +'<span class="pill '+t.status+'" style="flex-shrink:0">'+statusLabel(t.status)+'</span>'      +'</div>'      +'<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'      +(showReplanBtn&&!hasSolicitado&&!hasReplan        ?(function(){
         var isPartial=(t.assignments||[]).some(function(a){return !a._removed;});
-        return '<button class="btn sm pri" onclick="requestPlanification('+t.id+')">'+(isPartial?'📋 Solicitar participar':'📋 Solicitar planificación')+'</button>';
+        return '<button class="btn sm pri" onclick="requestPlanification('+t.id+')" title="Pedir al supervisor que te asigne este producto">'+(isPartial?'📋 Solicitar participar':'📋 Solicitar planificación')+'</button>';
       })()        :hasSolicitado?'<span style="font-size:11px;color:var(--blue-text);padding:4px 8px">✓ Solicitud enviada</span>':''      )      +(myA&&!hasReplan        ?'<button class="btn sm" onclick="openReplan('+t.id+',&quot;'+currentUser.id+'&quot;)">↻ Solicitar replanificación</button>'        :hasReplan?'<span style="font-size:11px;color:var(--amber-text);padding:4px 8px">↻ Replanif. solicitada</span>':''      )      +'</div>'      +'</div>';
   }
 
@@ -8004,13 +8200,35 @@ function renderPendStatusChips(psf,nAll,nIng,nProg,nAna){
     return'<button class="btn sm" onclick="window.pendientesStatusFilter=\''+status+'\';var el=document.getElementById(\'pend-results\');if(el)el.innerHTML=renderPendientesResults();" style="'+bg+'">'+label+' ('+count+')</button>';
   }
   return'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">'
-    +chipBtn('all','Todos','var(--navy,#1a4f8a)',nAll)
+    +chipBtn('all','Todos','var(--blue)',nAll)
     +chipBtn('pending','📥 Ingresado','#64748b',nIng)
     +chipBtn('scheduled','📅 Programado','var(--blue)',nProg)
     +chipBtn('progress','🔬 En curso','var(--green)',nAna)
     +'</div>';
 }
 
+// Módulo Análisis con pestañas — fusión de módulos: Pendientes (default para
+// analista/revisor, para que lo pendiente nunca quede enterrado por el historial),
+// Análisis e Ingresos. El supervisor mantiene Pendientes como módulo propio (colas).
+function renderTasksModule(){
+  var _isSup=isSupRole();
+  if(typeof window.tasksTab==='undefined')window.tasksTab=_isSup?'analisis':'pendientes';
+  if(_isSup&&window.tasksTab==='pendientes')window.tasksTab='analisis';
+  var _pendCnt=activeTasks().filter(function(t){return t.status==='pending'||t.status==='scheduled'||t.status==='progress';}).length;
+  var _ingCnt=_isSup
+    ?productSuggestions.filter(function(s){return s.status==='pending';}).length
+    :replanNotifs.filter(function(n){return n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending';}).length;
+  function _tt(id,label,title){return '<div class="tab'+(window.tasksTab===id?' active':'')+'" onclick="window.tasksTab=\''+id+'\';render()" title="'+title+'">'+label+'</div>';}
+  var tb='<div class="tab-bar">'
+    +(!_isSup?_tt('pendientes','⏰ Pendientes'+(_pendCnt?' ('+_pendCnt+')':''),'Productos pendientes, programados y en análisis — incluye solicitar asignación de productos omitidos'):'')
+    +_tt('analisis',_isSup?'🔬 Análisis':'🔬 Mis análisis',_isSup?'Listado completo de análisis y lotes':'Todos los análisis asignados a vos, incluidos los históricos')
+    +_tt('ingresos','💡 Ingresos'+(_ingCnt?' ('+_ingCnt+')':''),_isSup?'Sugerencias de ingreso enviadas por el equipo':'Sugerir ingreso de productos y ver respuestas del supervisor')
+    +'</div>';
+  var body=(window.tasksTab==='pendientes'&&!_isSup)?renderPendientesList()
+    :window.tasksTab==='ingresos'?renderSugerencias()
+    :renderTasks();
+  return tb+body;
+}
 function renderPendientesList(){
   const isSup=isSupRole();
   if(isSup) return renderPending();
@@ -8031,6 +8249,9 @@ function renderPendientesList(){
   var allActive=activeTasks().filter(function(t){
     return (t.status==='pending'||t.status==='scheduled'||t.status==='progress')&&matchQ(t)&&_tipoMatch(t);
   });
+  // Filtro de mes opcional (por fecha límite; default: todos)
+  var _paGet=function(t){return t.due||t.created||'';};
+  allActive=monthFilterApply('pendAna',allActive,_paGet,true);
   var filtered=allActive.filter(matchS);
 
   // Counts for dashboard chips
@@ -8068,11 +8289,12 @@ function renderPendientesList(){
       +(anaAvatars?'<div style="display:flex;gap:2px;margin-top:4px">'+anaAvatars+'</div>':'')
       +'</div>'
       +'<span class="pill '+t.status+'" style="font-size:10px;flex-shrink:0">'+statusLabel(t.status)+'</span>'
+      +(isReviewerRole()&&!t._interLab?'<button class="btn sm" onclick="openSolicitudModal('+t.id+')" style="flex-shrink:0;font-size:11px;padding:3px 6px" title="Solicitar ensayo de este producto a otro laboratorio">🔗</button>':'')
       +(myA
         ?'<span style="font-size:10px;color:var(--green);flex-shrink:0">✓ Asignado a mí</span>'
         :(isReq
           ?'<span style="font-size:10px;color:var(--amber-text);flex-shrink:0">⏳ Solicitud enviada</span>'
-          :'<button class="btn sm pri" onclick="requestPlanification('+t.id+')" style="flex-shrink:0;font-size:11px">📋 Solicitar</button>'
+          :'<button class="btn sm pri" onclick="requestPlanification('+t.id+')" style="flex-shrink:0;font-size:11px" title="Pedir al supervisor que te asigne este producto">📋 Solicitar</button>'
         )
       )
       +'</div>';
@@ -8087,6 +8309,9 @@ function renderPendientesList(){
     +' onclick="window.pendientesSearch=\'\';var el=document.getElementById(\'pend-results\');if(el){el.innerHTML=renderPendientesResults();}var inp=document.getElementById(\'pend-search\');if(inp){inp.value=\'\';inp.focus();}this.style.display=\'none\';"'
     +' style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:var(--text3);font-size:20px;line-height:1;user-select:none;display:'+(q?'inline':'none')+'" title="Limpiar búsqueda">×</span>'
     +'</div>'
+    +monthFilterSelect('pendAna',activeTasks(),_paGet,true)
+    +((q||psf!=='all'||_tipoFilter.length||(listMonthFilter['pendAna']&&listMonthFilter['pendAna']!=='all'))
+      ?'<button class="btn sm" onclick="window.pendientesSearch=\'\';window.pendientesStatusFilter=\'all\';_tipoFilter=[];delete listMonthFilter[\'pendAna\'];render()" title="Restablecer búsqueda, estado, tipo y mes">✕ Limpiar filtros</button>':'')
     +'</div>';
 
   return chips+_tipoFilterBar()+searchBar+'<div id="pend-results">'+renderPendientesResults(filtered,misPendConfirm)+'</div>';
@@ -8124,11 +8349,12 @@ function renderPendientesResults(filtered,pc){
       +(anaAvatars?'<div style="display:flex;gap:2px;margin-top:4px">'+anaAvatars+'</div>':'')
       +'</div>'
       +'<span class="pill '+t.status+'" style="font-size:10px;flex-shrink:0">'+statusLabel(t.status)+'</span>'
+      +(isReviewerRole()&&!t._interLab?'<button class="btn sm" onclick="openSolicitudModal('+t.id+')" style="flex-shrink:0;font-size:11px;padding:3px 6px" title="Solicitar ensayo de este producto a otro laboratorio">🔗</button>':'')
       +(myA
         ?'<span style="font-size:10px;color:var(--green);flex-shrink:0">✓ Asignado a mí</span>'
         :(isReq
           ?'<span style="font-size:10px;color:var(--amber-text);flex-shrink:0">⏳ Solicitud enviada</span>'
-          :'<button class="btn sm pri" onclick="requestPlanification('+t.id+')" style="flex-shrink:0;font-size:11px">📋 Solicitar</button>'
+          :'<button class="btn sm pri" onclick="requestPlanification('+t.id+')" style="flex-shrink:0;font-size:11px" title="Pedir al supervisor que te asigne este producto">📋 Solicitar</button>'
         )
       )
       +'</div>';
@@ -8178,7 +8404,7 @@ function renderPending(){
         return '<div style="background:var(--surface);border-radius:var(--radius);padding:8px 12px;margin-bottom:6px;display:flex;align-items:center;gap:10px">'
           +'<div style="flex:1"><div style="font-weight:600">'+escH(t.producto)+'</div>'
           +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3)">'+escH(t.lote)+' · Vence: '+fmtDF(t.due)+'</div></div>'
-          +'<button class="btn sm pri" onclick="requestPlanification('+t.id+')">Solicitar asignación</button>'
+          +'<button class="btn sm pri" onclick="requestPlanification('+t.id+')" title="Pedir al supervisor que te asigne este producto">Solicitar asignación</button>'
           +'</div>';
       }).join('')
       +'</div>'
@@ -8191,13 +8417,13 @@ function renderPending(){
     +'<div><div style="font-weight:700;color:var(--blue-text)">'+_pendSuggCount+' sugerencia'+((_pendSuggCount>1)?'s':'')+' de ingreso pendiente'+((_pendSuggCount>1)?'s':'')+' de revisión</div>'
     +'<div class="u-sm2">Enviadas por el equipo de analistas</div></div>'
     +'</div>'
-    +'<button class="btn pri" onclick="setView(\'sugerencias\')" style="white-space:nowrap">Ver y gestionar →</button>'
+    +'<button class="btn pri" onclick="window.tasksTab=\'ingresos\';setView(\'tasks\')" style="white-space:nowrap" title="Abrir la pestaña Ingresos del módulo Análisis">Ver y gestionar →</button>'
     +'</div>':'';
 
   const ftPendHtml=isSupRole()?'<div style="margin-top:16px">'
-    +'<div style="font-weight:600;font-size:13px;color:var(--amber);margin-bottom:8px">Tareas libres por confirmar ('+freeTasks.filter(function(ft){return ft.status==="pending-confirm";}).length+')</div>'
+    +'<div style="font-weight:600;font-size:13px;color:var(--amber);margin-bottom:8px">Tareas únicas por confirmar ('+freeTasks.filter(function(ft){return ft.status==="pending-confirm";}).length+')</div>'
     +(freeTasks.filter(function(ft){return ft.status==="pending-confirm";}).length===0
-      ?'<div class="empty">Sin tareas libres pendientes ✓</div>'
+      ?'<div class="empty">Sin tareas únicas pendientes ✓</div>'
       :freeTasks.filter(function(ft){return ft.status==="pending-confirm";}).map(function(ft){
           const u=getU(ft.analystId);
           return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:6px;display:flex;align-items:center;gap:10px">'
@@ -8206,8 +8432,8 @@ function renderPending(){
             +'<div class="u-sm2">'+escH(u.name)+' · '+fmtDF(ft.date)+' · <b class="u-mono">'+(ft.realHours||ft.hours||0)+'h</b>'+(ft.suggestedHours&&ft.realHours!==ft.suggestedHours?' <span class="u-fg3">(sug. '+ft.suggestedHours+'h)</span>':'')+(ft.notes?' · '+escH(ft.notes):'')+'</div>'
             +(ft.completionComment?'<div style="font-size:11px;color:var(--blue);background:var(--blue-bg);border-radius:4px;padding:4px 8px;margin-top:4px">💬 '+escH(ft.completionComment)+'</div>':'')
             +'</div>'
-            +'<button class="btn sm suc" onclick="confirmFreeTask('+ft.id+')">✓ Confirmar</button>'
-            +'<button class="btn sm dan" onclick="rejectFreeTask('+ft.id+')">✗ Rechazar</button>'
+            +'<button class="btn sm suc" onclick="confirmFreeTask('+ft.id+')" title="Validar las horas registradas y cerrar la tarea">✓ Confirmar</button>'
+            +'<button class="btn sm dan" onclick="rejectFreeTask('+ft.id+')" title="Rechazar — la tarea vuelve al analista">✗ Rechazar</button>'
             +'<button class="btn sm u-fg3" onclick="deleteFreeTask('+ft.id+')">🗑</button>'
             +'</div>';
         }).join(''))
@@ -8239,6 +8465,9 @@ function renderPendingContent(){
   }),taskSort,taskSortDir);
 
   allT=allT.filter(_tipoMatch);
+  // Filtro de mes opcional (por fecha límite; default: todos — no oculta atrasados salvo elección explícita)
+  var _pGet=function(t){return t.due||t.created||'';};
+  allT=monthFilterApply('pendingSup',allT,_pGet,true);
   // Apply status filter
   var filtered=allT.filter(function(t){
     if(psf==='all') return true;
@@ -8269,7 +8498,7 @@ function renderPendingContent(){
   }
 
   var chips='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">'
-    +chip('all','Todos','var(--navy,#1a4f8a)')
+    +chip('all','Todos','var(--blue)')
     +(isSupRole()?chip('a-ingresar','📦 A ingresar','#5b21b6'):'')
     +(isSupRole()?chip('muestra-ok','🧪 Muestra OK','#059669'):'')
     +chip('pending','📥 Ingresado','#64748b')
@@ -8278,6 +8507,10 @@ function renderPendingContent(){
     +chip('partial','⚡ Completado parcial','#d97706')
     +chip('pending-confirm','✓ Conf. pendiente','var(--amber)')
     +chip('late','⚠ Vencidos','var(--red)')
+    +'<span style="margin-left:auto"></span>'
+    +monthFilterSelect('pendingSup',activeTasks(),_pGet,true)
+    +((psf!=='all'||pq2||_tipoFilter.length||(listMonthFilter['pendingSup']&&listMonthFilter['pendingSup']!=='all'))
+      ?'<button class="btn sm" onclick="window.pendingStatusFilter=\'all\';localStorage.setItem(\'lbt_pendingFilter\',\'all\');window.pendingSearch=\'\';localStorage.setItem(\'lbt_pendingSearch\',\'\');_tipoFilter=[];delete listMonthFilter[\'pendingSup\'];render()" title="Restablecer estado, búsqueda, tipo y mes">✕ Limpiar filtros</button>':'')
     +'</div>';
 
   const cols='grid-template-columns:1.5fr 0.8fr 0.4fr 0.65fr 0.75fr 0.8fr 0.65fr 0.85fr 0.75fr';
@@ -8334,6 +8567,7 @@ function renderPendingContent(){
       +'<div onclick="event.stopPropagation()" style="display:flex;gap:3px">'
       +(isSupRole()&&(t.status==='a-ingresar'||t.status==='muestra-ok')?'<button class="btn sm suc" onclick="event.stopPropagation();markSampleReceived('+t.id+')" style="font-size:10px;background:#5b21b6;border-color:#5b21b6;color:#fff">✓ Recibir</button>':'')
       +(isSupRole()&&t.status==='pending-confirm'?'<button class="btn sm suc" onclick="event.stopPropagation();confirmDone('+t.id+')" style="font-size:10px">✓ Conf.</button>':'')
+      +(isSupRole()&&!t._interLab?'<button class="btn sm" onclick="event.stopPropagation();openSolicitudModal('+t.id+')" style="font-size:10px;padding:2px 5px" title="Solicitar ensayo de este producto a otro laboratorio">🔗</button>':'')
       +(isSupRole()?'<button class="btn sm" onclick="event.stopPropagation();deleteTask('+t.id+')" style="color:var(--text3);padding:2px 4px" title="Eliminar">🗑</button>':'')
       +'</div>'
       +'</div>';
@@ -8421,16 +8655,29 @@ function getCalRows(sup){
 }
 
 function renderCalWeek(sup){
-  const _isBi=calView==='biweek';
-  const wd=_isBi?getBiweekDates(weekOffset):getWeekDates(weekOffset);
+  const wd=getCalDates(calView,weekOffset);
   const dayLbls=wd.map(d=>weekDayLabel(d));
   const todayStr=today();
   const rows=getCalRows(sup);
   const canAssign=isSupRole();
   var rfHtml=(sup||isReviewerRole())?renderCalRoleFilter():'';
-  const cols='grid-template-columns:88px repeat('+wd.length+',minmax(0,1fr))';
-  const _gridMinW=_isBi?1240:700;
+  const _inline=calView==='3d'; // 3 días: producto y lote en la misma línea
   const _calCache={};wd.forEach(d=>{_calCache[d]=mgmtTasks.flatMap(mt=>expandMgmt(mt,d,d));});
+  // Ancho de columna ajustable (persistido por navegador)
+  const _colW=parseInt(localStorage.getItem('lt9-calColW'))||88;
+  // Colapso: días no laborables para TODOS los usuarios visibles y sin contenido → ancho mínimo
+  const _collapsed={};
+  wd.forEach(d=>{
+    if(rows.some(u=>isWorkdayFor(u.id,d)))return;
+    var hasContent=rows.some(u=>
+      activeTasks().some(t=>(t.assignments||[]).some(x=>x.analyst===u.id&&x.date===d&&!x._removed)||(t.samplerAssignments||[]).some(sa=>sa.sampler===u.id&&sa.done&&sa.realArrivalDate===d))
+      ||freeTasks.some(ft=>ft.analystId===u.id&&ft.date===d&&ft.status!=='rejected'&&ft.status!=='declined')
+      ||(_calCache[d]||[]).some(o=>(o.analysts||[]).includes(u.id))
+      ||!!getAbsenceOnDate(u.id,d));
+    if(!hasContent)_collapsed[d]=true;
+  });
+  const cols='grid-template-columns:88px '+wd.map(d=>_collapsed[d]?'26px':'minmax(0,1fr)').join(' ');
+  const _gridMinW=Math.max(340,88+wd.reduce((s,d)=>s+(_collapsed[d]?26:_colW),0));
   // Se pueden arrastrar asignaciones desde el día previo en adelante
   const _yesterdayStr=(function(){var d=new Date(todayStr+'T12:00:00');d.setDate(d.getDate()-1);return d.toISOString().slice(0,10);})();
   return `<div class="filter-row" style="margin-bottom:12px">
@@ -8441,16 +8688,18 @@ function renderCalWeek(sup){
   </div>
   <div class="week-grid" style="overflow-x:auto">
     <div style="min-width:${_gridMinW}px">
-      <div class="whead" style="${cols}"><div>Usuario</div>${dayLbls.map((d,i)=>`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
+      <div class="whead" style="${cols}"><div>Usuario</div>${dayLbls.map((d,i)=>_collapsed[wd[i]]
+        ?`<div style="writing-mode:vertical-rl;font-size:8px;color:var(--text3);padding:2px 0;overflow:hidden" title="${d} — no laborable">${d}</div>`
+        :`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
       ${rows.map(a=>`<div class="wrow" style="${cols}">
         <div class="wcell-name"><div class="av ${a.av}" style="flex-shrink:0">${escH(a.avInit)}</div>${escH(a.name.split(' ')[0])}</div>
-        ${wd.map(d=>{const dt=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=activeTasks().filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;const _wk=isWorkdayFor(a.id,d);const _rowAssign=canAssign&&(a.role==='analyst'||a.role==='reviewer');return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} ${_rowAssign&&_wk?`onclick="calCellClick(event,'${a.id}','${d}')" title="Clic en el espacio vacío para asignar un producto pendiente"`:''} style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};${_rowAssign&&_wk?'cursor:pointer;':''}">${_rowAssign&&_wk&&!ab&&dt.length===0?`<div style="font-size:10px;color:var(--blue);opacity:.55;text-align:center;padding:2px 0;pointer-events:none">＋ asignar</div>`:''}${_rowAssign&&!_wk&&!ab?`<div style="font-size:9px;color:var(--text3);opacity:.6;text-align:center;padding:1px 0;pointer-events:none">No lab.</div>`:''}${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>{const _canDrag=sup&&d>=_yesterdayStr&&t.status==='scheduled';return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ '+'':''}${t._interLab?`<div style="font-size:8px;color:#1d4ed8;font-weight:700;margin-bottom:1px">🔗 ${escH(t._interLab.fromLabName||'Inter-lab')}</div>`:''}<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div></div>`;}).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
+        ${wd.map(d=>{if(_collapsed[d])return`<div class="wcell" style="background:var(--bg2);padding:0" title="No laborable"></div>`;const dt=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=activeTasks().filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;const _wk=isWorkdayFor(a.id,d);const _rowAssign=canAssign&&(a.role==='analyst'||a.role==='reviewer');return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} ${_rowAssign&&_wk?`onclick="calCellClick(event,'${a.id}','${d}')" title="Clic en el espacio vacío para asignar un producto pendiente"`:''} style="background:${ab?typ.color+'33':d===todayStr?'rgba(26,79,138,.04)':''};${_rowAssign&&_wk?'cursor:pointer;':''}">${_rowAssign&&_wk&&!ab&&dt.length===0?`<div style="font-size:10px;color:var(--blue);opacity:.55;text-align:center;padding:2px 0;pointer-events:none">＋ asignar</div>`:''}${_rowAssign&&!_wk&&!ab?`<div style="font-size:9px;color:var(--text3);opacity:.6;text-align:center;padding:1px 0;pointer-events:none">No lab.</div>`:''}${ab?`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.color}">${typ.label}</div>`:''}${dt.map(t=>{const _canDrag=sup&&d>=_yesterdayStr&&t.status==='scheduled';return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ '+'':''}${t._interLab?`<div style="font-size:8px;color:#1d4ed8;font-weight:700;margin-bottom:1px">🔗 ${escH(t._interLab.fromLabName||'Inter-lab')}</div>`:''}${_inline?`<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="font-weight:600">${escH(t.producto)}</span> <span style="font-size:9px;opacity:.75;font-family:var(--mono)">${escH(t.lote)}</span></div>`:`<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div>`}</div>`;}).join('')}${(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id)).map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
       </div>`).join('')}
     </div>
   </div>
-  ${!sup?`<div class="sec" style="margin-top:16px">Mis análisis de esta semana</div><div class="tbl">
+  ${!sup?`<div class="sec" style="margin-top:16px">Mis análisis del período</div><div class="tbl">
     <div class="thead" style="grid-template-columns:1.4fr .8fr .7fr .7fr .9fr"><div>Producto / Lote</div><div>Fecha asig.</div><div>Prioridad</div><div>Estado</div><div></div></div>
-    ${activeTasks().filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))&&(t.status!=='observed'||_analystSeesObs(t,currentUser.id))).map(t=>tRowsAna(t)).join('')||'<div class="empty">Sin análisis esta semana</div>'}
+    ${activeTasks().filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))&&(t.status!=='observed'||_analystSeesObs(t,currentUser.id))).map(t=>tRowsAna(t)).join('')||'<div class="empty">Sin análisis en este período</div>'}
   </div>`:''}
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text2)">
     ${sup?'<span style="display:flex;align-items:center;gap:4px;background:var(--bg2);padding:2px 7px;border-radius:10px">✋ Arrastrá un análisis programado a otro día u analista</span>':''}
@@ -8479,8 +8728,8 @@ function openQuickAssign(analystId, dateStr){
   _qaAssignedN=0;
   var u=getU(analystId);
   var dv=document.createElement('div');
-  dv.innerHTML='<div style="position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px" onclick="if(event.target===this)window._qaClose()">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:18px;width:min(480px,95vw);max-height:84vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,.25)">'
+  dv.innerHTML='<div class="modal-overlay" style="z-index:600" onclick="if(event.target===this)window._qaClose()">'
+    +'<div class="modal" style="width:min(480px,calc(100vw - 32px));display:flex;flex-direction:column">'
     +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">'
     +'<h4 style="margin:0">Asignar producto pendiente</h4>'
     +'<button class="btn sm" onclick="window._qaClose()">✕</button>'
@@ -8783,20 +9032,30 @@ function calDrop(ev,newAnalystId,newDate){
 }
 function renderWeek(){
   const sup=currentUser.role==='supervisor'||currentUser.role==='reviewer';
-  // Build top bar: Semana/Mes toggle + role filter inline
+  if(calView==='month')calView='5w'; // migración del modo anterior
+  // Build top bar: ventana de días + role filter inline
   const rfHtml=(sup)?renderCalRoleFilter():'';
+  const _cvBtn=(id,label,title)=>`<button class="btn sm" onclick="calView='${id}';weekOffset=0;render()" style="${calView===id?'background:var(--surface);font-weight:600;box-shadow:var(--shadow-sm)':''}" title="${title}">${label}</button>`;
+  const _curW=parseInt(localStorage.getItem('lt9-calColW'))||88;
+  const _cwBtn=(w,label,title)=>`<button class="btn sm" onclick="localStorage.setItem('lt9-calColW','${w}');render()" style="padding:4px 8px;${_curW===w?'background:var(--surface);font-weight:600;box-shadow:var(--shadow-sm)':''}" title="${title}">${label}</button>`;
   const viewToggle=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
     <div style="display:flex;gap:4px;background:var(--bg2);border-radius:var(--radius);padding:3px">
-      <button class="btn sm" onclick="calView='week';render()" style="${calView==='week'?'background:var(--surface);font-weight:600;box-shadow:var(--shadow-sm)':''}">Semana</button>
-      <button class="btn sm" onclick="calView='biweek';render()" style="${calView==='biweek'?'background:var(--surface);font-weight:600;box-shadow:var(--shadow-sm)':''}">Quincena</button>
-      <button class="btn sm" onclick="calView='month';render()" style="${calView==='month'?'background:var(--surface);font-weight:600;box-shadow:var(--shadow-sm)':''}">Mes</button>
+      ${_cvBtn('3d','3 días','Ayer, hoy y mañana — vista de foco')}
+      ${_cvBtn('week','7 días','Semana completa (lunes a domingo)')}
+      ${_cvBtn('biweek','14 días','Dos semanas completas')}
+      ${_cvBtn('5w','35 días','Cinco semanas completas — visión de mes con grilla uniforme')}
+    </div>
+    <div style="display:flex;gap:2px;background:var(--bg2);border-radius:var(--radius);padding:3px" title="Ancho mínimo de las columnas de día">
+      ${_cwBtn(64,'A−','Columnas compactas')}
+      ${_cwBtn(88,'A','Columnas normales')}
+      ${_cwBtn(120,'A+','Columnas amplias')}
     </div>
     ${rfHtml}
     <button class="btn sm" onclick="printCalendar()" style="margin-left:auto">🖨 Imprimir / PDF</button>
   </div>`;
   const rows=getCalRows(sup);
   if(rows.length===0) return viewToggle+'<div class="empty" style="padding:40px;text-align:center">▦<br><br>No hay usuarios para mostrar en el calendario</div>';
-  return viewToggle+(calView==='month'?renderCalMonth(sup):renderCalWeek(sup));
+  return viewToggle+renderCalWeek(sup);
 }
 
 // ── ANALYSTS ──
@@ -9011,20 +9270,20 @@ function renderSolicitudes(){
   var partnerLabs=labProfiles.filter(function(l){return l.id!==activeLabId&&l.token&&l.gistId;});
   var html='';
 
-  // Sub-view tabs
-  var _tabBase='padding:7px 22px;font-size:13px;font-weight:600;border-radius:20px;cursor:pointer;transition:all .15s;border:none;';
-  html+='<div style="display:flex;gap:6px;margin-bottom:16px">'
-    +(partnerLabs.length>0?'<button onclick="_solicitudesSubView=\'recibidas\';render()" style="'+_tabBase+(_solicitudesSubView==='recibidas'?'background:var(--navy,#1a4f8a);color:#fff;box-shadow:0 2px 6px rgba(26,79,138,.25)':'background:var(--bg2);color:var(--text2)')+'">📥 Recibidas</button>':'')
-    +'<button onclick="_solicitudesSubView=\'enviadas\';render()" style="'+_tabBase+(_solicitudesSubView==='enviadas'?'background:var(--navy,#1a4f8a);color:#fff;box-shadow:0 2px 6px rgba(26,79,138,.25)':'background:var(--bg2);color:var(--text2)')+'">📤 Enviadas</button>'
+  // Sub-view tabs — patrón .tab-bar estándar (Enviadas primero)
+  html+='<div class="tab-bar" style="margin-bottom:16px">'
+    +'<div class="tab'+(_solicitudesSubView==='enviadas'?' active':'')+'" onclick="_solicitudesSubView=\'enviadas\';render()">📤 Enviadas</div>'
+    +(partnerLabs.length>0?'<div class="tab'+(_solicitudesSubView==='recibidas'?' active':'')+'" onclick="_solicitudesSubView=\'recibidas\';render()">📥 Recibidas</div>':'')
     +'</div>';
 
   if(_solicitudesSubView==='enviadas'){
     // Filter own requests by role
     var myReqs;
+    var _visibleILRs=interLabRequests.filter(function(r){return !r._deleted;});
     if(isSup||isRev){
-      myReqs=interLabRequests;
+      myReqs=_visibleILRs;
     } else {
-      myReqs=interLabRequests.filter(function(r){
+      myReqs=_visibleILRs.filter(function(r){
         var t=tasks.find(function(x){return x.id===r.taskId;});
         if(!t)return false;
         var assigned=(t.assignments||[]).some(function(a){return a.analyst===uid&&!a._removed;});
@@ -9118,6 +9377,7 @@ function renderSolicitudes(){
       +' oninput="_ilrRcvSearch=this.value;var a=window._ilrRcvArgs;if(a)_loadRecibidas(a.partnerLabs,a.containerId,a.isSup,a.isRev,a.uid)"'
       +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
       +(_rqStatic?'<button class="btn sm" onclick="_ilrRcvSearch=\'\';var a=window._ilrRcvArgs;if(a)_loadRecibidas(a.partnerLabs,a.containerId,a.isSup,a.isRev,a.uid)">✕ Limpiar</button>':'')
+      +'<button class="btn sm" onclick="_ilrForceRefresh()" title="Consultar ahora los laboratorios asociados (ignora el cache de 5 min)">↻ Actualizar</button>'
       +'</div>'
       +'<div id="'+_rcvContainerId+'"><div style="display:flex;align-items:center;gap:8px;color:var(--text2);padding:20px 0"><span style="font-size:18px;animation:spin 1s linear infinite;display:inline-block">⟳</span> Cargando solicitudes recibidas…</div></div>';
     // Trigger async load after render
@@ -9126,6 +9386,14 @@ function renderSolicitudes(){
   return html;
 }
 
+function _ilrForceRefresh(){
+  var a=window._ilrRcvArgs;
+  if(!a)return;
+  (a.partnerLabs||[]).forEach(function(pl){_partnerLabCache[pl.id]=null;});
+  var el=document.getElementById(a.containerId);
+  if(el)el.innerHTML='<div style="display:flex;align-items:center;gap:8px;color:var(--text2);padding:20px 0"><span style="font-size:18px;animation:spin 1s linear infinite;display:inline-block">⟳</span> Consultando laboratorios…</div>';
+  _loadRecibidas(a.partnerLabs,a.containerId,a.isSup,a.isRev,a.uid);
+}
 async function _loadRecibidas(partnerLabs,containerId,isSup,isRev,uid){
   var el=document.getElementById(containerId);
   if(!el)return;
@@ -9134,7 +9402,7 @@ async function _loadRecibidas(partnerLabs,containerId,isSup,isRev,uid){
     var pl=partnerLabs[i];
     var pdata=await fetchPartnerGistData(pl);
     if(!pdata)continue;
-    var preqs=(pdata.interLabRequests||[]).filter(function(r){return r.destLabId===activeLabId;});
+    var preqs=(pdata.interLabRequests||[]).filter(function(r){return r.destLabId===activeLabId&&!r._deleted;});
     preqs.forEach(function(r){r._fromLab=pl;r._fromLabName=pl.name;});
     allReceived=allReceived.concat(preqs);
   }
@@ -9234,6 +9502,46 @@ async function _loadRecibidas(partnerLabs,containerId,isSup,isRev,uid){
   if(el)el.innerHTML=html;
 }
 
+// Acción directa desde la campana: localizar la solicitud en los labs asociados
+// y crear la tarea IL sin pasar por la vista Sol. Inter-lab.
+async function _ilrReceiveFromNotif(notifId, reqId){
+  var partners=labProfiles.filter(function(l){return l.id!==activeLabId&&l.gistId&&l.token;});
+  var fromLab=null;
+  for(var i=0;i<partners.length;i++){
+    var pdata=await fetchPartnerGistData(partners[i]);
+    if(!pdata)continue;
+    var req=(pdata.interLabRequests||[]).find(function(r){return r.id===reqId&&!r._deleted;});
+    if(req){fromLab=partners[i];break;}
+  }
+  if(!fromLab){alert('No se encontró la solicitud en los laboratorios asociados (puede haber sido eliminada en el lab de origen).');return;}
+  showNotifPanel=false;
+  await _rcvMarkReceived(reqId,JSON.stringify(fromLab).replace(/'/g,''));
+  // Resolver la notificación solo si la tarea quedó creada
+  var t=tasks.find(function(x){return x._interLab&&x._interLab.sourceId===reqId&&!x._deleted;});
+  if(t)_ilrNotifMarkRead(notifId);
+  render();
+}
+
+// Recalcula el badge de solicitudes recibidas usando el cache de labs (TTL 5 min):
+// como máximo un fetch extra por lab asociado cada 5 min.
+async function _refreshIncomingILR(){
+  if(!currentUser)return;
+  var partners=labProfiles.filter(function(l){return l.id!==activeLabId&&l.gistId&&l.token;});
+  if(!partners.length)return;
+  var count=0;
+  for(var i=0;i<partners.length;i++){
+    var pdata=await fetchPartnerGistData(partners[i]);
+    if(!pdata)continue;
+    count+=(pdata.interLabRequests||[]).filter(function(r){
+      return r.destLabId===activeLabId&&!r._deleted&&(r.status==='pendiente'||r.status==='en_proceso');
+    }).length;
+  }
+  if(window._incomingILRCount!==count){
+    window._incomingILRCount=count;
+    render();
+  }
+}
+
 async function _rcvMarkReceived(reqId, fromLabJson){
   var fromLab;
   try{fromLab=JSON.parse(fromLabJson);}catch(e){alert('Error interno.');return;}
@@ -9241,9 +9549,13 @@ async function _rcvMarkReceived(reqId, fromLabJson){
   // Check if local task already exists for this ILR
   var existing=tasks.find(function(t){return t._interLab&&t._interLab.sourceId===reqId&&!t._deleted;});
   if(existing){alert('Ya existe una tarea local para esta solicitud (ID '+existing.id+').');return;}
-  // Get request data from partner cache
+  // Get request data from partner cache; si expiró (TTL 5 min), re-fetch
   var cached=_partnerLabCache[fromLab.id];
   var pdata=cached?cached.data:null;
+  if(!pdata){
+    var _pl=labProfiles.find(function(l){return l.id===fromLab.id;})||fromLab;
+    pdata=await fetchPartnerGistData(_pl);
+  }
   var req=pdata&&(pdata.interLabRequests||[]).find(function(r){return r.id===reqId;});
   if(!req){alert('No se pudo cargar la solicitud. Recargue la vista.');return;}
   // Create local task in receiving lab
@@ -9303,17 +9615,21 @@ async function _rcvSendDocs(reqId, fromLabJson){
   }
 }
 
-function _openRcvUpdateModal(reqId, fromLabJson){
+async function _openRcvUpdateModal(reqId, fromLabJson){
   // Store context for the modal
   try{
     window._rcvUpdateCtx={reqId:reqId,fromLab:JSON.parse(fromLabJson)};
   }catch(e){
     window._rcvUpdateCtx={reqId:reqId,fromLab:null};
   }
-  // Find the request in partner data (cached)
+  // Find the request in partner data (cached); si expiró el cache, re-fetch
   var fromLab=window._rcvUpdateCtx.fromLab;
   var cached=fromLab&&_partnerLabCache[fromLab.id];
   var pdata=cached?cached.data:null;
+  if(!pdata&&fromLab){
+    var _pl=labProfiles.find(function(l){return l.id===fromLab.id;})||fromLab;
+    pdata=await fetchPartnerGistData(_pl);
+  }
   var req=pdata&&(pdata.interLabRequests||[]).find(function(r){return r.id===reqId;});
   if(!req){alert('No se pudo cargar la solicitud. Recargue la vista.');return;}
   window._rcvUpdateCtx.req=req;
@@ -9322,9 +9638,9 @@ function _openRcvUpdateModal(reqId, fromLabJson){
   var analystOpts='<option value="">Sin asignar</option>'+ANALYSTS_LOCAL.map(function(a){return'<option value="'+escH(a.id)+'"'+(req.assignedToId===a.id?' selected':'')+'>'+escH(a.name)+'</option>';}).join('');
   var statusOpts=['pendiente','en_proceso','docs_enviados'].map(function(s){var si=_ilrStatusInfo(s);return'<option value="'+s+'"'+(req.status===s?' selected':'')+'>'+si.icon+' '+si.label+'</option>';}).join('');
 
-  var modalHtml='<div id="rcv-update-modal" style="position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.4)">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px 24px;min-width:320px;max-width:480px;width:90%;box-shadow:var(--shadow-lg)">'
-    +'<div style="font-weight:700;font-size:14px;margin-bottom:14px">Actualizar solicitud recibida</div>'
+  var modalHtml='<div id="rcv-update-modal" class="modal-overlay" style="z-index:1000">'
+    +'<div class="modal" style="width:min(480px,calc(100vw - 32px))">'
+    +'<h3>Actualizar solicitud recibida</h3>'
     +'<div class="frow"><label>Estado</label><select id="rcv-status">'+statusOpts+'</select></div>'
     +'<div class="frow"><label>Asignar analista</label><select id="rcv-analyst">'+analystOpts+'</select></div>'
     +'<div class="frow"><label>Fecha planificada</label><input type="date" id="rcv-planned" value="'+(req.plannedDate||'')+'" style="width:100%"></div>'
@@ -9364,7 +9680,8 @@ async function _saveRcvUpdate(){
 }
 
 function _ilrNotifMarkRead(notifId){
-  var n=replanNotifs.find(function(x){return x.id===notifId;});
+  // Comparación por String: ids nuevos son strings, los históricos numéricos
+  var n=replanNotifs.find(function(x){return String(x.id)===String(notifId);});
   if(!n)return;
   if(n.type==='interlab_request'){n.status='resolved';n.ts=Date.now();}
   else if(n.type==='ilr_docs_sent'){
@@ -9381,8 +9698,8 @@ async function _showILRDetails(reqId){
   var destName=_ilrLabName(req.destLabId);
   var mid='ilrd-'+Date.now();
   var canConfirm=req.status==='docs_enviados'&&(isSupRole()||isReviewerRole());
-  var mhtml='<div id="'+mid+'" style="position:fixed;inset:0;z-index:1010;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45)" onclick="if(event.target===this)document.getElementById(\''+mid+'\').remove()">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px 24px;min-width:380px;max-width:540px;width:92%;box-shadow:var(--shadow-lg);max-height:90vh;overflow-y:auto">'
+  var mhtml='<div id="'+mid+'" class="modal-overlay" style="z-index:1010" onclick="if(event.target===this)document.getElementById(\''+mid+'\').remove()">'
+    +'<div class="modal" style="width:min(540px,calc(100vw - 32px))">'
     +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">'
     +'<div style="font-weight:700;font-size:14px">🔗 Seguimiento — Solicitud inter-lab</div>'
     +'<button class="btn" onclick="document.getElementById(\''+mid+'\').remove()" style="padding:2px 8px;font-size:16px">✕</button>'
@@ -9482,13 +9799,17 @@ function _markILRCompleto(reqId){
   req.status='completado';
   req.completedTs=Date.now();
   req.completedBy=currentUser.id;
+  req._ts=Date.now();
   saveLS();saveNow().catch(function(e){console.error('_markILRCompleto:',e);});
   render();
 }
 
 function _deleteILR(reqId){
   if(!confirm('¿Eliminar esta solicitud?'))return;
-  interLabRequests=interLabRequests.filter(function(r){return r.id!==reqId;});
+  // Tombstone en lugar de borrado duro: un merge concurrente resucitaría la
+  // solicitud si desaparece del array sin marca. mergeSnapshot la filtra.
+  var req=interLabRequests.find(function(r){return r.id===reqId;});
+  if(req){req._deleted=true;req._ts=Date.now();}
   saveLS();saveNow().catch(function(e){console.error('_deleteILR:',e);});
   render();
 }
@@ -9503,9 +9824,9 @@ function _openExtTrackModal(reqId){
   var prod=req.producto||((req.taskId&&(tasks.find(function(x){return x.id===req.taskId;})||{}).producto))||'';
   var div=document.createElement('div');
   div.id='ext-track-modal';
-  div.innerHTML='<div style="position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center" onclick="if(event.target===this)this.remove()">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:22px;width:420px;max-width:95vw;box-shadow:0 8px 32px rgba(0,0,0,.28)">'
-    +'<h4 style="margin:0 0 4px;font-size:15px">Seguimiento — laboratorio externo</h4>'
+  div.innerHTML='<div class="modal-overlay" style="z-index:600" onclick="if(event.target===this)document.getElementById(\'ext-track-modal\').remove()">'
+    +'<div class="modal" style="width:min(420px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">Seguimiento — laboratorio externo</h3>'
     +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(prod)+(req.lote?' — Lote: <span class="u-mono">'+escH(req.lote)+'</span>':'')+' → <b>'+escH(destName)+'</b></p>'
     +'<label style="font-size:11px;font-weight:600;color:var(--text2)">📅 Fecha estimada de informe <span style="color:var(--text3);font-weight:400">(para detectar atrasos)</span></label>'
     +'<input type="date" id="et-est" value="'+(req.extEstReportDate||req.dueDate||'')+'" style="'+_inp+'">'
@@ -9551,7 +9872,8 @@ function _saveExtTrack(reqId){
 async function _doSolicitudStatusUpdate(req, newStatus, extra){
   // If this is a local request, update directly
   if(interLabRequests.find(function(r){return r.id===req.id;})){
-    Object.assign(req,{status:newStatus,ts:Date.now()},extra||{});
+    // _ts (no ts): ts es la fecha de envío mostrada; _ts decide el merge
+    Object.assign(req,{status:newStatus,_ts:Date.now()},extra||{});
     saveLS();saveNow().catch(function(e){console.error('_doSolicitudStatusUpdate:',e);});
     render();
     return;
@@ -9568,11 +9890,15 @@ function openSolicitudModal(taskId){
   var isSup=isSupRole(),isRev=isReviewerRole(),uid=currentUser.id;
   var t=taskId?tasks.find(function(x){return x.id===taskId;}):null;
   if(t&&t.tipo==='IL'){alert('Las tareas inter-lab recibidas no pueden generar nuevas solicitudes inter-lab.');return;}
+  // Solo productos aún en proceso: un producto revisado o aprobado ya cerró su ciclo analítico
+  if(t&&(t.status==='reviewed'||t.status==='approved')){alert('No se pueden solicitar ensayos inter-lab para productos revisados o aprobados.');return;}
 
   // Build accessible task list for selector (when no taskId)
   var accessibleTasks=[];
   if(!taskId){
-    var allActive=activeTasks();
+    var allActive=activeTasks().filter(function(tk){
+      return tk.status!=='reviewed'&&tk.status!=='approved'&&tk.tipo!=='IL';
+    });
     if(isSup||isRev){
       accessibleTasks=allActive;
     } else {
@@ -9604,9 +9930,9 @@ function openSolicitudModal(taskId){
       +'<div id="sol-task-display" style="display:none;background:var(--bg2);border-radius:var(--radius);padding:6px 10px;margin-bottom:6px;font-size:12px"></div>';
   }
 
-  var html='<div id="solicitud-modal" style="position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.4)">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px 24px;min-width:340px;max-width:500px;width:92%;box-shadow:var(--shadow-lg);max-height:90vh;overflow-y:auto">'
-    +'<div style="font-weight:700;font-size:14px;margin-bottom:14px">Nueva solicitud inter-laboratorio</div>'
+  var html='<div id="solicitud-modal" class="modal-overlay" style="z-index:1000">'
+    +'<div class="modal">'
+    +'<h3>Nueva solicitud inter-laboratorio</h3>'
     +productBlock
     +'<div class="frow"><label>Destino</label><select id="sol-destino">'+destOpts+'</select></div>'
     +'<div class="frow"><label>Análisis solicitados</label><textarea id="sol-analisis" placeholder="Describa los análisis requeridos…" style="height:70px"></textarea></div>'
@@ -9692,7 +10018,10 @@ async function _saveSolicitud(taskId){
     var partnerLab=labProfiles.find(function(l){return l.id===destLabId;});
     if(partnerLab&&partnerLab.token&&partnerLab.gistId){
       var notif={
-        id:nextNotifId++,type:'interlab_request',status:'pending',
+        // Id string único: nextNotifId es el contador del lab EMISOR y colisiona
+        // con los ids numéricos del receptor (merge por id pisa notificaciones).
+        id:'ILR'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
+        type:'interlab_request',status:'pending',
         ts:Date.now(),forLabId:destLabId,
         reqId:req.id,srcLabName:_ilrLabName(activeLabId),
         producto:producto,lote:lote,analisis:analisis
@@ -9703,10 +10032,23 @@ async function _saveSolicitud(taskId){
 
   var el=document.getElementById('solicitud-modal');
   if(el)el.remove();
-  _solicitudesSubView='recibidas';
+  _solicitudesSubView='enviadas';
   render();
 }
 
+// Administración con pestañas: Usuarios | Laboratorios & Sync | Sistema | Audit Trail
+function renderAdminModule(){
+  if(!isSupRole()) return '<div class="empty">Acceso restringido</div>';
+  if(typeof window.adminTab==='undefined'||window.adminTab==='general')window.adminTab='usuarios';
+  function _at(id,label,title){return '<div class="tab'+(window.adminTab===id?' active':'')+'" onclick="window.adminTab=\''+id+'\';render()" title="'+title+'">'+label+'</div>';}
+  var tb='<div class="tab-bar">'
+    +_at('usuarios','👥 Usuarios','Alta, edición, roles, contraseñas y colores de los usuarios')
+    +_at('labs','🏭 Laboratorios','Sincronización GitHub, laboratorios internos y externos, limpieza inter-lab')
+    +_at('sistema','⚙ Sistema','Guía de usuario, tipos de muestra y reinicio de datos')
+    +_at('audit','🔍 Audit Trail','Registro de todas las acciones del sistema')
+    +'</div>';
+  return tb+(window.adminTab==='audit'?renderAuditTrail():renderAdmin());
+}
 function renderAdmin(){
   if(!isSupRole()) return '<div class="empty">Acceso restringido</div>';
   const roleOpts=[
@@ -9727,9 +10069,11 @@ function renderAdmin(){
 
   if(typeof window.adminSearch==='undefined') window.adminSearch='';
   var _aq=(window.adminSearch||'').toLowerCase().trim();
-
-  // Header row
-  var html='<div class="admin-wrap">'
+  var _tab=window.adminTab||'usuarios';
+  var html='';
+  // ── Pestaña Usuarios ──
+  if(_tab==='usuarios'){
+  html+='<div class="admin-wrap">'
     +'<h4>Usuarios del sistema</h4>'
     +'<div class="sub" style="margin-bottom:10px">Editá nombre, contraseña y rol. Los cambios de rol toman efecto en el próximo inicio de sesión.</div>'
     +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">'
@@ -9811,7 +10155,11 @@ function renderAdmin(){
     +'</div>'
     +'<div id="new-user-msg" style="font-size:12px;min-height:16px;margin-top:6px;color:var(--green)"></div>'
     +'</div>'
-
+    +'</div>'; // cierra admin-wrap
+  }
+  // ── Pestaña Laboratorios & Sync ──
+  if(_tab==='labs'){
+  html+=''
     // Sincronización Gist
     +'<div style="margin-top:16px;background:var(--blue-bg);border:1px solid var(--blue);border-radius:var(--radius-lg);padding:14px">'
     +'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">'
@@ -9887,8 +10235,11 @@ function renderAdmin(){
       }
       labHtml+='</div>';
       return labHtml;
-    })()
-
+    })();
+  }
+  // ── Pestaña Sistema ──
+  if(_tab==='sistema'){
+  html+=''
     +'<div style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px">'
     +'<div style="font-weight:700;margin-bottom:4px">📖 Guía de usuario</div>'
     +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">URL que aparece como enlace en la pantalla de login. Puede ser una ruta local o una URL web.</div>'
@@ -9926,10 +10277,11 @@ function renderAdmin(){
     +'</div>'
     +'<div id="new-tipo-msg" style="font-size:12px;min-height:16px;margin-top:6px;color:var(--red)"></div>'
     +'</div>'
-    +'</div>'
-
-    // ── Laboratorios externos ──
-    +(function(){
+    +'</div>';
+  }
+  // ── Pestaña Laboratorios & Sync: labs externos + limpieza inter-lab ──
+  if(_tab==='labs'){
+  html+=(function(){
       var eh='<div style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px">'
         +'<div style="font-weight:700;margin-bottom:4px">🏭 Laboratorios externos</div>'
         +'<div style="font-size:12px;color:var(--text2);margin-bottom:12px">Laboratorios no configurados en el sistema pero usados como destino en solicitudes inter-lab.</div>';
@@ -9954,26 +10306,29 @@ function renderAdmin(){
         +'<div id="extlab-msg" style="font-size:12px;min-height:16px;margin-top:6px;color:var(--red)"></div>'
         +'</div>';
       // Limpiar solicitudes IL — para transición de pruebas a producción
-      var ilrCount=interLabRequests.length;
+      var ilrCount=interLabRequests.filter(function(r){return !r._deleted;}).length;
+      var ilrNotifCount=replanNotifs.filter(function(nf){return _isILRNotif(nf)&&nf.status==='pending';}).length;
       eh+='<div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">'
         +'<div>'
-        +'<div style="font-size:12px;font-weight:600;color:var(--text)">Solicitudes inter-lab almacenadas: <b>'+ilrCount+'</b></div>'
-        +'<div style="font-size:11px;color:var(--text2);margin-top:2px">Eliminar el historial al comenzar el uso oficial.</div>'
+        +'<div style="font-size:12px;font-weight:600;color:var(--text)">Solicitudes inter-lab almacenadas: <b>'+ilrCount+'</b>'+(ilrNotifCount>0?' · Notificaciones pendientes: <b>'+ilrNotifCount+'</b>':'')+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin-top:2px">Eliminar el historial al comenzar el uso oficial. Incluye notificaciones inter-lab locales y en labs asociados.</div>'
         +'</div>'
-        +(ilrCount>0?'<button class="btn sm dan" onclick="adminClearAllILR()" title="Eliminar todas las solicitudes inter-laboratorio">🗑 Limpiar solicitudes IL</button>':'<span class="u-sm3">Sin solicitudes</span>')
+        +((ilrCount>0||ilrNotifCount>0)?'<button class="btn sm dan" onclick="adminClearAllILR()" title="Eliminar solicitudes inter-laboratorio y resolver sus notificaciones">🗑 Limpiar solicitudes IL</button>':'<span class="u-sm3">Sin solicitudes</span>')
         +'</div>';
       return eh;
-    })()
-
-    +'<div style="margin-top:16px;background:var(--red-bg);border:1px solid var(--red);border-radius:var(--radius-lg);padding:14px">'
+    })();
+  }
+  // ── Pestaña Sistema: reinicio de datos ──
+  if(_tab==='sistema'){
+  html+='<div style="margin-top:16px;background:var(--red-bg);border:1px solid var(--red);border-radius:var(--radius-lg);padding:14px">'
     +'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">'
     +'<div>'
     +'<div style="font-weight:700;margin-bottom:2px;color:var(--red)">&#128465; Reinicio de datos operativos</div>'
     +'<div style="font-size:12px;color:var(--text2)">Elimina an&#225;lisis, solicitudes de horario y actividades de gesti&#243;n. Conserva usuarios y horarios laborales.</div>'
     +'</div>'
     +'<button class="btn sm dan" onclick="doSystemReset()" style="white-space:nowrap">&#9888; Reiniciar datos</button>'
-    +'</div></div>'
-    +'</div>';
+    +'</div></div>';
+  }
   return html;
 }
 
@@ -9997,66 +10352,74 @@ function adminDeleteExternalLab(labId){
   render();
 }
 
+function _isILRNotif(nf){return nf.type==='interlab_request'||nf.type==='ilr_docs_sent';}
 async function adminClearAllILR(){
-  var n=interLabRequests.length;
-  if(!n){alert('No hay solicitudes inter-lab almacenadas.');return;}
-  if(!confirm('¿Eliminar las '+n+' solicitudes inter-laboratorio y las tareas IL generadas en laboratorios receptores?\n\nEsta acción no se puede deshacer.'))return;
+  var n=interLabRequests.filter(function(r){return !r._deleted;}).length;
+  var localNotifs=replanNotifs.filter(function(nf){return _isILRNotif(nf)&&nf.status==='pending';}).length;
+  if(!n&&!localNotifs){alert('No hay solicitudes ni notificaciones inter-lab almacenadas.');return;}
+  if(!confirm('¿Eliminar las '+n+' solicitudes inter-laboratorio, sus notificaciones y las tareas IL generadas en laboratorios receptores?\n\nEsta acción no se puede deshacer.'))return;
 
-  // Agrupar por lab destino configurado (con gistId+token) que tenga tarea local creada
-  var byDest={};
-  interLabRequests.forEach(function(r){
-    if(!r.localTaskId)return;
-    var destLab=labProfiles.find(function(l){return l.id===r.destLabId&&l.gistId&&l.token;});
-    if(!destLab)return;
-    if(!byDest[r.destLabId])byDest[r.destLabId]={lab:destLab,taskIds:[]};
-    byDest[r.destLabId].taskIds.push(r.localTaskId);
-  });
-
-  // Para cada lab receptor: fetch → marcar tareas IL como _deleted → PATCH
-  var cleaned=0,errors=[];
-  for(var labId in byDest){
-    var entry=byDest[labId];
+  var myReqIds=interLabRequests.map(function(r){return r.id;});
+  var myLabName=_ilrLabName(activeLabId)||'';
+  // TODOS los labs configurados (no solo los que tienen localTaskId): las
+  // notificaciones existen en el receptor aunque nunca se haya creado la tarea.
+  var partners=labProfiles.filter(function(l){return l.id!==activeLabId&&l.gistId&&l.token;});
+  var cleaned=0,notifsCleaned=0,errors=[];
+  for(var i=0;i<partners.length;i++){
+    var pl=partners[i];
     try{
-      var r=await fetch(GIST_API+'/'+entry.lab.gistId,{
-        headers:{'Authorization':'Bearer '+entry.lab.token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+      var r=await fetch(GIST_API+'/'+pl.gistId+'?_nc='+Date.now(),{
+        headers:{'Authorization':'Bearer '+pl.token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
       });
-      if(!r.ok){errors.push(entry.lab.name||labId);continue;}
+      if(!r.ok){errors.push(pl.name||pl.id);continue;}
       var gist=await r.json();
       var content=gist.files&&gist.files[GIST_FILE_STATE]&&gist.files[GIST_FILE_STATE].content;
-      if(!content){errors.push(entry.lab.name||labId);continue;}
+      if(!content){errors.push(pl.name||pl.id);continue;}
       var pdata=JSON.parse(content);
       var changed=false;
+      // Tareas IL creadas a partir de solicitudes de ESTE lab
       (pdata.tasks||[]).forEach(function(t){
-        if(entry.taskIds.indexOf(t.id)>=0&&!t._deleted){
-          t._deleted=true;t._ts=Date.now();changed=true;cleaned++;
-        }
+        if(t._deleted||!t._interLab)return;
+        var il=t._interLab;
+        var mine=(il.fromLab&&il.fromLab.id===activeLabId)||myReqIds.indexOf(il.sourceId)>=0;
+        if(mine){t._deleted=true;t._ts=Date.now();changed=true;cleaned++;}
       });
-      // Limpiar también el array de ILRs en el Gist del receptor (evitar referencias huérfanas)
-      if(pdata.interLabRequests){
-        pdata.interLabRequests=pdata.interLabRequests.filter(function(req){
-          return entry.taskIds.indexOf(req.localTaskId)<0;
-        });
-        changed=true;
-      }
+      // Notificaciones ILR generadas por solicitudes de este lab. Se marcan
+      // resolved (no se eliminan): el merge de replanNotifs es unión por id y
+      // un borrado resucitaría desde el estado local de otros dispositivos.
+      (pdata.replanNotifs||[]).forEach(function(nf){
+        if(!_isILRNotif(nf)||nf.status!=='pending')return;
+        var mine=myReqIds.indexOf(nf.reqId)>=0
+          ||(nf.srcLabName&&nf.srcLabName===myLabName)
+          ||(nf.forLabId&&nf.forLabId===pl.id&&myReqIds.length===0); // huérfanas: el emisor ya no tiene solicitudes
+        if(mine){nf.status='resolved';nf.resolvedTs=Date.now();nf.resolvedByName='Limpieza inter-lab';nf.ts=Date.now();changed=true;notifsCleaned++;}
+      });
       if(changed){
-        var patch=await fetch(GIST_API+'/'+entry.lab.gistId,{
+        pdata.savedAt=Date.now(); // que los clientes del receptor apliquen la limpieza
+        var patch=await fetch(GIST_API+'/'+pl.gistId,{
           method:'PATCH',
-          headers:{'Authorization':'Bearer '+entry.lab.token,'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},
+          headers:{'Authorization':'Bearer '+pl.token,'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},
           body:JSON.stringify({files:{[GIST_FILE_STATE]:{content:JSON.stringify(pdata)}}})
         });
-        if(!patch.ok)errors.push(entry.lab.name||labId);
-        else _partnerLabCache[labId]=null;
+        if(!patch.ok)errors.push(pl.name||pl.id);
+        else _partnerLabCache[pl.id]=null;
       }
-    }catch(e){errors.push(entry.lab.name||labId);console.error('adminClearAllILR partner patch:',e);}
+    }catch(e){errors.push(pl.name||pl.id);console.error('adminClearAllILR partner patch:',e);}
   }
 
-  // Limpiar ILRs propios
-  interLabRequests=[];
+  // Limpiar ILRs propios: tombstone (no vaciar el array — el merge por id
+  // resucitaría copias remotas sin marca de borrado)
+  interLabRequests.forEach(function(r){if(!r._deleted){r._deleted=true;r._ts=Date.now();}});
+  // Notificaciones ILR locales (ej: solicitud recibida de otro lab que quedó de pruebas)
+  replanNotifs.forEach(function(nf){
+    if(_isILRNotif(nf)&&nf.status==='pending'){nf.status='resolved';nf.resolvedTs=Date.now();nf.resolvedByName='Limpieza inter-lab';nf.ts=Date.now();notifsCleaned++;}
+  });
   saveLS();saveNow().catch(function(e){console.error('adminClearAllILR:',e);});
   render();
 
   var msg='✓ Solicitudes IL eliminadas.';
   if(cleaned>0)msg+='\n'+cleaned+' tarea(s) eliminadas en laboratorios receptores.';
+  if(notifsCleaned>0)msg+='\n'+notifsCleaned+' notificación(es) inter-lab resueltas.';
   if(errors.length)msg+='\n⚠ No se pudo actualizar: '+errors.join(', ')+'. Verificar token/conexión.';
   alert(msg);
 }
@@ -10444,7 +10807,7 @@ function renderTaskModal(){
     var _uid=currentUser.id;
     var _isAssigned=assigns.some(function(a){return a.analyst===_uid;});
     var _hasDestLabs=labProfiles.filter(function(l){return l.id!==activeLabId;}).length>0||externalLabs.length>0;
-    var _taskILRs=interLabRequests.filter(function(r){return r.taskId===t.id;}).sort(function(a,b){return(b.ts||0)-(a.ts||0);});
+    var _taskILRs=interLabRequests.filter(function(r){return r.taskId===t.id&&!r._deleted;}).sort(function(a,b){return(b.ts||0)-(a.ts||0);});
     var _ilrBlock='';
     if(t._interLab){
       _ilrBlock='<div style="border-top:1px solid var(--border);margin-top:12px;padding-top:10px;background:#eff6ff;border-radius:var(--radius);padding:10px 12px;margin-top:12px;font-size:12px">'
@@ -10543,7 +10906,7 @@ function renderTaskModal(){
       +'<div style="margin-top:4px;color:var(--text3);font-size:11px">Guardá el formulario para confirmar la sugerencia y crear el producto.</div>'
       +'</div>';
   }
-  var _editILRs=interLabRequests.filter(function(r){return r.taskId===t.id;}).sort(function(a,b){return(b.ts||0)-(a.ts||0);});
+  var _editILRs=interLabRequests.filter(function(r){return r.taskId===t.id&&!r._deleted;}).sort(function(a,b){return(b.ts||0)-(a.ts||0);});
   var _ilBanner='';
   if(isEdit&&t._interLab){
     _ilBanner='<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:var(--radius);padding:10px 14px;margin-bottom:12px;font-size:12px">'
@@ -10670,13 +11033,48 @@ function renderTaskComments(t){
     if(!s.assignedBy)commentParts.push('(muestreo sin asignación previa)');
     events.push({ts:s.doneAt||0,type:'sampling',by:u?u.name:(s.samplerName||'Muestreador'),comment:commentParts.join('\n')});
   });
+  // Hitos de estado del producto — fecha y usuario cuando el dato existe.
+  // Derivados de los campos de la tarea (no requieren registro adicional).
+  if(t.created){
+    events.push({ts:new Date(t.created+'T08:00:00').getTime(),type:'status',by:'',comment:'Producto ingresado ('+fmtDF(t.created)+')'});
+  }
+  if(t.startedTs){
+    events.push({ts:t.startedTs,type:'status',by:t.startedBy?getU(t.startedBy).name:'',comment:'Análisis iniciado'});
+  }
+  if(t.completedTs){
+    events.push({ts:t.completedTs,type:'status',by:t.completedBy?getU(t.completedBy).name:'',comment:'Análisis completado'});
+  }
+  if(t.confirmedTs){
+    events.push({ts:t.confirmedTs,type:'status',by:t.confirmedBy?getU(t.confirmedBy).name:'',comment:'Horas confirmadas por el supervisor'});
+  }
+  if(t.observedTs&&!(t.observations||[]).length){
+    events.push({ts:t.observedTs,type:'status',by:t.observedBy?getU(t.observedBy).name:'',comment:'Análisis observado'});
+  }
+  // Revisión / aprobación: el motivo de la firma queda documentado en el proceso.
+  // Sin comentario se muestra igual el hito (con su fecha) para completar la trazabilidad.
+  if(t.reviewedBy||t.reviewedByName){
+    events.push({ts:t.reviewedTs||0,type:'review',by:_reviewerName(t),
+      comment:t.reviewComment||(t.reviewedDate?'Revisado el '+fmtDF(t.reviewedDate):'Revisado')});
+  }
+  if(t._revApprovedBy||t._revApprovedByName){
+    events.push({ts:t._revApprovedTs||0,type:'revApproval',by:t._revApprovedByName||(t._revApprovedBy?getU(t._revApprovedBy).name:''),
+      comment:t._revApprovedComment||(t._revApprovedDate?'Aprobación enviada el '+fmtDF(t._revApprovedDate):'Aprobación enviada al supervisor')});
+  }
+  if(t.approvedBy||t.approvedByName){
+    events.push({ts:t.approvedTs||0,type:'approval',by:_approverName(t),
+      comment:t.approvalComment||(t.approvedDate?'Aprobado el '+fmtDF(t.approvedDate):'Aprobado')});
+  }
   events.sort(function(a,b){return (a.ts||0)-(b.ts||0);});
   if(!events.length)return'';
   var typeConf={
     observation:{icon:'⚑',label:'Observación',color:'var(--amber)',bg:'var(--amber-bg)'},
     resubmit:   {icon:'↩',label:'Re-envío',   color:'var(--blue)', bg:'var(--blue-bg)'},
     completion: {icon:'💬',label:'Comentario del analista',color:'var(--green)',bg:'var(--green-bg,#e8f5e9)'},
-    sampling:   {icon:'🧪',label:'Muestreo registrado',color:'#7c3aed',bg:'#ede9fe'}
+    sampling:   {icon:'🧪',label:'Muestreo registrado',color:'#7c3aed',bg:'#ede9fe'},
+    review:     {icon:'✅',label:'Revisión',color:'var(--green)',bg:'var(--green-bg)'},
+    revApproval:{icon:'✔',label:'Aprobación del revisor',color:'var(--green)',bg:'var(--green-bg)'},
+    approval:   {icon:'🏁',label:'Aprobación final',color:'var(--blue)',bg:'var(--blue-bg)'},
+    status:     {icon:'∙',label:'Cambio de estado',color:'var(--text2)',bg:'var(--bg2)'}
   };
   var rows=events.map(function(ev){
     var c=typeConf[ev.type]||typeConf.completion;
@@ -10692,7 +11090,7 @@ function renderTaskComments(t){
       +'</div></div>';
   }).join('');
   return'<div class="frow form-full" style="margin-top:4px">'
-    +'<label>Comentarios del proceso ('+events.length+')</label>'
+    +'<label>Historial del producto ('+events.length+')</label>'
     +'<div style="display:flex;flex-direction:column;gap:8px;padding:4px 0">'+rows+'</div>'
     +'</div>';
 }
@@ -11374,7 +11772,7 @@ function exportFreeTasksXLSX(){
     });
     var ws=xlsxSheet(data);
     ws['!cols']=[{wch:12},{wch:18},{wch:28},{wch:12},{wch:10},{wch:28},{wch:18},{wch:16}];
-    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Actividades libres');
+    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Tareas únicas');
     xlsxDownload(wb,'actividades_libres_'+today()+'.xlsx');
   });
 }
@@ -11561,13 +11959,13 @@ function markDone(id,assignDate){
       // Re-envío tras observación
       // Modal inline para comentario + checkbox replanificar
       var resubDiv=document.createElement('div');
-      resubDiv.innerHTML='<div style="position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center">'
-        +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px;width:380px;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
-        +'<h4 style="margin:0 0 14px">Re-enviar análisis</h4>'
+      resubDiv.innerHTML='<div class="modal-overlay" style="z-index:500">'
+        +'<div class="modal" style="width:min(380px,calc(100vw - 32px))">'
+        +'<h3>Re-enviar análisis</h3>'
         +'<div class="frow"><label>Comentario de corrección *</label><textarea id="rsub-cmt" rows="3" style="width:100%;resize:vertical"></textarea></div>'
         +'<label style="display:flex;align-items:center;gap:8px;margin:10px 0;font-size:13px"><input type="checkbox" id="rsub-replan"> Solicitar replanificación de fechas</label>'
         +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
-        +'<button onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
+        +'<button onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
         +'<button onclick="window[\'_doResubmit_\'+'+id+']('+id+')" class="btn pri">↩ Re-enviar</button>'
         +'</div></div></div>';
       document.body.appendChild(resubDiv);
@@ -11621,9 +12019,9 @@ function markDone(id,assignDate){
       // Completar: pedir horas dedicadas
       // Modal para horas de la sesión
       var hDiv=document.createElement('div');
-      hDiv.innerHTML='<div style="position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center">'
-        +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px;width:360px;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
-        +'<h4 style="margin:0 0 6px">Completar análisis</h4>'
+      hDiv.innerHTML='<div class="modal-overlay" style="z-index:500">'
+        +'<div class="modal" style="width:min(360px,calc(100vw - 32px))">'
+        +'<h3 style="margin-bottom:6px;border-bottom:none;padding-bottom:0">Completar análisis</h3>'
         +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(t.producto)+' — '+escH(t.lote)+'</p>'
         +'<div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:14px">'
         +'<button onclick="var e=document.getElementById(\'hrs-input\');e.value=Math.max(0.5,parseFloat(e.value||1)-0.5)" class="btn" style="width:36px;height:36px;font-size:20px;padding:0">−</button>'
@@ -11633,7 +12031,7 @@ function markDone(id,assignDate){
         +'<div class="frow" style="margin-bottom:14px"><label>Comentario para el revisor <span style="color:var(--text3);font-weight:400">(opcional)</span></label>'
         +'<textarea id="complete-cmt" rows="2" placeholder="Observaciones del análisis, condiciones especiales, resultados relevantes…" style="width:100%;resize:vertical;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:12px"></textarea></div>'
         +'<div style="display:flex;gap:8px;justify-content:flex-end">'
-        +'<button onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
+        +'<button onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
         +'<button onclick="window[\'_doComplete_\'+'+id+']('+id+',\''+( assignDate||'')+'\')'+'" class="btn pri">✓ Confirmar</button>'
         +'</div></div></div>';
       document.body.appendChild(hDiv);
@@ -11719,14 +12117,14 @@ function markReviewed(id){
   if(t.status!=='done'){alert('Solo se pueden revisar análisis completados.');return;}
   if(isReviewerRole()&&_userIsAssignee(t,currentUser.id)){alert('No podés revisar un análisis en el que participaste como analista (segregación de funciones). Debe revisarlo otra persona.');return;}
   var rvDiv=document.createElement('div');
-  rvDiv.innerHTML='<div style="position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:22px;width:360px;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
-    +'<h4 style="margin:0 0 6px">Marcar como Revisado</h4>'
+  rvDiv.innerHTML='<div class="modal-overlay" style="z-index:500">'
+    +'<div class="modal" style="width:min(360px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:6px;border-bottom:none;padding-bottom:0">Marcar como Revisado</h3>'
     +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(t.producto)+' — '+escH(t.lote)+'</p>'
     +'<div class="frow"><label>Fecha de revisión *</label>'
     +'<input type="date" id="rv-date" value="'+today()+'" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
-    +'<button onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
+    +'<button onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
     +'<button onclick="window[\'_doReviewed_\'+'+id+']('+id+')" class="btn pri">✓ Revisar</button>'
     +'</div></div></div>';
   document.body.appendChild(rvDiv);
@@ -11742,6 +12140,7 @@ function markReviewed(id){
         t.reviewedBy=currentUser.id;
         t.reviewedTs=Date.now();
         t.reviewedDate=dateStr;
+        if(reason)t.reviewComment=reason; // visible en Comentarios del proceso y Para aprobar
         stampIntegrity(t);
         auditLog('REVIEW','TASK',id,{
           field:'status',
@@ -11768,9 +12167,9 @@ function _supervisorForceTerminalStatus(taskId,targetStatus){
   var needsApprove=targetStatus==='approved';
   var _inp='width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);box-sizing:border-box;margin-top:2px';
   var div=document.createElement('div');
-  div.innerHTML='<div style="position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:24px;width:440px;max-width:95vw;box-shadow:0 8px 32px rgba(0,0,0,.28)">'
-    +'<h4 style="margin:0 0 4px;font-size:15px">Corrección de estado — Supervisor</h4>'
+  div.innerHTML='<div class="modal-overlay" style="z-index:600">'
+    +'<div class="modal" style="width:min(440px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">Corrección de estado — Supervisor</h3>'
     +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(t.producto)+' — Lote: <span class="u-mono">'+escH(t.lote)+'</span></p>'
     +(needsReview
       ?'<div style="background:var(--bg);border-radius:var(--radius);padding:10px 14px;margin-bottom:10px">'
@@ -11824,12 +12223,14 @@ function _supervisorForceTerminalStatus(taskId,targetStatus){
         t.reviewedByName=rvName;
         t.reviewedTs=nowTs;
         t.reviewedDate=rvDate;
+        if(reason)t.reviewComment=reason;
       }
       if(needsApprove){
         t.approvedBy=currentUser.id;
         t.approvedByName=apName;
         t.approvedTs=nowTs;
         t.approvedDate=apDate;
+        if(reason)t.approvalComment=reason;
       }
       t.status=targetStatus;
       t._ts=nowTs;
@@ -11851,14 +12252,14 @@ function markApproved(id){
   if(!t)return;
   if(t.status!=='reviewed'){alert('Solo se pueden aprobar análisis revisados.');return;}
   var apDiv=document.createElement('div');
-  apDiv.innerHTML='<div style="position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:22px;width:360px;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
-    +'<h4 style="margin:0 0 6px">Aprobar análisis</h4>'
+  apDiv.innerHTML='<div class="modal-overlay" style="z-index:500">'
+    +'<div class="modal" style="width:min(360px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:6px;border-bottom:none;padding-bottom:0">Aprobar análisis</h3>'
     +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(t.producto)+' — '+escH(t.lote)+'</p>'
     +'<div class="frow"><label>Fecha de aprobación *</label>'
     +'<input type="date" id="ap-date" value="'+today()+'" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
-    +'<button onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
+    +'<button onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
     +'<button onclick="window[\'_doApproved_\'+'+id+']('+id+')" class="btn pri">✓ Aprobar</button>'
     +'</div></div></div>';
   document.body.appendChild(apDiv);
@@ -11877,6 +12278,7 @@ function markApproved(id){
         t.approvedBy=currentUser.id;
         t.approvedTs=Date.now();
         t.approvedDate=_aDate;
+        if(reason)t.approvalComment=reason; // visible en Comentarios del proceso y Aprobados
         stampIntegrity(t);
         auditLog('APPROVE','TASK',id,{
           field:'status',
@@ -11923,10 +12325,12 @@ function reviewerApprove(id){
       t._revApprovedByName=currentUser.name;
       t._revApprovedTs=Date.now();
       t._revApprovedDate=today();
+      if(reason)t._revApprovedComment=reason; // visible para el supervisor al confirmar
       t._ts=Date.now();
       stampIntegrity(t);
       replanNotifs.push({id:nextNotifId++,type:'reviewer_approval',taskId:id,
         producto:t.producto,lote:t.lote,byName:currentUser.name,by:currentUser.id,
+        comment:reason||'',
         status:'pending',ts:Date.now(),_ts:Date.now()});
       auditLog('REVIEWER_APPROVE','TASK',id,{
         field:'_revApproved',oldVal:'',newVal:'true',
@@ -11990,9 +12394,9 @@ function markObserved(id){
     return'<option value="'+a.analyst+'">'+(u?escH(u.name):'?')+'</option>';
   }).join('');
   const obsDiv=document.createElement('div');
-  obsDiv.innerHTML='<div style="position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:22px;width:400px;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
-    +'<h4 style="margin:0 0 14px">⚑ Observar análisis</h4>'
+  obsDiv.innerHTML='<div class="modal-overlay" style="z-index:500">'
+    +'<div class="modal" style="width:min(400px,calc(100vw - 32px))">'
+    +'<h3>⚑ Observar análisis</h3>'
     +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(t.producto)+' — '+escH(t.lote)+'</p>'
     +(assigns.length>1
       ?'<div class="frow" style="margin-bottom:12px"><label>Analista responsable de resolver</label>'
@@ -12154,8 +12558,8 @@ function getNotifEventLabel(n){
     'observation':'Observación','completed':'Tarea completada',
     'replan_rejected':'Replanificación rechazada','planification_accepted':'Planificación aceptada',
     'planification_rejected':'Planificación rechazada','hours_rejected':'Horas rechazadas',
-    'free_task_declined':'Tarea libre declinada',
-    'free_task_rejected':'Tarea libre rechazada','sampling_rejected':'Muestreo rechazado',
+    'free_task_declined':'Tarea única declinada',
+    'free_task_rejected':'Tarea única rechazada','sampling_rejected':'Muestreo rechazado',
     'schedule_rejected':'Horario rechazado','request_managed':'Solicitud gestionada',
     'day_released':'Día liberado',
   };
@@ -12661,16 +13065,16 @@ function _offerReleaseRemainingDays(taskId, dates){
   var _dts=dates.slice().sort();
   var listHtml=_dts.map(function(d){return '<li class="u-mono">'+fmtDDMMYY(d)+'</li>';}).join('');
   var dv=document.createElement('div');
-  dv.innerHTML='<div style="position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:22px;width:430px;box-shadow:0 8px 32px rgba(0,0,0,.25)">'
-    +'<h4 style="margin:0 0 8px">¿Finalizaste el análisis?</h4>'
+  dv.innerHTML='<div class="modal-overlay" style="z-index:600">'
+    +'<div class="modal" style="width:min(430px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:8px;border-bottom:none;padding-bottom:0">¿Finalizaste el análisis?</h3>'
     +'<p style="font-size:13px;color:var(--text);margin:0 0 6px">Registraste tu trabajo en <b>'+escH(t.producto)+'</b> — <span class="u-mono">'+escH(t.lote)+'</span>.</p>'
     +'<p style="font-size:13px;color:var(--text2);margin:0 0 6px">Te quedan '+_dts.length+' día'+(_dts.length>1?'s':'')+' asignado'+(_dts.length>1?'s':'')+' que no usaste:</p>'
     +'<ul style="margin:0 0 10px 18px;font-size:12px;color:var(--text2)">'+listHtml+'</ul>'
     +'<div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:var(--radius);padding:8px 12px;font-size:12px;color:var(--amber-text);margin-bottom:12px">Si liberás esos días, el análisis se considerará <b>terminado de tu parte</b> y pasará a confirmación del supervisor. Si elegís conservarlos, los días quedan reservados y el producto sigue pendiente.</div>'
     +'<div class="frow"><label style="font-size:11px">Motivo (el supervisor lo verá)</label><input type="text" id="rel-motivo" value="Finalizó el análisis antes de usar todos los días asignados" style="width:100%"></div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
-    +'<button class="btn" onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)">No, conservar los días</button>'
+    +'<button class="btn" onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)">No, conservar los días</button>'
     +'<button class="btn pri" onclick="window._doReleaseRemaining('+t.id+')">Sí, liberar y dar por terminado</button>'
     +'</div></div></div>';
   document.body.appendChild(dv);
@@ -13150,6 +13554,11 @@ function renderNotifPanel(){
       });
       html+='</div>';
     }
+    if(isSup){
+      html+='<div style="padding:10px 14px;border-top:1px solid var(--border);text-align:center">'
+        +'<button class="btn sm" onclick="showNotifPanel=false;setView(\'historial\')" title="Historial completo con filtros por tipo, usuario y fecha">📜 Ver historial completo →</button>'
+        +'</div>';
+    }
     html+='</div></div>';
     return html;
   }
@@ -13162,6 +13571,7 @@ function renderNotifPanel(){
       html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid #22c55e">'
         +'<div class="u-12b">'+escH(n.producto||'')+(n.lote?' <span style="font-family:var(--mono);color:var(--text3);font-size:11px">'+escH(n.lote)+'</span>':'')+'</div>'
         +'<div style="font-size:11px;color:var(--text2);margin:3px 0">Aprobado por revisor: <b>'+escH(n.byName||'')+'</b> — pendiente de su confirmación</div>'
+        +(n.comment?'<div style="font-size:11px;color:var(--text2);background:var(--bg);border-radius:4px;padding:4px 8px;margin:3px 0;font-style:italic">💬 '+escH(n.comment)+'</div>':'')
         +'<div style="font-size:10px;color:var(--text3);margin:4px 0">'+new Date(n.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div>'
         +'<button class="btn sm pri" onclick="showNotifPanel=false;window.revisionTab=\'aprobar\';setView(\'revision\')" style="font-size:10px">→ Ver en Para aprobar</button>'
         +'</div>';
@@ -13178,7 +13588,10 @@ function renderNotifPanel(){
         +'<div style="font-size:11px;color:var(--text2);margin:3px 0">De: <b>'+escH(n.srcLabName||'')+'</b></div>'
         +(n.analisis?'<div class="u-sm2">'+escH(n.analisis.slice(0,80))+'</div>':'')
         +'<div style="font-size:10px;color:var(--text3);margin:4px 0">'+new Date(n.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div>'
-        +'<button class="btn sm pri" onclick="showNotifPanel=false;_ilrNotifMarkRead('+n.id+');_solicitudesSubView=\'recibidas\';setView(\'solicitudesIL\')" style="font-size:10px">→ Ver en Sol. Inter-lab</button>'
+        +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
+        +(isSup&&n.reqId?'<button class="btn sm suc" onclick="_ilrReceiveFromNotif(\''+escH(String(n.id))+'\',\''+escH(String(n.reqId))+'\')" style="font-size:10px" title="Crear la tarea IL sin salir de la campana">✓ Recibir y crear tarea</button>':'')
+        +'<button class="btn sm'+(isSup&&n.reqId?'':' pri')+'" onclick="showNotifPanel=false;_ilrNotifMarkRead(\''+escH(String(n.id))+'\');_solicitudesSubView=\'recibidas\';setView(\'solicitudesIL\')" style="font-size:10px">→ Ver en Sol. Inter-lab</button>'
+        +'</div>'
         +'</div>';
     });
     html+='</div>';
@@ -13248,7 +13661,7 @@ function renderNotifPanel(){
           +'<div style="display:flex;gap:4px;flex-wrap:wrap">'
           +'<button class="btn sm pri" onclick="showNotifPanel=false;openNewTaskFromSuggestion('+s.id+')" style="font-size:10px">✍ Revisar y confirmar</button>'
           +'<button class="btn sm dan" onclick="rejectSuggestion('+s.id+')" style="font-size:10px">✗ Rechazar</button>'
-          +'<button class="btn sm" onclick="showNotifPanel=false;setView(\'sugerencias\')" style="font-size:10px">📋 Ver todas</button>'
+          +'<button class="btn sm" onclick="showNotifPanel=false;window.tasksTab=\'ingresos\';setView(\'tasks\')" style="font-size:10px" title="Abrir la pestaña Ingresos del módulo Análisis">📋 Ver todas</button>'
           +'</div>'
           +'</div>';
       });
@@ -13310,10 +13723,10 @@ function renderNotifPanel(){
     }
   }
 
-  // ── Actividades libres para confirmar (supervisor — direct scan) ──
+  // ── Tareas únicas para confirmar (supervisor — direct scan) ──
   if(isSup&&ftPendConfirm.length>0){
     html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--blue-bg)">'
-      +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">✅ Actividades libres para confirmar ('+ftPendConfirm.length+')</div>';
+      +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">✅ Tareas únicas para confirmar ('+ftPendConfirm.length+')</div>';
     ftPendConfirm.forEach(function(ft){
       var uFt=getU(ft.analystId||ft.createdBy);
       var displayDate=ft.completedAt?new Date(ft.completedAt).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):fmtDDMMYY(ft.date||ft._ts);
@@ -13379,7 +13792,7 @@ function renderNotifPanel(){
     return isSup?(n.type==='completed'||n.type==='free_task_completed'):(n.type==='free_task_assigned');
   });
   if(ftForMe.length>0){
-    var ftHeader=isSup?'✅ Completados / Actividades libres':'📌 Actividades asignadas';
+    var ftHeader=isSup?'✅ Completados / Tareas únicas':'📌 Actividades asignadas';
     var _ftNew=ftForMe.filter(isUnread).length;
     html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--blue-bg)">'
       +'<div style="font-size:12px;font-weight:600;color:var(--blue-text);margin-bottom:8px">'+ftHeader+' ('+ftForMe.length+(_ftNew<ftForMe.length?' <span style="font-weight:400;color:var(--text3)">· '+_ftNew+' nuevas</span>':'')+')</div>';
@@ -13673,7 +14086,7 @@ function renderNotifPanel(){
         detail+=(detail?'<br>':'')+'Por: '+escH(n.rejectedByName||'');
 
       } else if(n.type==='free_task_declined'){
-        icon='❌'; title='Tarea libre declinada';
+        icon='❌'; title='Tarea única declinada';
         cardColor='var(--red-bg)'; borderColor='var(--red)';
         detail='Por: <b>'+escH(n.analystName||'')+'</b>'
           +(n.description?' — '+escH(n.description.slice(0,40)):'')
@@ -14157,7 +14570,7 @@ function renderFreeTaskModal(){
   const isDuplicate=!!pre;
   return'<div class="modal-overlay" onclick="if(event.target===this)closeFreeTaskModal()">'
     +'<div class="modal" style="width:420px">'
-    +'<h3>'+(ft?'Editar tarea libre':isDuplicate?'↩ Duplicar y reasignar tarea':'+ Registrar tarea libre')+'</h3>'
+    +'<h3>'+(ft?'Editar tarea única':isDuplicate?'↩ Duplicar y reasignar tarea':'+ Registrar tarea única')+'</h3>'
     +(isDuplicate?'<div style="background:var(--blue-bg);border-radius:var(--radius);padding:7px 10px;font-size:11px;color:var(--blue-text);margin-bottom:12px">Duplicando tarea declinada — podés cambiar el asignado, la fecha o las horas.</div>':'')
     +(isSup
       ?'<div class="frow"><label>Asignar a *</label>'
@@ -14272,7 +14685,7 @@ function saveFreeTask(){
 }
 
 function confirmFreeTask(ftId){
-  if(!isSupRole()){alert('Solo el Supervisor puede confirmar tareas libres.');return;}
+  if(!isSupRole()){alert('Solo el Supervisor puede confirmar tareas únicas.');return;}
   const ft=freeTasks.find(function(x){return x.id===ftId;});if(!ft)return;
   ft.status='confirmed';
   ft.confirmedBy=currentUser.id;
@@ -14305,11 +14718,11 @@ function rejectFreeTask(ftId){
 }
 
 function deleteFreeTask(ftId){
-  if(!isSupRole()){alert('Solo el Supervisor puede eliminar tareas libres.');return;}
+  if(!isSupRole()){alert('Solo el Supervisor puede eliminar tareas únicas.');return;}
   const ft=freeTasks.find(function(x){return x.id===ftId;});if(!ft)return;
   const u=getU(ft.analystId);
   requireSignature(
-    'Eliminar tarea libre',
+    'Eliminar tarea única',
     'Eliminar: '+ft.description+' ('+escH(u.name)+', '+fmtDF(ft.date)+', '+ft.hours+'h)',
     function(reason){
       freeTasks=freeTasks.filter(function(x){return x.id!==ftId;});
@@ -14335,9 +14748,9 @@ function confirmFreeTaskAsAnalyst(ftId, notifId){
   // Default to today or the assigned date, whichever is closer to today
   var defaultDate=ft.date||today();
   var hDiv=document.createElement('div');
-  hDiv.innerHTML='<div style="position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:22px;width:400px;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
-    +'<div style="font-weight:700;font-size:15px;margin-bottom:4px">Confirmar tarea realizada</div>'
+  hDiv.innerHTML='<div class="modal-overlay" style="z-index:500">'
+    +'<div class="modal" style="width:min(400px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">Confirmar tarea realizada</h3>'
     +'<div style="font-size:12px;color:var(--text2);margin-bottom:14px">'+escH(ft.description)+'</div>'
     +(ft.suggestedHours?'<div style="background:var(--blue-bg);border-radius:var(--radius);padding:7px 10px;font-size:12px;margin-bottom:14px;color:var(--blue-text)">⏱ Dedicación sugerida por supervisor: <b class="u-mono">'+ft.suggestedHours+'h</b></div>':'')
     +'<div style="margin-bottom:12px"><label style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Fecha en que se realizó *</label>'
@@ -14394,14 +14807,14 @@ function confirmFreeTaskAsAnalyst(ftId, notifId){
 function requestPlanification(taskId){
   const t=tasks.find(function(x){return x.id===taskId;});if(!t)return;
   var motDiv=document.createElement('div');
-  motDiv.innerHTML='<div style="position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center">'
-    +'<div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px;width:360px;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
-    +'<h4 style="margin:0 0 6px">Solicitar planificación</h4>'
+  motDiv.innerHTML='<div class="modal-overlay" style="z-index:500">'
+    +'<div class="modal" style="width:min(360px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:6px;border-bottom:none;padding-bottom:0">Solicitar planificación</h3>'
     +'<p style="font-size:12px;color:var(--text2);margin:0 0 12px">'+escH(t.producto)+' · '+escH(t.lote)+'</p>'
     +'<div class="frow"><label>Fecha en que deseás realizarlo *</label><input type="date" id="rplan-date" value="'+(t.due||today())+'" style="width:100%"></div>'
     +'<div class="frow"><label>Motivo de la solicitud (opcional)</label><textarea id="rplan-mot" rows="3" placeholder="Ej: Necesito realizar los ensayos de identificación..." style="width:100%;resize:vertical"></textarea></div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">'
-    +'<button onclick="document.body.removeChild(this.closest(\'div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
+    +'<button onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
     +'<button onclick="window._doReqPlan('+taskId+')" class="btn pri">📋 Enviar solicitud</button>'
     +'</div></div></div>';
   document.body.appendChild(motDiv);
