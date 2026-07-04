@@ -607,6 +607,18 @@ function applySnapshot(json){
       // Ensure samplerAssignments array exists
       if(!t.samplerAssignments)t.samplerAssignments=[];
     });
+    // Migración: fecha de aprobación anterior a la fecha de revisión → igualar a la revisión
+    tasks.forEach(function(t){
+      if(t.approvedDate&&t.reviewedDate&&t.approvedDate<t.reviewedDate){
+        var _oldAp=t.approvedDate;
+        t.approvedDate=t.reviewedDate;
+        t._ts=Date.now();
+        if(t._integrityHash)stampIntegrity(t);
+        auditLog('EDIT','TASK',t.id,{field:'approvedDate',oldVal:_oldAp,newVal:t.approvedDate,
+          description:'Corrección automática: fecha de aprobación anterior a la fecha de revisión — '+t.producto+' '+t.lote,lote:t.lote},
+          'La fecha de aprobación no puede ser anterior a la fecha de revisión');
+      }
+    });
     rebuildDerived();
     // ── Descubrimiento de laboratorios desde el Gist ──
     // Solo actualiza nombres de labs YA conocidos localmente.
@@ -12184,9 +12196,10 @@ function _supervisorForceTerminalStatus(taskId,targetStatus){
     +(needsApprove
       ?'<div style="background:var(--bg);border-radius:var(--radius);padding:10px 14px;margin-bottom:10px">'
         +'<div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:10px">✓ Datos de aprobación</div>'
+        +(!needsReview&&t.reviewedDate?'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">📋 Revisado el <b class="u-mono">'+fmtDF(t.reviewedDate)+'</b> — la fecha de aprobación no puede ser anterior.</div>':'')
         +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">'
         +'<div><label style="font-size:11px;font-weight:600;color:var(--text2)">Fecha de aprobación *</label>'
-        +'<input type="date" id="fts-ap-date" value="'+today()+'" style="'+_inp+'"></div>'
+        +'<input type="date" id="fts-ap-date" value="'+((!needsReview&&t.reviewedDate&&t.reviewedDate>today())?t.reviewedDate:today())+'"'+(!needsReview&&t.reviewedDate?' min="'+t.reviewedDate+'"':'')+' style="'+_inp+'"></div>'
         +'<div><label style="font-size:11px;font-weight:600;color:var(--text2)">Nombre del aprobador *</label>'
         +'<input type="text" id="fts-ap-name" placeholder="Ej: Farm. López" style="'+_inp+'"></div>'
         +'</div></div>'
@@ -12208,6 +12221,8 @@ function _supervisorForceTerminalStatus(taskId,targetStatus){
     if(needsReview&&!rvName){alert('El nombre del revisor es obligatorio.');return;}
     if(needsApprove&&!apDate){alert('La fecha de aprobación es obligatoria.');return;}
     if(needsApprove&&!apName){alert('El nombre del aprobador es obligatorio.');return;}
+    var _rvRef=needsReview?rvDate:(t.reviewedDate||'');
+    if(needsApprove&&_rvRef&&apDate<_rvRef){alert('⚠ La fecha de aprobación ('+fmtDF(apDate)+') no puede ser anterior a la fecha de revisión ('+fmtDF(_rvRef)+').');return;}
     if(needsApprove&&t.due&&apDate>t.due){
       if(!confirm('⚠ La fecha de aprobación ('+fmtDF(apDate)+') es posterior a la fecha límite ('+fmtDF(t.due)+').\n\n¿Confirmar aprobación fuera de plazo?'))return;
     }
@@ -12256,8 +12271,9 @@ function markApproved(id){
     +'<div class="modal" style="width:min(360px,calc(100vw - 32px))">'
     +'<h3 style="margin-bottom:6px;border-bottom:none;padding-bottom:0">Aprobar análisis</h3>'
     +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(t.producto)+' — '+escH(t.lote)+'</p>'
+    +(t.reviewedDate?'<div style="font-size:11px;color:var(--text2);background:var(--bg);border-radius:var(--radius);padding:6px 10px;margin-bottom:10px">📋 Revisado el <b class="u-mono">'+fmtDF(t.reviewedDate)+'</b> — la fecha de aprobación no puede ser anterior.</div>':'')
     +'<div class="frow"><label>Fecha de aprobación *</label>'
-    +'<input type="date" id="ap-date" value="'+today()+'" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></div>'
+    +'<input type="date" id="ap-date" value="'+((t.reviewedDate&&t.reviewedDate>today())?t.reviewedDate:today())+'" min="'+(t.reviewedDate||'')+'" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
     +'<button onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
     +'<button onclick="window[\'_doApproved_\'+'+id+']('+id+')" class="btn pri">✓ Aprobar</button>'
@@ -12265,6 +12281,7 @@ function markApproved(id){
   document.body.appendChild(apDiv);
   window['_doApproved_'+id]=function(tid){
     var _aDate=((document.getElementById('ap-date')||{}).value||today());
+    if(t.reviewedDate&&_aDate<t.reviewedDate){alert('⚠ La fecha de aprobación ('+fmtDF(_aDate)+') no puede ser anterior a la fecha de revisión ('+fmtDF(t.reviewedDate)+').');return;}
     document.body.removeChild(apDiv);
     if(t.due&&_aDate>t.due){
       if(!confirm('⚠️ La fecha de aprobación ('+fmtDF(_aDate)+') es POSTERIOR a la fecha límite ('+fmtDF(t.due)+').\n\n¿Confirmar aprobación fuera de plazo?'))return;
