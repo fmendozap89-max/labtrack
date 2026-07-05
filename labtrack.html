@@ -1741,15 +1741,6 @@ function selectTipoPill(val){
     b.style.fontWeight=active?'700':'400';
   });
 }
-function saveAprobadoTipo(taskId, val){
-  var t=tasks.find(function(x){return x.id===Number(taskId);});
-  if(!t||t.status!=='approved')return;
-  var oldTipo=t.tipo||'';
-  t.tipo=val||'';
-  t._ts=Date.now();
-  auditLog('EDIT','TASK',t.id,{field:'tipo',oldVal:oldTipo,newVal:val},'Cambio de tipo en muestra aprobada');
-  saveLS();render();saveNow().catch(function(e){console.error('saveAprobadoTipo:',e);});
-}
 function renderTipoPillsHtml(currentTipo){
   var html='<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">';
   SAMPLE_TYPES.forEach(function(st){
@@ -5233,13 +5224,13 @@ function renderAprobados(){
   if(typeof window.aprobSearch==='undefined')window.aprobSearch='';
   var q=window.aprobSearch.toLowerCase().trim();
   if(q)approved=approved.filter(function(t){return t.producto.toLowerCase().includes(q)||t.lote.toLowerCase().includes(q);});
+  approved=approved.filter(_tipoMatch);
   var _apGet=function(t){return t.approvedDate||(t.approvedTs?new Date(t.approvedTs).toISOString().slice(0,10):'')||t.due||'';};
   var _apPre=approved.length;
   approved=monthFilterApply('aprobados',approved,_apGet);
   var _apHidden=_apPre-approved.length;
 
-  var _isSupApro=isSupRole();
-  var cols=_isSupApro?'grid-template-columns:1.4fr 0.5fr 0.8fr 0.75fr 0.75fr 0.6fr 0.8fr 0.6fr':'grid-template-columns:1.4fr 0.5fr 0.8fr 0.75fr 0.75fr 0.6fr 0.8fr 0.6fr';
+  var cols='grid-template-columns:1.4fr 0.5fr 0.8fr 0.75fr 0.75fr 0.6fr 0.8fr 0.6fr';
   var hdr='<div class="thead" style="'+cols+'">'
     +sortHdr('producto','Producto / Lote')
     +'<div>Tipo</div>'
@@ -5256,14 +5247,7 @@ function renderAprobados(){
     var anaAv=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':'';}).join('');
     var realH=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
     var approverName=_approverName(t);
-    var tipoCell=(_isSupApro&&!t._archived)
-      ?'<div onclick="event.stopPropagation()" style="display:flex;align-items:center">'
-        +'<select style="font-size:11px;padding:2px 4px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text);max-width:70px"'
-        +' onchange="saveAprobadoTipo('+t.id+',this.value)">'
-        +'<option value="">—</option>'
-        +SAMPLE_TYPES.map(function(st){return'<option value="'+st.id+'"'+(t.tipo===st.id?' selected':'')+'>'+st.label+'</option>';}).join('')
-        +'</select></div>'
-      :'<div>'+sampleTypeBadge(t.tipo)+'</div>';
+    var tipoCell='<div>'+sampleTypeBadge(t.tipo)+'</div>';
     var _cmts=[];
     if(t.reviewComment)_cmts.push('Revisión: '+t.reviewComment);
     if(t.approvalComment)_cmts.push('Aprobación: '+t.approvalComment);
@@ -5289,7 +5273,7 @@ function renderAprobados(){
     +' oninput="_srch(\'aprobSearch\',this.value,\'srch-aprobados\')">'
     +monthFilterSelect('aprobados',approvedFull,_apGet)
     +'<button class="btn sm'+(window.aprobIncludeArch?' pri':'')+'" onclick="toggleArchView(\'aprobIncludeArch\')" title="Incluir productos del archivo histórico (aprobados hace más de '+ARCHIVE_APPROVED_AFTER_DAYS+' días)">📦 '+(window.aprobIncludeArch?'Archivados: sí'+(window._archTasks?' ('+window._archTasks.length+')':''):'Ver archivados')+'</button>'
-    +((q||(listMonthFilter['aprobados']&&listMonthFilter['aprobados']!==_lmCurrent()))?'<button class="btn sm" onclick="window.aprobSearch=\'\';delete listMonthFilter[\'aprobados\'];render()" title="Restablecer búsqueda y mes">✕ Limpiar filtros</button>':'')
+    +((q||_tipoFilter.length||(listMonthFilter['aprobados']&&listMonthFilter['aprobados']!==_lmCurrent()))?'<button class="btn sm" onclick="window.aprobSearch=\'\';_tipoFilter=[];delete listMonthFilter[\'aprobados\'];render()" title="Restablecer búsqueda, tipo y mes">✕ Limpiar filtros</button>':'')
     +'<div style="display:flex;gap:5px;margin-left:auto">'
     +'<button class="btn sm" onclick="copyAprobados(this)">📋 Copiar</button>'
     +'<button class="btn sm" onclick="doExportAprobados()">↓ Excel</button>'
@@ -5302,7 +5286,8 @@ function renderAprobados(){
     +'</div>'
     +'</div>'
     +search
-    +(approved.length===0?'<div class="empty">No hay análisis aprobados '+(_apHidden>0?'en el mes seleccionado':'aún')+'</div>':'<div class="tbl">'+hdr+approved.map(aRow).join('')+'</div>');
+    +_tipoFilterBar()
+    +(approved.length===0?'<div class="empty">No hay análisis aprobados '+(_apHidden>0?'en el mes seleccionado':(q||_tipoFilter.length?'con los filtros aplicados':'aún'))+'</div>':'<div class="tbl">'+hdr+approved.map(aRow).join('')+'</div>');
 }
 
 function doExportAprobados(){
