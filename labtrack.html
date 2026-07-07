@@ -610,7 +610,9 @@ function getSnapshot(){
     customTipos_ts:(customTipos_ts||0),
     users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{}),...(u._ts?{_ts:u._ts}:{}),...(u._mustChangePwd?{_mustChangePwd:true}:{})})),
     passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
-    auditTrail,
+    // El audit trail vive en su propio archivo (labtrack_audit.json) — duplicarlo acá
+    // engordaba el state hasta el límite de 1 MB de la API (que trunca y rompe el sync)
+    auditTrail:[],
     interLabRequests,externalLabs,
     deletions:deletionsReg,
     labRegistry:_labRegistry,
@@ -638,12 +640,13 @@ function applySnapshot(json){
     // Eliminar U108 de passwords también
     delete passwords['U108'];
     replanNotifs=d.replanNotifs||[];
-    // Retención: purgar notificaciones RESUELTAS con más de 90 días (el array crece
-    // sin límite y engorda el Gist; la poda es determinística → converge entre clientes)
-    var _notifCutoff=Date.now()-90*24*60*60*1000;
+    // Retención: purgar notificaciones NO pendientes con más de 45 días (636 notifs
+    // llegaron a ocupar ~180 KB del state; la poda es determinística → converge entre
+    // clientes). Las pendientes nunca se purgan por edad; el audit conserva el registro.
+    var _notifCutoff=Date.now()-45*24*60*60*1000;
     replanNotifs=replanNotifs.filter(function(n){
       if(n.status==='pending')return true; // activas: nunca purgar por edad
-      // resolved/read/approved (legado): purgar con más de 90 días
+      // resolved/read/approved (legado): purgar con más de 45 días
       var ts=n.resolvedTs||n.readTs||n.ts||0;
       return ts>_notifCutoff;
     });
@@ -667,7 +670,10 @@ function applySnapshot(json){
       if(d.workdayConfig._ts)workdayConfig._ts=d.workdayConfig._ts;
     }
     USERS.forEach(u=>{if(!passwords[u.id])passwords[u.id]=_DEFAULT_PWD_HASH||'labtrack123';});
-    auditTrail=Array.isArray(d.auditTrail)?d.auditTrail:[];
+    // El state ya no transporta el audit (vive en labtrack_audit.json y se carga en
+    // cada pull/boot): si viene vacío, CONSERVAR el audit en memoria — no pisarlo.
+    if(Array.isArray(d.auditTrail)&&d.auditTrail.length)auditTrail=d.auditTrail;
+    else if(!Array.isArray(auditTrail))auditTrail=[];
     interLabRequests=d.interLabRequests||[];
     externalLabs=(d.externalLabs||[]).filter(function(l){return !deletionsReg.externalLabs[l.id];});
     tasks=d.tasks;
@@ -695,6 +701,17 @@ function applySnapshot(json){
     tasks=tasks.filter(function(t){
       if(!t._deleted)return true;
       return (t._deletedTs||0)>=_tdCut;
+    });
+    // Versionado interno (_history): conservar solo las últimas 5 versiones por tarea
+    // y solo los campos que la vista de historial muestra (status/notes/due/priority).
+    // Las copias profundas de assignments llegaron a ocupar ~280 KB del archivo de
+    // estado (riesgo de truncado en la API) y nada las leía. Poda determinística.
+    tasks.forEach(function(t){
+      if(!t._history)return;
+      if(t._history.length>5)t._history=t._history.slice(-5);
+      t._history.forEach(function(h){
+        if(h.snapshot){delete h.snapshot.assignments;delete h.snapshot.producto;delete h.snapshot.lote;}
+      });
     });
     // Normalize status: pending↔scheduled based on active assignments
     tasks.forEach(function(t){
@@ -778,6 +795,7 @@ let _syncDeferred    = false;   // true cuando el sync se pospuso por modal abie
 let _rateLimitUntil  = 0;      // timestamp hasta el cual la API está rate-limited
 let _gistETags       = {};     // path → ETag para conditional GETs (304 = gratis)
 let _lastSuccessfulSync = Date.now(); // ts del último sync exitoso (save o pull)
+let _dirtyLocal = false;     // hay cambios locales sin enviar al Gist
 const STALE_SYNC_MS  = 5 * 60 * 1000; // 5 minutos sin sync → banner de advertencia
 let _inactivityTimer = null;
 let _inactivityReloadPending = false;
@@ -821,11 +839,19 @@ async function _gistFetch(method, path, body) {
   if (body)          _headers['Content-Type'] = 'application/json';
   if (_storedETag)   _headers['If-None-Match'] = _storedETag;
 
-  const r = await fetch(_url, {
-    method: _method,
-    headers: _headers,
-    body: body ? JSON.stringify(body) : undefined
-  });
+  // Timeout: un request colgado (típico al despertar la radio del celular) no debe
+  // bloquear la cadena de sync indefinidamente — se aborta y el reintento lo cubre.
+  const _ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const _tmo  = _ctrl ? setTimeout(function(){ _ctrl.abort(); }, 30000) : null;
+  let r;
+  try {
+    r = await fetch(_url, {
+      method: _method,
+      headers: _headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: _ctrl ? _ctrl.signal : undefined
+    });
+  } finally { if (_tmo) clearTimeout(_tmo); }
 
   // 304 Not Modified — el Gist no cambió desde nuestro último GET; este request no consume cuota
   if (r.status === 304) return null;
@@ -855,6 +881,44 @@ async function _gistFetch(method, path, body) {
     throw err;
   }
   return r.status === 204 ? {} : r.json();
+}
+
+// ── Error de red transitorio (típico en celular: radio despertando, cambio de red,
+// tab que vuelve del segundo plano). NO incluye errores de la API (4xx/5xx). ──
+function _isNetworkErr(e){
+  if(!e || e._isRateLimit) return false;
+  if(e.name==='AbortError') return true;
+  if(e instanceof TypeError) return true; // "Failed to fetch" / "Load failed" / NetworkError
+  var m=String(e.message||'').toLowerCase();
+  return m.indexOf('failed to fetch')>=0||m.indexOf('networkerror')>=0||m.indexOf('load failed')>=0
+    ||m.indexOf('network request failed')>=0||m.indexOf('timeout')>=0;
+}
+
+// Reintentos silenciosos con backoff SOLO para errores de red — la mayoría de los
+// cortes del celular se resuelven en segundos y no ameritan mostrar un error.
+// El PATCH es idempotente (escribe el contenido completo): reintentarlo es seguro.
+async function _gistFetchRetry(method, path, body, tries){
+  var attempts = tries||3, delay = 1500;
+  for(var i=0;i<attempts;i++){
+    try { return await _gistFetch(method, path, body); }
+    catch(e){
+      if(i===attempts-1 || !_isNetworkErr(e)) throw e;
+      await new Promise(function(res){ setTimeout(res, delay); });
+      delay = Math.min(delay*2.5, 10000);
+    }
+  }
+}
+
+// Contenido COMPLETO de un archivo del gist. La API trunca archivos grandes
+// (truncated:true → JSON cortado → parse roto en todos los clientes): en ese
+// caso hay que descargar raw_url (request simple sin headers — CORS abierto).
+async function _gistFileContent(gistObj, fileName){
+  var f = gistObj && gistObj.files && gistObj.files[fileName];
+  if(!f) return null;
+  if(!f.truncated || !f.raw_url) return (f.content!=null ? f.content : null);
+  var r = await fetch(f.raw_url);
+  if(!r.ok) throw new Error('No se pudo descargar el contenido completo del gist ('+r.status+')');
+  return await r.text();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -919,7 +983,7 @@ async function _flushAuditBuffer() {
     // 304: sin cambios en el remoto — usar el audit en memoria como base
     const raw = gist === null
       ? JSON.stringify(auditTrail)
-      : (gist.files[GIST_FILE_AUDIT]?.content || '[]');
+      : ((await _gistFileContent(gist, GIST_FILE_AUDIT)) || '[]');
     let existing = [];
     try { existing = JSON.parse(raw); } catch(e) {}
     // Prepend nuevos (más reciente primero), cap 1000 entradas (~200 KB, holgado para gist)
@@ -1007,6 +1071,7 @@ function saveLS(hint) {
     _snap._gistId = GIST_CONFIG.gistId || '';
     localStorage.setItem(_labStateKey(), JSON.stringify(_snap));
   } catch(e) { console.warn('saveLS: no se pudo persistir en localStorage:', e); }
+  _dirtyLocal = true; // hay cambios pendientes de enviar (se limpia tras un PATCH exitoso)
   if (hint) _pendingSaves[hint] = true;
   else ['workdayConfig','analystSchedules','mgmtCategories','users','passwords','absenceTypesDef','counters'].forEach(k=>{ _pendingSaves[k]=true; });
   if (_saveDebounce) clearTimeout(_saveDebounce);
@@ -1019,6 +1084,15 @@ async function _executeSave() {
   if (!GIST_CONFIG.configured) return;
   if (_saveRetryTimer) { clearTimeout(_saveRetryTimer); _saveRetryTimer = null; }
   _pendingSaves = {};
+  // Sin red confirmada (celular en segundo plano, modo avión): no intentar siquiera —
+  // evita el error inmediato. El listener de 'online' dispara el envío al reconectar;
+  // el timer de abajo es red de seguridad por si 'online' no llega a dispararse.
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    gistStatus = 'offline'; renderSpBadge();
+    _showSaveFeedback('offline');
+    _saveRetryTimer = setTimeout(function(){ if (GIST_CONFIG.configured) _executeSave(); }, 60000);
+    return;
+  }
   gistStatus = 'syncing'; renderSpBadge();
   // Serializado con el pull: nunca corren a la vez (evita PATCH con snapshot pre-sync)
   await _withGistLock(_executeSaveLocked);
@@ -1030,16 +1104,22 @@ async function _executeSaveLocked() {
     // Si el GET falla, NO se guarda (los datos quedan en localStorage y se reintenta).
     // Elimina toda posibilidad de que una sesión desactualizada sobreescriba datos:
     // la protección ya no depende de cuán vieja sea la sesión ni del reloj del equipo.
-    const remoteGist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+    const remoteGist = await _gistFetchRetry('GET', '/' + GIST_CONFIG.gistId);
 
     let contentToSave;
     if (remoteGist === null) {
       // 304: el remoto es idéntico a lo último que incorporamos — guardar estado local
       contentToSave = getSnapshot();
     } else {
-      const remoteContent = remoteGist.files[GIST_FILE_STATE]?.content;
+      // Contenido completo aunque la API lo trunque (archivos grandes → raw_url)
+      const remoteContent = await _gistFileContent(remoteGist, GIST_FILE_STATE);
       let remoteState = null;
-      if (remoteContent) { try { remoteState = JSON.parse(remoteContent); } catch(e) {} }
+      if (remoteContent) {
+        try { remoteState = JSON.parse(remoteContent); } catch(e) {}
+        // Remoto presente pero ilegible: ABORTAR — guardar a ciegas sobre datos que no
+        // pudimos leer es exactamente el tipo de sobreescritura que hay que impedir.
+        if (!remoteState) throw new Error('Estado remoto ilegible — guardado abortado para no sobreescribir datos');
+      }
       if (remoteState && (remoteState.savedAt||0) !== _lastRemoteTs) {
         // El remoto cambió desde lo último que conocemos → SIEMPRE mergear antes de
         // escribir (jamás sobreescritura total). Comparación por IDENTIDAD (!==), no por
@@ -1068,10 +1148,19 @@ async function _executeSaveLocked() {
     try { _chk = JSON.parse(contentToSave); } catch(e) {}
     if (!_chk || !Array.isArray(_chk.tasks)) throw new Error('Snapshot local inválido — guardado abortado');
 
-    await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
+    // Aviso temprano si el estado se acerca al límite de 1 MB de la API de Gist
+    // (a partir de ahí GitHub trunca el archivo en las lecturas)
+    if (contentToSave.length > 850000 && !window._sizeWarned) {
+      window._sizeWarned = true;
+      console.warn('Estado grande:', contentToSave.length, 'bytes');
+      try { showToast('⚠ El archivo de datos pesa ' + Math.round(contentToSave.length/1024) + ' KB (límite ~1024). La app lo irá reduciendo automáticamente.', 'warn'); } catch(e) {}
+    }
+
+    await _gistFetchRetry('PATCH', '/' + GIST_CONFIG.gistId, {
       files: { [GIST_FILE_STATE]: { content: contentToSave } }
     });
     _lastRemoteTs = _chk.savedAt || Date.now();
+    _dirtyLocal = false;
     gistStatus = 'ok'; gistLastSync = new Date();
     _lastSuccessfulSync = Date.now();
     _hideStaleBanner();
@@ -1079,6 +1168,17 @@ async function _executeSaveLocked() {
 
   } catch(e) {
     console.error('save:', e);
+    // Falla de red transitoria (celular): estado "sin conexión" con reintento
+    // silencioso — NO es un error de la app y no debe alarmar.
+    if (!e._isRateLimit && _isNetworkErr(e)) {
+      gistStatus = 'offline';
+      _showSaveFeedback('offline');
+      _saveRetryTimer = setTimeout(function(){
+        if (GIST_CONFIG.configured && (gistStatus === 'offline' || gistStatus === 'error')) _executeSave();
+      }, 30000);
+      renderSpBadge();
+      return;
+    }
     gistStatus = 'error';
     if (e._isRateLimit) {
       // Rate limit: cancelar cualquier retry anterior y esperar hasta el reset
@@ -1118,9 +1218,16 @@ function _showSaveFeedback(ok, errMsg) {
     el.style.cssText = 'position:fixed;bottom:18px;right:18px;z-index:8888;font-size:12px;font-weight:600;padding:7px 14px;border-radius:20px;box-shadow:0 2px 12px rgba(0,0,0,.18);transition:opacity .3s;pointer-events:none';
     document.body.appendChild(el);
   }
-  if (ok) {
+  if (ok === true) {
     el.style.background = 'var(--green)'; el.style.color = '#fff';
+    el.style.pointerEvents = 'none'; el.onclick = null;
     el.textContent = '✓ Guardado en GitHub';
+  } else if (ok === 'offline') {
+    // Sin conexión: aviso suave y transitorio — los datos están a salvo en el
+    // dispositivo y el reenvío es automático. No es un error de la app.
+    el.style.background = 'var(--amber)'; el.style.color = '#fff';
+    el.style.pointerEvents = 'none'; el.onclick = null;
+    el.textContent = '📡 Sin conexión — cambios guardados en este dispositivo; se enviarán al reconectar';
   } else {
     el.style.background = 'var(--red)'; el.style.color = '#fff';
     el.style.pointerEvents = 'auto'; el.style.cursor = 'pointer';
@@ -1128,7 +1235,8 @@ function _showSaveFeedback(ok, errMsg) {
     el.onclick = function(){ el.style.opacity='0'; _executeSave(); };
   }
   el.style.opacity = '1';
-  if (ok) setTimeout(function(){ if(el)el.style.opacity='0'; }, 2500);
+  if (ok === true) setTimeout(function(){ if(el)el.style.opacity='0'; }, 2500);
+  if (ok === 'offline') setTimeout(function(){ if(el)el.style.opacity='0'; }, 4000);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1191,12 +1299,30 @@ document.addEventListener('visibilitychange', function() {
   // Robusto a timers congelados en segundo plano: al volver al foco, evaluar inactividad por reloj de pared.
   _evaluateInactivity();
   if (!GIST_CONFIG.configured) return;
+  // La radio del celular puede tardar en despertar: si el navegador confirma que no
+  // hay red, no disparar el sync todavía — el evento 'online' lo hará al reconectar.
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   if (_isSyncStale()) {
     _showStaleBanner();
     // Solo disparar si no hay un sync ya en curso
     if (gistStatus !== 'syncing' && gistStatus !== 'connecting') {
       gistSyncFromRemote().catch(function(e){ console.warn('visibility-sync:', e); });
     }
+  }
+});
+
+// Reintento manual desde el badge "sin conexión"
+function _retrySyncNow(){
+  if(!GIST_CONFIG.configured) return;
+  if(_dirtyLocal) _executeSave();
+  else gistSyncFromRemote().catch(function(e){ console.warn('retry-sync:', e); });
+}
+// Al volver la conexión: enviar de inmediato lo pendiente (o refrescar si no hay nada)
+window.addEventListener('online', function() {
+  if (!GIST_CONFIG.configured) return;
+  if (_dirtyLocal) { _executeSave(); }
+  else if (gistStatus !== 'syncing' && gistStatus !== 'connecting') {
+    gistSyncFromRemote().catch(function(e){ console.warn('online-sync:', e); });
   }
 });
 
@@ -1218,7 +1344,7 @@ async function fetchPartnerGistData(partnerLab) {
     });
     if (!r.ok) return null;
     var gist = await r.json();
-    var content = gist.files && gist.files[GIST_FILE_STATE] && gist.files[GIST_FILE_STATE].content;
+    var content = await _gistFileContent(gist, GIST_FILE_STATE);
     var data = content ? JSON.parse(content) : null;
     if (data) _partnerLabCache[partnerLab.id] = { data: data, ts: Date.now() };
     return data;
@@ -1237,7 +1363,7 @@ async function pushNotifToPartnerGist(partnerLab, notif) {
     });
     if (!r.ok) return false;
     var gist = await r.json();
-    var content = gist.files && gist.files[GIST_FILE_STATE] && gist.files[GIST_FILE_STATE].content;
+    var content = await _gistFileContent(gist, GIST_FILE_STATE);
     if (!content) return false;
     var partnerData = JSON.parse(content);
     partnerData.replanNotifs = partnerData.replanNotifs || [];
@@ -1272,7 +1398,7 @@ async function updateRequestInPartnerGist(partnerLab, reqId, updates) {
     });
     if (!r.ok) return false;
     var gist = await r.json();
-    var content = gist.files && gist.files[GIST_FILE_STATE] && gist.files[GIST_FILE_STATE].content;
+    var content = await _gistFileContent(gist, GIST_FILE_STATE);
     if (!content) return false;
     var partnerData = JSON.parse(content);
     var reqs = partnerData.interLabRequests || [];
@@ -1320,7 +1446,7 @@ async function gistSyncFromRemote() {
 
 async function _gistPullLocked() {
   try {
-    const gist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+    const gist = await _gistFetchRetry('GET', '/' + GIST_CONFIG.gistId);
 
     // 304 Not Modified — remoto sin cambios (ETag coincide), no consume cuota
     if (gist === null) {
@@ -1332,8 +1458,8 @@ async function _gistPullLocked() {
       return;
     }
 
-    // ── Estado operativo ──
-    const stateContent = gist.files[GIST_FILE_STATE]?.content;
+    // ── Estado operativo (contenido completo aunque la API lo trunque) ──
+    const stateContent = await _gistFileContent(gist, GIST_FILE_STATE);
     if (!stateContent) throw new Error('Archivo state no encontrado en el gist');
     let remoteState;
     try { remoteState = JSON.parse(stateContent); } catch(e) { throw new Error('State JSON inválido'); }
@@ -1350,7 +1476,7 @@ async function _gistPullLocked() {
     }
 
     // ── Audit trail: SIEMPRE cargar desde remoto en cada sync ──
-    const auditContent = gist.files[GIST_FILE_AUDIT]?.content;
+    const auditContent = await _gistFileContent(gist, GIST_FILE_AUDIT);
     if (auditContent) {
       try {
         const remoteAudit = JSON.parse(auditContent);
@@ -1372,8 +1498,11 @@ async function _gistPullLocked() {
     _refreshIncomingILR().catch(function(e){console.warn('_refreshIncomingILR:',e);});
   } catch(e) {
     console.error('gistSync:', e);
-    gistStatus = 'error';
+    // Corte de red transitorio → "sin conexión" (el próximo intervalo o el evento
+    // 'online' lo resuelven solos); error real de la API → 'error'.
+    gistStatus = _isNetworkErr(e) ? 'offline' : 'error';
     if (e._isRateLimit) {
+      gistStatus = 'error';
       _rateLimitUntil = e._rateLimitReset || (Date.now() + 60 * 60 * 1000);
       var _rlT = new Date(_rateLimitUntil).toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'});
       console.warn('Rate limit activo hasta', _rlT, '— sync pausado');
@@ -1392,7 +1521,7 @@ function renderSpBadge() {
   const el = document.getElementById('sp-status-badge');
   if (!el) return;
   const map = {
-    offline:    { c:'var(--text3)',  t: GIST_CONFIG.configured ? '⚠ sin conexión' : '⚙ Configurar sync', action:'openSpConfig()' },
+    offline:    { c:'var(--text3)',  t: GIST_CONFIG.configured ? '📡 sin conexión ↻' : '⚙ Configurar sync', action: GIST_CONFIG.configured ? '_retrySyncNow()' : 'openSpConfig()' },
     connecting: { c:'var(--blue)',   t:'⟳ Conectando…',  action:'' },
     ok:         { c:'var(--green)',  t:'⬡ ' + (gistLastSync ? gistLastSync.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'}) : 'OK'), action:'gistSyncFromRemote()' },
     syncing:    { c:'var(--blue)',   t:'↑ Guardando…',   action:'' },
@@ -1858,7 +1987,7 @@ async function archiveOldApproved(){
     var gist=await _gistFetch('GET','/'+GIST_CONFIG.gistId);
     if(!gist)return;
     var prev=[];
-    try{prev=JSON.parse((gist.files[GIST_FILE_ARCHIVE]||{}).content||'[]');}catch(e){prev=[];}
+    try{prev=JSON.parse((await _gistFileContent(gist,GIST_FILE_ARCHIVE))||'[]');}catch(e){prev=[];}
     var map={};
     prev.forEach(function(t){map[t.id]=t;});
     cand.forEach(function(t){
@@ -1885,7 +2014,7 @@ async function loadArchivedTasks(){
   if(!GIST_CONFIG.configured)return (window._archTasks=[]);
   try{
     var gist=await _gistFetch('GET','/'+GIST_CONFIG.gistId);
-    var raw=(gist&&gist.files[GIST_FILE_ARCHIVE])?gist.files[GIST_FILE_ARCHIVE].content:'[]';
+    var raw=gist?await _gistFileContent(gist,GIST_FILE_ARCHIVE):'[]';
     window._archTasks=JSON.parse(raw||'[]');
   }catch(e){console.warn('loadArchivedTasks:',e);window._archTasks=[];}
   return window._archTasks;
@@ -1918,8 +2047,8 @@ async function gistBoot() {
     _showSpinner('Cargando estado operativo…');
     // Leer estado remoto — invalidar ETag para garantizar datos frescos en el boot
     delete _gistETags['/' + GIST_CONFIG.gistId];
-    const gist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
-    const stateContent = gist ? gist.files[GIST_FILE_STATE]?.content : null;
+    const gist = await _gistFetchRetry('GET', '/' + GIST_CONFIG.gistId);
+    const stateContent = gist ? await _gistFileContent(gist, GIST_FILE_STATE) : null;
     if (stateContent) {
       const remoteState = JSON.parse(stateContent);
       _lastRemoteTs = remoteState.savedAt || 0;
@@ -1955,7 +2084,7 @@ async function gistBoot() {
       _loadLocalState(GIST_CONFIG.gistId);
     }
     // Cargar audit trail — ordenar más reciente primero
-    const auditContent = gist ? gist.files[GIST_FILE_AUDIT]?.content : null;
+    const auditContent = gist ? await _gistFileContent(gist, GIST_FILE_AUDIT) : null;
     if (auditContent) {
       try {
         const loaded = JSON.parse(auditContent);
@@ -2089,7 +2218,7 @@ async function _previewGistVersion(sha, label, parentOverlay){
   if(btn){btn.disabled=true;btn.textContent='Cargando…';}
   try{
     const ver=await _gistFetch('GET','/'+GIST_CONFIG.gistId+'/'+sha);
-    const content=ver&&ver.files&&ver.files[GIST_FILE_STATE]&&ver.files[GIST_FILE_STATE].content;
+    const content=ver?await _gistFileContent(ver,GIST_FILE_STATE):null;
     if(!content){alert('Esta versión no tiene datos de estado.');if(btn){btn.disabled=false;btn.textContent='Vista previa';}return;}
     var snap;try{snap=JSON.parse(content);}catch(e){alert('Versión con datos inválidos.');if(btn){btn.disabled=false;btn.textContent='Vista previa';}return;}
     var taskCount=(snap.tasks||[]).length;
@@ -5889,7 +6018,7 @@ async function discoverLabsFromToken(token){
     try{
       var r2=await fetch('https://api.github.com/gists/'+g.id,{headers:headers});
       var data=await r2.json();
-      var content=data.files&&data.files[GIST_FILE_STATE]&&data.files[GIST_FILE_STATE].content;
+      var content=await _gistFileContent(data,GIST_FILE_STATE);
       var name='';
       if(content){
         try{
@@ -7401,22 +7530,22 @@ function activeTasks(){return tasks.filter(function(t){return !t._deleted;});}
 function saveTaskVersion(t) {
   if(!t) return;
   if(!t._history) t._history = [];
+  // Solo los campos que muestra renderTaskHistory. La copia profunda de assignments
+  // que se guardaba acá llegó a pesar ~245 KB en el gist y nada la leía.
   t._history.push({
     ts: Date.now(),
     editedBy: currentUser ? currentUser.id : '?',
     editedByName: currentUser ? currentUser.name : '?',
     snapshot: {
-      producto: t.producto,
-      lote: t.lote,
       status: t.status,
-      assignments: JSON.parse(JSON.stringify(t.assignments||[])),
       notes: t.notes,
       due: t.due,
       priority: t.priority
     }
   });
-  // Keep last 20 versions
-  if(t._history.length > 20) t._history = t._history.slice(-20);
+  // Conservar solo las últimas 5 versiones (mismo tope que la poda de applySnapshot):
+  // con 20 llegó a ocupar ~290 KB del archivo de estado. El audit registra cada acción.
+  if(t._history.length > 5) t._history = t._history.slice(-5);
 }
 
 // ── Render task history modal ──
@@ -10824,7 +10953,7 @@ async function adminClearAllILR(){
       });
       if(!r.ok){errors.push(pl.name||pl.id);continue;}
       var gist=await r.json();
-      var content=gist.files&&gist.files[GIST_FILE_STATE]&&gist.files[GIST_FILE_STATE].content;
+      var content=await _gistFileContent(gist,GIST_FILE_STATE);
       if(!content){errors.push(pl.name||pl.id);continue;}
       var pdata=JSON.parse(content);
       var changed=false;
