@@ -428,6 +428,14 @@ var labProfiles=[]; // [{id,name,token,gistId}]
 var _discoverState=null; // null | 'loading' | {labs:[{gistId,name}]} | {error:'msg'}
 var _selectedDiscoverGistId=null;
 var labConfigPwd=''; // hash SHA-256 de la clave maestra de configuración de labs; '' = sin clave
+var labConfigPwd_ts=0; // timestamp del último cambio de la clave maestra (para merge entre dispositivos)
+// Registro de borrados definitivos (usuarios, tareas libres, gestión, labs externos): id → timestamp.
+// Sin esto, el merge por unión resucitaría los registros eliminados desde copias remotas.
+var deletionsReg={users:{},freeTasks:{},mgmtTasks:{},externalLabs:{}};
+function _regDeletion(kind,id){
+  if(!deletionsReg[kind])deletionsReg[kind]={};
+  deletionsReg[kind][id]=Date.now();
+}
 var _labConfigUnlocked=false; // desbloqueado por sesión en memoria
 var activeLabId=null;
 // ── Solicitudes inter-laboratorio ──
@@ -599,19 +607,32 @@ function getSnapshot(){
     v:7,
     tasks,nextId,nextUid,nextNotifId,nextAbsId,nextMgmtId,
     freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,customTipos,
-    users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{})})),
+    customTipos_ts:(customTipos_ts||0),
+    users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{}),...(u._ts?{_ts:u._ts}:{}),...(u._mustChangePwd?{_mustChangePwd:true}:{})})),
     passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
     auditTrail,
     interLabRequests,externalLabs,
+    deletions:deletionsReg,
     labRegistry:_labRegistry,
-    labConfigPwd:labConfigPwd
+    labConfigPwd:labConfigPwd,
+    labConfigPwd_ts:labConfigPwd_ts
   });
 }
 function applySnapshot(json){
   try{
     const d=JSON.parse(json);
     if(!d||!d.tasks)return false;
-    USERS=d.users.map(u=>({...u})).filter(u=>u.id!=='U108');
+    // Registro de borrados definitivos: cargar y podar entradas de más de 90 días
+    // (poda determinística — todos los clientes convergen)
+    deletionsReg=d.deletions&&typeof d.deletions==='object'?d.deletions:{users:{},freeTasks:{},mgmtTasks:{},externalLabs:{}};
+    ['users','freeTasks','mgmtTasks','externalLabs'].forEach(function(k){
+      if(!deletionsReg[k])deletionsReg[k]={};
+      var _delCut=Date.now()-90*24*60*60*1000;
+      Object.keys(deletionsReg[k]).forEach(function(id){
+        if((deletionsReg[k][id]||0)<_delCut)delete deletionsReg[k][id];
+      });
+    });
+    USERS=d.users.map(u=>({...u})).filter(u=>u.id!=='U108'&&!deletionsReg.users[u.id]);
     passwords=d.passwords||{};
     passwords_ts=d.passwords_ts||{};
     // Eliminar U108 de passwords también
@@ -621,7 +642,8 @@ function applySnapshot(json){
     // sin límite y engorda el Gist; la poda es determinística → converge entre clientes)
     var _notifCutoff=Date.now()-90*24*60*60*1000;
     replanNotifs=replanNotifs.filter(function(n){
-      if(n.status!=='resolved')return true;
+      if(n.status==='pending')return true; // activas: nunca purgar por edad
+      // resolved/read/approved (legado): purgar con más de 90 días
       var ts=n.resolvedTs||n.readTs||n.ts||0;
       return ts>_notifCutoff;
     });
@@ -629,14 +651,14 @@ function applySnapshot(json){
     absences=d.absences||{};
     absences_ts=d.absences_ts||{};
     nextAbsId=d.nextAbsId||1;
-    mgmtTasks=d.mgmtTasks||[];
+    mgmtTasks=(d.mgmtTasks||[]).filter(function(m){return !m._deleted&&!deletionsReg.mgmtTasks[m.id];});
     nextMgmtId=d.nextMgmtId||1;
     if(d.mgmtCategories&&d.mgmtCategories.length)mgmtCategories=d.mgmtCategories;
     analystSchedules=d.analystSchedules||{};
     scheduleRequests=d.scheduleRequests||[];
     nextSchedReqId=d.nextSchedReqId||1;
     if(d.absenceTypesDef)absenceTypesDef=d.absenceTypesDef;
-    if(d.customTipos&&Array.isArray(d.customTipos)){customTipos=d.customTipos;_rebuildSampleTypes();}
+    if(d.customTipos&&Array.isArray(d.customTipos)){customTipos=d.customTipos;customTipos_ts=d.customTipos_ts||0;_rebuildSampleTypes();}
     if(d.workdayConfig){
       workdayConfig.weekdays=d.workdayConfig.weekdays||workdayConfig.weekdays;
       workdayConfig.extra=d.workdayConfig.extra||[];
@@ -647,25 +669,37 @@ function applySnapshot(json){
     USERS.forEach(u=>{if(!passwords[u.id])passwords[u.id]=_DEFAULT_PWD_HASH||'labtrack123';});
     auditTrail=Array.isArray(d.auditTrail)?d.auditTrail:[];
     interLabRequests=d.interLabRequests||[];
-    externalLabs=d.externalLabs||[];
+    externalLabs=(d.externalLabs||[]).filter(function(l){return !deletionsReg.externalLabs[l.id];});
     tasks=d.tasks;
-    freeTasks=d.freeTasks||[];
+    freeTasks=(d.freeTasks||[]).filter(function(f){return !deletionsReg.freeTasks[f.id];});
     nextFreeTaskId=d.nextFreeTaskId||freeTasks.length+1;
     productSuggestions=d.productSuggestions||[];
     nextSuggId=d.nextSuggId||productSuggestions.length+1;
     nextId=d.nextId||11;
     nextUid=d.nextUid||100;
-    // Migración: purgar registros _removed:true que quedaron del sistema anterior.
-    // Los datos de asignaciones eliminadas por supervisor ya no se conservan.
+    // Tombstones de asignaciones (_removed): se CONSERVAN — son la marca que impide
+    // que un día liberado/replanificado resucite al mergear con dispositivos desactualizados.
+    // Poda determinística por edad (60 días): converge igual en todos los clientes, sin
+    // bumpear _ts (bumpearlo generaba churn de merge y destruía el orden temporal real).
+    var _rmCut=Date.now()-60*24*60*60*1000;
     tasks.forEach(function(t){
-      if(t.assignments&&t.assignments.some(function(a){return a._removed;})){
-        t.assignments=t.assignments.filter(function(a){return !a._removed;});
-        t._ts=Date.now();
-      }
+      if(!t.assignments)return;
+      t.assignments=t.assignments.filter(function(a){
+        if(!a._removed)return true;
+        return (a._removedTs||0)>=_rmCut; // sin _removedTs = legado viejo → podar
+      });
+    });
+    // Tombstones de productos (_deleted): conservar 90 días para que el borrado se
+    // propague vía merge; después, poda determinística.
+    var _tdCut=Date.now()-90*24*60*60*1000;
+    tasks=tasks.filter(function(t){
+      if(!t._deleted)return true;
+      return (t._deletedTs||0)>=_tdCut;
     });
     // Normalize status: pending↔scheduled based on active assignments
     tasks.forEach(function(t){
-      var activeA=(t.assignments||[]).length; // ya sin _removed tras migración
+      if(t._deleted)return; // no tocar tombstones (bumpear _ts los haría "ganar" merges)
+      var activeA=(t.assignments||[]).filter(function(a){return !a._removed;}).length;
       if(t.status==='pending'&&activeA>0){t.status='scheduled';t._ts=Date.now();}
       if(t.status==='scheduled'&&activeA===0){t.status='pending';t._ts=Date.now();}
       // Ensure samplerAssignments array exists
@@ -689,7 +723,7 @@ function applySnapshot(json){
     // No agrega labs nuevos automáticamente (requiere acción del supervisor)
     // para evitar mezcla de datos entre laboratorios.
     // Cargar contraseña maestra de configuración de labs
-    if(typeof d.labConfigPwd==='string')labConfigPwd=d.labConfigPwd;
+    if(typeof d.labConfigPwd==='string'){labConfigPwd=d.labConfigPwd;labConfigPwd_ts=d.labConfigPwd_ts||0;}
     if(d.labRegistry&&Array.isArray(d.labRegistry)&&d.labRegistry.length>0){
       var _changed=false;
       d.labRegistry.forEach(function(entry){
@@ -748,6 +782,17 @@ const STALE_SYNC_MS  = 5 * 60 * 1000; // 5 minutos sin sync → banner de advert
 let _inactivityTimer = null;
 let _inactivityReloadPending = false;
 const INACTIVITY_MS  = 10 * 60 * 1000; // 10 min sin actividad → reload
+
+// ── Exclusión mutua entre save y pull ──
+// Sin esto, un pull en vuelo puede aplicar estado remoto DESPUÉS de que un save
+// capturó su snapshot, y el PATCH escribe estado pre-sync (pérdida de datos).
+let _gistOpChain = Promise.resolve();
+function _withGistLock(fn) {
+  const run = _gistOpChain.then(fn, fn);
+  // La cadena nunca queda rechazada (un error en una operación no bloquea las siguientes)
+  _gistOpChain = run.then(function(){}, function(){});
+  return run;
+}
 
 // ══════════════════════════════════════════════════════════════
 // HTTP helpers
@@ -961,7 +1006,7 @@ function saveLS(hint) {
     _snap.auditTrail = [];
     _snap._gistId = GIST_CONFIG.gistId || '';
     localStorage.setItem(_labStateKey(), JSON.stringify(_snap));
-  } catch(e) {}
+  } catch(e) { console.warn('saveLS: no se pudo persistir en localStorage:', e); }
   if (hint) _pendingSaves[hint] = true;
   else ['workdayConfig','analystSchedules','mgmtCategories','users','passwords','absenceTypesDef','counters'].forEach(k=>{ _pendingSaves[k]=true; });
   if (_saveDebounce) clearTimeout(_saveDebounce);
@@ -975,101 +1020,58 @@ async function _executeSave() {
   if (_saveRetryTimer) { clearTimeout(_saveRetryTimer); _saveRetryTimer = null; }
   _pendingSaves = {};
   gistStatus = 'syncing'; renderSpBadge();
+  // Serializado con el pull: nunca corren a la vez (evita PATCH con snapshot pre-sync)
+  await _withGistLock(_executeSaveLocked);
+}
 
-  // ── Sesión obsoleta (5+ min sin sync) ──
-  // No guardar datos locales desactualizados. Descargar estado remoto actual
-  // y aplicarlo directamente, descartando el estado local obsoleto.
-  // Excepción: si hay un modal abierto, el usuario está en medio de una edición
-  // activa → respetar el flujo normal de fetch-merge-save para esa acción puntual.
-  const _anyModalNow = showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
-    ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
-    ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
-  let _staleSkipReturn = false;
-  if (_isSyncStale() && !_anyModalNow) {
-    try {
-      const remoteGist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
-      if (remoteGist === null) {
-        // 304: el remoto no cambió desde nuestro último GET — la sesión está actualizada
-        _lastSuccessfulSync = Date.now();
-        _hideStaleBanner();
-        _staleSkipReturn = true; // continuar al save normal a continuación
-      } else {
-        const remoteContent = remoteGist.files[GIST_FILE_STATE]?.content;
-        if (remoteContent) {
-          const _prevUser = currentUser;
-          applySnapshot(remoteContent);
-          currentUser = _prevUser;
-          _lastRemoteTs = (JSON.parse(remoteContent).savedAt) || Date.now();
-          _lastSuccessfulSync = Date.now();
-          gistStatus = 'ok'; gistLastSync = new Date();
-          _hideStaleBanner();
-          render();
-        }
-      }
-    } catch(e) {
-      console.error('stale-recover:', e);
-      gistStatus = 'error';
-      if (e._isRateLimit) {
-        _rateLimitUntil = e._rateLimitReset || (Date.now() + 60 * 60 * 1000);
-        var _rlT2 = new Date(_rateLimitUntil).toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'});
-        _showSaveFeedback(false, '⛔ Límite de API GitHub superado. Los datos están guardados localmente. Se reintentará a las ' + _rlT2 + '.');
-        _saveRetryTimer = setTimeout(function(){
-          _rateLimitUntil=0;
-          if(GIST_CONFIG.configured && gistStatus==='error') _executeSave();
-        }, Math.max(_rateLimitUntil-Date.now()+5000,60000));
-      } else {
-        _showSaveFeedback(false, 'Sin conexión — no es posible guardar en sesión desactualizada. Reintentando…');
-        _saveRetryTimer = setTimeout(function(){
-          if(GIST_CONFIG.configured && gistStatus==='error') _executeSave();
-        }, 30000);
-      }
-    }
-    renderSpBadge();
-    if (!_staleSkipReturn) return; // No escribir al Gist desde una sesión obsoleta
-  }
-
+async function _executeSaveLocked() {
   try {
-    // ── Fetch-merge-save: evita pérdida de datos con edición simultánea ──
-    let contentToSave = getSnapshot();
-    try {
-      const remoteGist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
-      // 304: el remoto no cambió — nuestro estado local es el más reciente, no hay merge necesario
-      if (remoteGist !== null) {
-        const remoteContent = remoteGist.files[GIST_FILE_STATE]?.content;
-        if (remoteContent) {
-          let remoteState;
-          try { remoteState = JSON.parse(remoteContent); } catch(e) {}
-          if (remoteState && (remoteState.savedAt||0) > _lastRemoteTs) {
-            // Otro dispositivo guardó mientras trabajábamos — mergear antes de escribir
-            const localSnap = JSON.parse(contentToSave);
-            const merged = mergeSnapshot(localSnap, remoteState);
-            merged.savedAt = Date.now();
-            const _prevUser = currentUser;
-            var _syncFormState=(showModal&&editingTask!=null)?_captureModalFormState():null;
-            var _syncModalTaskId=editingTask;
-            applySnapshot(JSON.stringify(merged));
-            currentUser = _prevUser;
-            contentToSave = JSON.stringify(merged);
-            render();
-            if(_syncFormState&&showModal&&editingTask===_syncModalTaskId){
-              setTimeout(function(){_restoreModalFormState(_syncFormState);},80);
-            }
-          }
+    // ── REGLA DE ORO: nunca escribir al Gist sin haber leído el remoto en ESTE ciclo ──
+    // Si el GET falla, NO se guarda (los datos quedan en localStorage y se reintenta).
+    // Elimina toda posibilidad de que una sesión desactualizada sobreescriba datos:
+    // la protección ya no depende de cuán vieja sea la sesión ni del reloj del equipo.
+    const remoteGist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
+
+    let contentToSave;
+    if (remoteGist === null) {
+      // 304: el remoto es idéntico a lo último que incorporamos — guardar estado local
+      contentToSave = getSnapshot();
+    } else {
+      const remoteContent = remoteGist.files[GIST_FILE_STATE]?.content;
+      let remoteState = null;
+      if (remoteContent) { try { remoteState = JSON.parse(remoteContent); } catch(e) {} }
+      if (remoteState && (remoteState.savedAt||0) !== _lastRemoteTs) {
+        // El remoto cambió desde lo último que conocemos → SIEMPRE mergear antes de
+        // escribir (jamás sobreescritura total). Comparación por IDENTIDAD (!==), no por
+        // orden (>): un dispositivo con reloj desfasado ya no puede provocar que otro
+        // considere "viejo" al remoto y lo pise.
+        const merged = mergeSnapshot(JSON.parse(getSnapshot()), remoteState);
+        merged.savedAt = Date.now();
+        const _prevUser = currentUser;
+        var _syncFormState=(showModal&&editingTask!=null)?_captureModalFormState():null;
+        var _syncModalTaskId=editingTask;
+        applySnapshot(JSON.stringify(merged));
+        currentUser = _prevUser;
+        // Re-snapshot: incluye las normalizaciones/podas determinísticas de applySnapshot
+        contentToSave = getSnapshot();
+        render();
+        if(_syncFormState&&showModal&&editingTask===_syncModalTaskId){
+          setTimeout(function(){_restoreModalFormState(_syncFormState);},80);
         }
+      } else {
+        contentToSave = getSnapshot();
       }
-    } catch(fetchErr) {
-      // GET falló — si hay indicios de obsolescencia, no guardar datos potencialmente viejos
-      if (_isSyncStale()) {
-        throw new Error('Sin conexión — sesión desactualizada. Reintentando…');
-      }
-      // Sesión reciente: el riesgo de pérdida de datos es mínimo → guardar igual
-      console.warn('fetch-before-save falló, guardando estado local:', fetchErr);
     }
+
+    // Sanity: nunca escribir un snapshot ilegible o sin estructura básica
+    var _chk = null;
+    try { _chk = JSON.parse(contentToSave); } catch(e) {}
+    if (!_chk || !Array.isArray(_chk.tasks)) throw new Error('Snapshot local inválido — guardado abortado');
 
     await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
       files: { [GIST_FILE_STATE]: { content: contentToSave } }
     });
-    _lastRemoteTs = JSON.parse(contentToSave).savedAt || Date.now();
+    _lastRemoteTs = _chk.savedAt || Date.now();
     gistStatus = 'ok'; gistLastSync = new Date();
     _lastSuccessfulSync = Date.now();
     _hideStaleBanner();
@@ -1155,7 +1157,7 @@ function _showStaleBanner() {
     'box-shadow:0 2px 8px rgba(0,0,0,.3)',
     'pointer-events:none'
   ].join(';');
-  el.textContent = '⚠  Sesión sin sincronizar por más de 5 minutos — se descargará el estado actual antes de registrar cambios.';
+  el.textContent = '⚠  Sesión sin sincronizar por más de 5 minutos — antes de guardar se descargará y combinará el estado más reciente.';
   document.body.appendChild(el);
 }
 
@@ -1312,6 +1314,11 @@ async function gistSyncFromRemote() {
   if(_anyModal){_syncDeferred=true;gistStatus='ok';renderSpBadge();return;}
   _syncDeferred=false;
   gistStatus = 'syncing'; renderSpBadge();
+  // Serializado con el save: nunca corren a la vez
+  await _withGistLock(_gistPullLocked);
+}
+
+async function _gistPullLocked() {
   try {
     const gist = await _gistFetch('GET', '/' + GIST_CONFIG.gistId);
 
@@ -1325,20 +1332,21 @@ async function gistSyncFromRemote() {
       return;
     }
 
-    let stateChanged = false;
-
     // ── Estado operativo ──
     const stateContent = gist.files[GIST_FILE_STATE]?.content;
     if (!stateContent) throw new Error('Archivo state no encontrado en el gist');
     let remoteState;
     try { remoteState = JSON.parse(stateContent); } catch(e) { throw new Error('State JSON inválido'); }
     const remoteTs = remoteState.savedAt || 0;
-    if (remoteTs > _lastRemoteTs) {
-      _lastRemoteTs = remoteTs;
+    if (remoteTs !== _lastRemoteTs) {
+      // Cambió el remoto → aplicar por MERGE (no reemplazo total): protege cambios
+      // locales en memoria aún no guardados y es inmune a relojes desfasados.
+      // Gate por identidad (!==): un savedAt remoto "más viejo" también se incorpora.
       const prevUser = currentUser;
-      applySnapshot(stateContent);
+      const merged = mergeSnapshot(JSON.parse(getSnapshot()), remoteState);
+      applySnapshot(JSON.stringify(merged));
       currentUser = prevUser;
-      stateChanged = true;
+      _lastRemoteTs = remoteTs;
     }
 
     // ── Audit trail: SIEMPRE cargar desde remoto en cada sync ──
@@ -1680,6 +1688,7 @@ async function adminSetLabConfigPwd(){
     labConfigPwd=await hashPassword(n1);
     _labConfigUnlocked=true;
   }
+  labConfigPwd_ts=Date.now();
   saveNow().catch(function(e){console.warn('saveLabConfigPwd:',e);});
   render();
 }
@@ -1712,6 +1721,7 @@ const CORE_TYPES=[
   {id:'Otros', label:'Otros',title:'Otros',              color:'#374151', bg:'#f3f4f6', _core:true},
 ];
 let customTipos=[];
+let customTipos_ts=0; // timestamp del último cambio a customTipos (merge entre dispositivos)
 let SAMPLE_TYPES=[...CORE_TYPES];
 function _rebuildSampleTypes(){SAMPLE_TYPES=[...CORE_TYPES,...customTipos];}
 function sampleTypeBadge(tipo){
@@ -1914,8 +1924,10 @@ async function gistBoot() {
       const remoteState = JSON.parse(stateContent);
       _lastRemoteTs = remoteState.savedAt || 0;
       applySnapshot(stateContent);
-      // Si lt9-state del mismo Gist tiene cambios más recientes: mergear para no perder
-      // cambios locales no enviados antes del refresh. Si es de otro Gist → ignorar.
+      // lt9-state del mismo Gist: mergear SIEMPRE que sea reciente (≤30 días) — recupera
+      // trabajo local no enviado aunque su savedAt sea "viejo" (guardado fallido, reloj
+      // desfasado). Los registros obsoletos pierden por _ts; los tombstones remotos
+      // (≤60/90 días) impiden resucitar lo eliminado. Si es de otro Gist → descartar.
       try {
         var _lsKey2=_labStateKey();
         const ls = localStorage.getItem(_lsKey2);
@@ -1924,13 +1936,17 @@ async function gistBoot() {
           const sameGist = (lsState._gistId || '') === GIST_CONFIG.gistId;
           if (!sameGist) {
             localStorage.removeItem(_lsKey2); // basura de otra configuración
-          } else if ((lsState.savedAt||0) > _lastRemoteTs) {
+          } else if ((lsState.savedAt||0) > Date.now()-30*24*60*60*1000) {
             const prevUser = currentUser;
             const merged = mergeSnapshot(lsState, remoteState);
             merged.savedAt = Date.now();
             applySnapshot(JSON.stringify(merged));
             currentUser = prevUser;
-            saveNow().catch(function(e){console.error('saveNow ls-restore:',e);});
+            // Push inmediato solo si el local parecía más nuevo que el remoto;
+            // si no, los cambios locales viajan con el próximo guardado normal.
+            if ((lsState.savedAt||0) > _lastRemoteTs) {
+              saveNow().catch(function(e){console.error('saveNow ls-restore:',e);});
+            }
           }
         }
       } catch(e) {}
@@ -4993,6 +5009,7 @@ function deleteMgmt(id){
   const mt=mgmtTasks.find(m=>m.id===id);
   const cat=mt?getMgmtCat(mt.category):null;
   auditLog('DELETE','MGMT',id,{description:'Eliminación de tarea de gestión: '+(cat?cat.label:(mt?mt.category:'?'))+(mt?' — '+mt.startDate:'')},'');
+  _regDeletion('mgmtTasks',id); // sin registro, el merge la resucitaría
   mgmtTasks=mgmtTasks.filter(m=>m.id!==id);
   saveLS();render();
 }
@@ -5101,17 +5118,19 @@ function getWeekDates(off){
 function getBiweekDates(off){
   return getWeekDates(off).concat(getWeekDates(off+1));
 }
-// Ventanas del calendario del equipo: 3 días (desde hoy — foco inmediato), 7 y 14
-// (alineadas a semana, empiezan lunes) y 35 (5 semanas completas — grilla uniforme,
-// sin bordes irregulares de mes). Anterior/Siguiente avanzan una ventana completa.
+// Ventanas del calendario del equipo: 3 días (desde hoy — foco inmediato), 7, 14
+// y 35 (alineadas a semana, empiezan lunes). El offset se mide en SEMANAS para
+// todas las vistas semanales: ← / → mueven una semana (así los bordes de ventana
+// —p. ej. día 14 y 15— pueden verse consecutivos), y « / » saltan la ventana
+// completa (2 o 5 semanas) en las vistas de 14 y 35 días.
 function getCalDates(view, off){
   if(view==='3d'){
     var base=new Date(today()+'T12:00:00');
     base.setDate(base.getDate()+off*3-1); // centrada en hoy: ayer · hoy · mañana
     return Array.from({length:3},function(_,i){var x=new Date(base);x.setDate(base.getDate()+i);return x.toISOString().slice(0,10);});
   }
-  if(view==='biweek')return getBiweekDates(off*2);
-  if(view==='5w')return Array.from({length:5},function(_,w){return getWeekDates(off*5+w);}).reduce(function(a,b){return a.concat(b);},[]);
+  if(view==='biweek')return getBiweekDates(off);
+  if(view==='5w')return Array.from({length:5},function(_,w){return getWeekDates(off+w);}).reduce(function(a,b){return a.concat(b);},[]);
   return getWeekDates(off);
 }
 function weekDayLabel(dateStr){
@@ -6749,7 +6768,22 @@ function mergeSnapshot(local, remote) {
 
     var merged = Object.assign({}, R); // start from remote base
 
+    // ── Registro de borrados: unión por id (gana el timestamp mayor) ──
+    // Debe mergearse ANTES que users/freeTasks/externalLabs para poder filtrarlos.
+    var mergedDel = {users:{},freeTasks:{},mgmtTasks:{},externalLabs:{}};
+    ['users','freeTasks','mgmtTasks','externalLabs'].forEach(function(k){
+      var LD=(L.deletions||{})[k]||{}, RD=(R.deletions||{})[k]||{};
+      var out={};
+      Object.keys(RD).forEach(function(id){ out[id]=RD[id]; });
+      Object.keys(LD).forEach(function(id){ if((LD[id]||0)>(out[id]||0)) out[id]=LD[id]; });
+      mergedDel[k]=out;
+    });
+    merged.deletions = mergedDel;
+
     // ── Tasks: merge by id, keep newer ──
+    // Los tombstones (_deleted) se CONSERVAN en el resultado: son la única marca que
+    // impide que un dispositivo desactualizado resucite un producto eliminado.
+    // La poda por edad ocurre en applySnapshot (determinística, converge en todos).
     var taskMap = {};
     (R.tasks||[]).forEach(function(t){ taskMap[t.id] = t; });
     (L.tasks||[]).forEach(function(t){
@@ -6757,16 +6791,16 @@ function mergeSnapshot(local, remote) {
       if(!rt){taskMap[t.id]=t;}
       else{taskMap[t.id]=_mergeTaskDeep(t,rt);}
     });
-    merged.tasks = Object.values(taskMap).filter(function(t){ return !t._deleted; });
+    merged.tasks = Object.values(taskMap);
 
-    // ── FreeTasks: merge by id, keep newer ──
+    // ── FreeTasks: merge by id, keep newer; borradas definitivas fuera ──
     var ftMap = {};
     (R.freeTasks||[]).forEach(function(t){ ftMap[t.id] = t; });
     (L.freeTasks||[]).forEach(function(t){
       var rt = ftMap[t.id];
       if(!rt || (t._ts||0) > (rt._ts||0)) ftMap[t.id] = t;
     });
-    merged.freeTasks = Object.values(ftMap).filter(function(t){ return !t._deleted; });
+    merged.freeTasks = Object.values(ftMap).filter(function(t){ return !t._deleted && !mergedDel.freeTasks[t.id]; });
 
     // ── ProductSuggestions: merge by id, keep newer ──
     var psMap={};
@@ -6801,12 +6835,25 @@ function mergeSnapshot(local, remote) {
     });
     merged.scheduleRequests = Object.values(srMap);
 
-    // ── Replan notifs: merge by id, usando 'ts' (no '_ts' que nunca existe en estos objetos) ──
+    // ── Replan notifs: merge by id con PRIORIDAD DE ESTADO ──
+    // Una notificación resuelta nunca vuelve a pendiente: el 'ts' es la fecha de
+    // creación (no cambia al resolver), así que comparar solo por ts hacía que la
+    // copia remota pendiente "reviviera" resoluciones → notificaciones bloqueadas.
+    function _rnPri(n){ return n.status==='resolved'?3:(n.status==='read'||n.status==='approved')?2:1; }
+    function _rnEff(n){ return Math.max(n.resolvedTs||0, n.readTs||0, n.ts||0); }
     var rnMap = {};
     (R.replanNotifs||[]).forEach(function(n){ rnMap[n.id] = n; });
     (L.replanNotifs||[]).forEach(function(n){
       var rn = rnMap[n.id];
-      if(!rn || (n.ts||0) > (rn.ts||0)) rnMap[n.id] = n;
+      if(!rn){ rnMap[n.id] = n; return; }
+      var winner;
+      if(_rnPri(n)!==_rnPri(rn)) winner = _rnPri(n)>_rnPri(rn)?n:rn;
+      else winner = _rnEff(n)>_rnEff(rn)?n:rn;
+      // readBy: unión de ambos lados (leída en un dispositivo = leída en todos)
+      var rb = {};
+      (n.readBy||[]).concat(rn.readBy||[]).forEach(function(u){ rb[u]=true; });
+      var rbArr = Object.keys(rb);
+      rnMap[n.id] = rbArr.length ? Object.assign({}, winner, {readBy:rbArr}) : winner;
     });
     merged.replanNotifs = Object.values(rnMap);
 
@@ -6820,7 +6867,8 @@ function mergeSnapshot(local, remote) {
       var rr = ilrMap[r.id];
       if(!rr || _ilrEff(r) > _ilrEff(rr)) ilrMap[r.id] = r;
     });
-    merged.interLabRequests = Object.values(ilrMap).filter(function(r){ return !r._deleted; });
+    // Tombstones ILR conservados: el merge por unión resucitaría solicitudes limpiadas
+    merged.interLabRequests = Object.values(ilrMap);
 
     // ── MgmtTasks: merge by id ──
     var mtMap = {};
@@ -6829,7 +6877,7 @@ function mergeSnapshot(local, remote) {
       var rt = mtMap[t.id];
       if(!rt || (t._ts||0) > (rt._ts||0)) mtMap[t.id] = t;
     });
-    merged.mgmtTasks = Object.values(mtMap).filter(function(t){ return !t._deleted; });
+    merged.mgmtTasks = Object.values(mtMap).filter(function(t){ return !t._deleted && !mergedDel.mgmtTasks[t.id]; });
 
     // ── Users: merge by id, keep newer ──
     var uMap2 = {};
@@ -6838,7 +6886,7 @@ function mergeSnapshot(local, remote) {
       var ru = uMap2[u.id];
       if(!ru || (u._ts||0) > (ru._ts||0)) uMap2[u.id] = u;
     });
-    merged.users = Object.values(uMap2).filter(function(u){ return !u._deleted; });
+    merged.users = Object.values(uMap2).filter(function(u){ return !u._deleted && !mergedDel.users[u.id]; });
 
     // ── Passwords: merge by key, keep newer ──
     var LP = L.passwords||{}, RP = R.passwords||{};
@@ -6897,6 +6945,24 @@ function mergeSnapshot(local, remote) {
       merged.mgmtCategories = L.mgmtCategories;
       merged.mgmtCategories_ts = L.mgmtCategories_ts;
     }
+
+    // ── CustomTipos: keep newer ──
+    if((L.customTipos_ts||0) > (R.customTipos_ts||0)){
+      merged.customTipos = L.customTipos;
+      merged.customTipos_ts = L.customTipos_ts;
+    }
+
+    // ── Clave maestra de configuración de labs: keep newer ──
+    if((L.labConfigPwd_ts||0) > (R.labConfigPwd_ts||0)){
+      merged.labConfigPwd = L.labConfigPwd;
+      merged.labConfigPwd_ts = L.labConfigPwd_ts;
+    }
+
+    // ── Labs externos: unión por id (antes ganaba el remoto y se perdían altas locales) ──
+    var elMap = {};
+    (R.externalLabs||[]).forEach(function(l){ elMap[l.id] = l; });
+    (L.externalLabs||[]).forEach(function(l){ if(!elMap[l.id]) elMap[l.id] = l; });
+    merged.externalLabs = Object.values(elMap).filter(function(l){ return !mergedDel.externalLabs[l.id]; });
 
     // ── AbsenceTypesDef: keep newer ──
     if((L.absenceTypesDef_ts||0) > (R.absenceTypesDef_ts||0)){
@@ -7312,11 +7378,19 @@ function softDeleteTask(id, reason) {
   t._deletedTs = Date.now();
   t._deletedReason = reason;
   t._ts = Date.now();
+  // Resolver todas las notificaciones pendientes del producto eliminado
+  // (sin esto quedaban bloqueadas apuntando a una tarea que ya no se muestra)
+  replanNotifs.forEach(function(n){
+    if(n.status!=='resolved'&&(n.taskId===id||n.tid===id)){
+      n.status='resolved';n.resolvedHow='task_deleted';n.resolvedTs=Date.now();
+    }
+  });
   auditLog('DELETE','TASK',id,{
     description:'Anulación (borrado lógico): '+t.producto+' '+t.lote,
     oldVal: t.status
   }, reason);
   closeModal(); saveLS(); render();
+  saveNow().catch(function(e){console.error('saveNow softDelete:',e);});
 }
 
 // Helper: tasks visible in normal views (soft-deleted records excluded)
@@ -8856,10 +8930,17 @@ function renderCalWeek(sup){
   const _gridMinW=Math.max(340,88+wd.reduce((s,d)=>s+(_collapsed[d]?26:_colW),0));
   // Se pueden arrastrar asignaciones desde el día previo en adelante
   const _yesterdayStr=(function(){var d=new Date(todayStr+'T12:00:00');d.setDate(d.getDate()-1);return d.toISOString().slice(0,10);})();
+  // Navegación: en vistas de más de una semana, ←/→ mueven UNA semana (permite ver
+  // consecutivos los días en el borde de la ventana) y «/» saltan la ventana completa.
+  const _winWeeks=calView==='biweek'?2:calView==='5w'?5:1;
+  const _stepLbl=calView==='3d'?['← Anterior','Siguiente →']:_winWeeks>1?['← Semana','Semana →']:['← Anterior','Siguiente →'];
+  const _stepTitle=calView==='3d'?'3 días':'una semana';
   return `<div class="filter-row" style="margin-bottom:12px">
-    <button class="btn" onclick="weekOffset--;render()">← Anterior</button>
+    ${_winWeeks>1?`<button class="btn" onclick="weekOffset-=${_winWeeks};render()" title="Retroceder la ventana completa (${_winWeeks} semanas)">«</button>`:''}
+    <button class="btn" onclick="weekOffset--;render()" title="Retroceder ${_stepTitle}">${_stepLbl[0]}</button>
     <span style="font-size:13px;font-weight:600;font-family:var(--mono);min-width:120px;text-align:center">${fmtD(wd[0])} – ${fmtD(wd[wd.length-1])}</span>
-    <button class="btn" onclick="weekOffset++;render()">Siguiente →</button>
+    <button class="btn" onclick="weekOffset++;render()" title="Avanzar ${_stepTitle}">${_stepLbl[1]}</button>
+    ${_winWeeks>1?`<button class="btn" onclick="weekOffset+=${_winWeeks};render()" title="Avanzar la ventana completa (${_winWeeks} semanas)">»</button>`:''}
     <button class="btn sm" style="margin-left:6px" onclick="weekOffset=0;render()">Hoy</button>
   </div>
   <div class="week-grid" style="overflow-x:auto">
@@ -9388,6 +9469,7 @@ function adminAddTipo(){
   if(SAMPLE_TYPES.find(function(s){return s.id===idKey;})){if(msg)msg.textContent='⚠ Ya existe un tipo con esa etiqueta';return;}
   var c=_TIPO_COLORS[colorIdx]||_TIPO_COLORS[0];
   customTipos.push({id:idKey,label:label,title:title,color:c.color,bg:c.bg});
+  customTipos_ts=Date.now();
   _rebuildSampleTypes();
   saveLS();saveNow().catch(function(e){console.error('adminAddTipo:',e);});
   render();
@@ -9395,6 +9477,7 @@ function adminAddTipo(){
 function adminDeleteTipo(id){
   if(!confirm('¿Eliminar el tipo "'+id+'"? Los productos con este tipo quedarán sin clasificar.'))return;
   customTipos=customTipos.filter(function(t){return t.id!==id;});
+  customTipos_ts=Date.now();
   _rebuildSampleTypes();
   var i=_tipoFilter.indexOf(id);if(i>=0)_tipoFilter.splice(i,1);
   saveLS();saveNow().catch(function(e){console.error('adminDeleteTipo:',e);});
@@ -10507,8 +10590,9 @@ function renderAdmin(){
       return eh;
     })();
   }
-  // ── Pestaña Sistema: reinicio de datos ──
+  // ── Pestaña Sistema: mantenimiento + reinicio de datos ──
   if(_tab==='sistema'){
+  html+=renderMaintTools();
   html+='<div style="margin-top:16px;background:var(--red-bg);border:1px solid var(--red);border-radius:var(--radius-lg);padding:14px">'
     +'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">'
     +'<div>'
@@ -10536,9 +10620,187 @@ function adminAddExternalLab(){
 
 function adminDeleteExternalLab(labId){
   if(!confirm('¿Eliminar este laboratorio externo?'))return;
+  _regDeletion('externalLabs',labId); // sin registro, el merge lo resucitaría
   externalLabs=externalLabs.filter(function(l){return l.id!==labId;});
   saveLS();saveNow().catch(function(e){console.error('adminDeleteExternalLab:',e);});
   render();
+}
+
+// ══════════════════════════════════════════════════════════════
+// MANTENIMIENTO — resolución de problemas por el Supervisor
+// El supervisor puede destrabar cualquier situación: resolver notificaciones
+// colgadas y fijar el estado de productos o actividades libres. Toda acción
+// queda en el audit trail; los cambios de estado piden firma.
+// ══════════════════════════════════════════════════════════════
+
+function _maintNotifDesc(n){
+  var what=getNotifEventLabel(n);
+  var ref=n.producto?(n.producto+(n.lote?' — '+n.lote:'')):'';
+  if(!ref&&n.taskId){var t=tasks.find(function(x){return x.id===n.taskId;});if(t)ref=t.producto+' — '+t.lote;}
+  if(!ref&&n.freeTaskId){var f=freeTasks.find(function(x){return x.id===n.freeTaskId;});if(f)ref=f.description||('Actividad #'+n.freeTaskId);}
+  if(!ref&&n.description)ref=n.description;
+  return what+(ref?': '+ref:'');
+}
+function _maintIsOrphanNotif(n){
+  if(n.status==='resolved')return false;
+  if(n.taskId!=null){
+    var t=tasks.find(function(x){return (x.id===n.taskId||x.id===n.tid)&&!x._deleted;});
+    if(!t)return true;
+  }
+  if(n.freeTaskId!=null){
+    var f=freeTasks.find(function(x){return x.id===n.freeTaskId;});
+    if(!f)return true;
+  }
+  return false;
+}
+function supForceResolveNotif(notifId){
+  if(!isSupRole()){showToast('Solo el supervisor puede realizar esta acción.','warn');return;}
+  var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
+  if(!n){showToast('Notificación no encontrada.','warn');return;}
+  if(!confirm('¿Forzar la resolución de esta notificación?\n\n'+_maintNotifDesc(n)+'\n\nQuedará registrado en el audit trail.'))return;
+  n.status='resolved';n.resolvedHow='forced_by_sup';n.resolvedTs=Date.now();
+  n.resolvedBy=currentUser.id;n.resolvedByName=currentUser.name;
+  auditLog('FORCE_RESOLVE','NOTIFICATION',n.id,{type:n.type,description:'Resolución forzada de notificación: '+_maintNotifDesc(n)},'Mantenimiento — resolución forzada por supervisor');
+  saveLS();render();saveNow().catch(function(e){console.error('saveNow forceResolve:',e);});
+  showToast('Notificación resuelta.','success');
+}
+function supResolveOrphanNotifs(){
+  if(!isSupRole()){showToast('Solo el supervisor puede realizar esta acción.','warn');return;}
+  var orphans=replanNotifs.filter(_maintIsOrphanNotif);
+  if(!orphans.length){showToast('No hay notificaciones huérfanas.','info');return;}
+  if(!confirm('¿Resolver '+orphans.length+' notificación(es) huérfana(s)?\n(Referencian productos o actividades que ya no existen.)'))return;
+  orphans.forEach(function(n){
+    n.status='resolved';n.resolvedHow='orphan_cleanup';n.resolvedTs=Date.now();
+    n.resolvedBy=currentUser.id;n.resolvedByName=currentUser.name;
+  });
+  auditLog('FORCE_RESOLVE','NOTIFICATION','batch',{count:orphans.length,description:'Limpieza de notificaciones huérfanas: '+orphans.length},'Mantenimiento — limpieza por supervisor');
+  saveLS();render();saveNow().catch(function(e){console.error('saveNow orphanCleanup:',e);});
+  showToast(orphans.length+' notificación(es) resuelta(s).','success');
+}
+function supForceTaskStatus(){
+  if(!isSupRole()){showToast('Solo el supervisor puede realizar esta acción.','warn');return;}
+  var tid=parseInt((document.getElementById('maint-task-sel')||{}).value||'');
+  var target=(document.getElementById('maint-task-status')||{}).value||'';
+  if(!tid||!target){showToast('Seleccioná el producto y el estado destino.','warn');return;}
+  var t=tasks.find(function(x){return x.id===tid&&!x._deleted;});
+  if(!t){showToast('Producto no encontrado.','warn');return;}
+  if(t.status===target){showToast('El producto ya está en ese estado.','info');return;}
+  if(target==='reviewed'||target==='approved'){
+    // Estos estados requieren fecha y firma: reusar el flujo existente de corrección
+    _supervisorForceTerminalStatus(tid,target);
+    return;
+  }
+  var prev=t.status;
+  requireSignature('Fijar estado — Mantenimiento',
+    'Fijar estado: '+t.producto+' '+t.lote+' | '+statusLabel(prev)+' → '+statusLabel(target),
+    function(reason){
+      t.status=target;t._ts=Date.now();
+      // Al retroceder desde revisión/aprobación, limpiar los datos de esas etapas
+      // para que el flujo pueda repetirse de forma consistente (este branch solo
+      // maneja estados anteriores a 'reviewed'; reviewed/approved van por el otro flujo).
+      if(prev==='approved'){
+        delete t.approvedBy;delete t.approvedByName;delete t.approvedTs;delete t.approvedDate;delete t.approvalComment;
+      }
+      if(prev==='approved'||prev==='reviewed'){
+        delete t.reviewedBy;delete t.reviewedByName;delete t.reviewedTs;delete t.reviewedDate;delete t.reviewComment;
+      }
+      if(t._integrityHash)stampIntegrity(t);
+      auditLog('SUPERVISOR_FORCE_STATUS','TASK',tid,{
+        field:'status',oldVal:prev,newVal:target,lote:t.lote,
+        description:'Mantenimiento — estado fijado por supervisor: '+t.producto+' '+t.lote
+      },reason);
+      saveLS();render();
+      saveNow().catch(function(e){console.error('saveNow maintStatus:',e);});
+      showToast('Estado actualizado: '+statusLabel(target),'success');
+    });
+}
+function supForceFtStatus(){
+  if(!isSupRole()){showToast('Solo el supervisor puede realizar esta acción.','warn');return;}
+  var fid=parseInt((document.getElementById('maint-ft-sel')||{}).value||'');
+  var target=(document.getElementById('maint-ft-status')||{}).value||'';
+  if(!fid||!target){showToast('Seleccioná la actividad y el estado destino.','warn');return;}
+  var ft=freeTasks.find(function(x){return x.id===fid;});
+  if(!ft){showToast('Actividad no encontrada.','warn');return;}
+  if(ft.status===target){showToast('La actividad ya está en ese estado.','info');return;}
+  var prev=ft.status;
+  requireSignature('Fijar estado de actividad — Mantenimiento',
+    'Fijar estado: '+(ft.description||('Actividad #'+fid))+' | '+prev+' → '+target,
+    function(reason){
+      ft.status=target;ft._ts=Date.now();
+      auditLog('SUPERVISOR_FORCE_STATUS','FREE_TASK',fid,{
+        field:'status',oldVal:prev,newVal:target,
+        description:'Mantenimiento — estado de actividad fijado: '+(ft.description||fid)
+      },reason);
+      saveLS();render();
+      saveNow().catch(function(e){console.error('saveNow maintFt:',e);});
+      showToast('Estado de la actividad actualizado.','success');
+    });
+}
+function renderMaintTools(){
+  var actives=replanNotifs.filter(function(n){return n.status!=='resolved';}).sort(function(a,b){return (b.ts||0)-(a.ts||0);});
+  var orphans=actives.filter(_maintIsOrphanNotif);
+  if(typeof window.maintShowNotifs==='undefined')window.maintShowNotifs=false;
+  var h='<div style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px">'
+    +'<div style="font-weight:700;margin-bottom:4px">🛠 Resolución de problemas</div>'
+    +'<div style="font-size:12px;color:var(--text2);margin-bottom:12px">Herramientas de mantenimiento para destrabar situaciones inconsistentes. Toda acción queda registrada en el audit trail; los cambios de estado requieren firma.</div>'
+    // ── Notificaciones activas ──
+    +'<div style="border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:10px">'
+    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+    +'<div style="font-size:12px;font-weight:600;flex:1">🔔 Notificaciones activas: '+actives.length
+    +(orphans.length?' <span style="color:var(--amber-text)">· '+orphans.length+' huérfana(s)</span>':'')+'</div>'
+    +(orphans.length?'<button class="btn sm" onclick="supResolveOrphanNotifs()">🧹 Resolver huérfanas ('+orphans.length+')</button>':'')
+    +(actives.length?'<button class="btn sm" onclick="window.maintShowNotifs=!window.maintShowNotifs;render()">'+(window.maintShowNotifs?'Ocultar':'Ver / resolver')+'</button>':'')
+    +'</div>';
+  if(window.maintShowNotifs&&actives.length){
+    h+='<div style="max-height:320px;overflow-y:auto;margin-top:8px;display:flex;flex-direction:column;gap:4px">';
+    actives.forEach(function(n){
+      var orphan=_maintIsOrphanNotif(n);
+      h+='<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg);border-radius:var(--radius);font-size:11px'+(orphan?';border-left:3px solid var(--amber)':'')+'">'
+        +'<div style="flex:1;min-width:0"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(_maintNotifDesc(n))+'</div>'
+        +'<div style="color:var(--text3)">'+(n.ts?new Date(n.ts).toLocaleString('es'):'')+' · estado: '+escH(n.status||'?')+(orphan?' · <span style="color:var(--amber-text)">referencia inexistente</span>':'')+'</div></div>'
+        +'<button class="btn sm" onclick="supForceResolveNotif(\''+escH(String(n.id))+'\')" title="Forzar resolución">✓ Resolver</button>'
+        +'</div>';
+    });
+    h+='</div>';
+  }
+  h+='</div>';
+  // ── Fijar estado de producto ──
+  var prods=activeTasks().slice().sort(function(a,b){return (a.producto||'').localeCompare(b.producto||'','es')||(a.lote||'').localeCompare(b.lote||'','es');});
+  var stOpts=['a-ingresar','muestra-ok','pending','scheduled','progress','pending-confirm','done','observed','reviewed','approved'];
+  h+='<div style="border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:10px">'
+    +'<div style="font-size:12px;font-weight:600;margin-bottom:6px">📦 Fijar estado de un producto</div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Corrige un análisis trabado en un estado incorrecto. Revisado/Aprobado piden fecha y responsable; el resto se aplica directo con firma.</div>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
+    +'<select id="maint-task-sel" style="flex:2;min-width:220px;font-size:12px;padding:6px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
+    +'<option value="">— Producto —</option>'
+    +prods.map(function(t){return '<option value="'+t.id+'">'+escH(t.producto+' — '+t.lote)+' ('+escH(statusLabel(t.status))+')</option>';}).join('')
+    +'</select>'
+    +'<select id="maint-task-status" style="flex:1;min-width:150px;font-size:12px;padding:6px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
+    +'<option value="">— Nuevo estado —</option>'
+    +stOpts.map(function(s){return '<option value="'+s+'">'+escH(statusLabel(s))+'</option>';}).join('')
+    +'</select>'
+    +'<button class="btn sm pri" onclick="supForceTaskStatus()">Fijar estado</button>'
+    +'</div></div>';
+  // ── Fijar estado de actividad libre ──
+  var fts=freeTasks.slice().sort(function(a,b){return (b._ts||0)-(a._ts||0);});
+  var ftLabels={'pending':'Pendiente','pending-confirm':'Realizada — pend. conf.','confirmed':'Confirmada','declined':'Declinada','rejected':'Rechazada'};
+  if(fts.length){
+    h+='<div style="border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px">'
+      +'<div style="font-size:12px;font-weight:600;margin-bottom:6px">📋 Fijar estado de una actividad libre</div>'
+      +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
+      +'<select id="maint-ft-sel" style="flex:2;min-width:220px;font-size:12px;padding:6px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
+      +'<option value="">— Actividad —</option>'
+      +fts.map(function(f){var u=getU(f.analystId);return '<option value="'+f.id+'">'+escH((f.description||('Actividad #'+f.id)).slice(0,60)+' · '+u.name+' ('+(ftLabels[f.status]||f.status)+')')+'</option>';}).join('')
+      +'</select>'
+      +'<select id="maint-ft-status" style="flex:1;min-width:150px;font-size:12px;padding:6px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
+      +'<option value="">— Nuevo estado —</option>'
+      +Object.keys(ftLabels).map(function(s){return '<option value="'+s+'">'+escH(ftLabels[s])+'</option>';}).join('')
+      +'</select>'
+      +'<button class="btn sm pri" onclick="supForceFtStatus()">Fijar estado</button>'
+      +'</div></div>';
+  }
+  h+='</div>';
+  return h;
 }
 
 function _isILRNotif(nf){return nf.type==='interlab_request'||nf.type==='ilr_docs_sent';}
@@ -10635,6 +10897,7 @@ function toggleColorPicker(panelId){
 function setUserColor(uid,colorIdx){
   var u=USERS.find(function(x){return x.id===uid;});if(!u)return;
   u.avColor=colorIdx;
+  u._ts=Date.now(); // sin _ts, el merge entre dispositivos descartaría el cambio
   rebuildDerived();
   auditLog('EDIT','USER',uid,{field:'avColor',value:colorIdx},'Cambio de color de avatar');
   saveLS();
@@ -10647,6 +10910,7 @@ function saveUserName(uid){
   const v=document.getElementById('uname-'+uid)?.value.trim();
   if(!v){alert('El nombre no puede estar vacío.');return;}
   u.name=v;
+  u._ts=Date.now();
   rebuildDerived();auditLog('EDIT','USER',uid,{field:'name',description:'Cambio de nombre'},'Cambio administrativo');
   saveLS();render();
 }
@@ -10662,6 +10926,7 @@ function saveUserRole(uid){
     alert('No puede haber cero supervisores. Se restauró el rol.');
     u.role=oldRole;rebuildDerived();saveLS();render();return;
   }
+  u._ts=Date.now();
   auditLog('EDIT','USER',uid,{field:'role',oldRole:oldRole,newRole:newRole,description:'Cambio de rol'},'Cambio administrativo');
   rebuildDerived();saveLS();render();
   const roleLabels={supervisor:'Supervisor',auditor:'Auditor',reviewer:'Revisor',analyst:'Analista',sampler:'Muestreador',staff:'Personal'};
@@ -10679,7 +10944,7 @@ async function saveUserPwd(uid){
   passwords_ts[uid]=Date.now();
   // Limpiar flag de primer-login si existía
   const u=USERS.find(function(x){return x.id===uid;});
-  if(u)u._mustChangePwd=false;
+  if(u){u._mustChangePwd=false;u._ts=Date.now();}
   auditLog('EDIT','USER',uid,{description:'Contraseña restablecida por supervisor para: '+(u?u.name:uid)},'Restablecimiento administrativo de contraseña');
   document.getElementById('upwd-'+uid).value='';
   saveLS();saveNow().catch(function(e){console.error('saveNow saveUserPwd:',e);});
@@ -10703,6 +10968,7 @@ function deleteUser(uid){
   if(!isSupRole()){alert('Solo el supervisor puede eliminar usuarios.');return;}
   if(!confirm('¿Eliminar a '+u.name+'? Sus tareas asignadas quedarán sin ese analista.'))return;
   auditLog('DELETE','USER',uid,{description:'Eliminación de usuario: '+u.name,role:u.role},'Eliminación administrativa');
+  _regDeletion('users',uid); // sin registro, el merge lo resucitaría desde otro dispositivo
   USERS=USERS.filter(x=>x.id!==uid);
   delete passwords[uid];
   rebuildDerived();
@@ -10717,7 +10983,7 @@ async function addUser(){
   if(name.trim().length<2){msg.style.color='var(--red)';msg.textContent='El nombre debe tener al menos 2 caracteres.';return;}
   if(pwd.length<4){msg.style.color='var(--red)';msg.textContent='La contraseña debe tener al menos 4 caracteres.';return;}
   const uid='U'+nextUid++;
-  const newUser={id:uid,name:name.trim(),role,_mustChangePwd:true};
+  const newUser={id:uid,name:name.trim(),role,_mustChangePwd:true,_ts:Date.now()};
   USERS.push(newUser);
   const h=await hashPassword(pwd);
   passwords[uid]=h;
@@ -13217,10 +13483,12 @@ function renderReplanModal(){
 // (cualquiera de sus días tiene horas/sesiones o fue iniciado), la nueva fecha se AGREGA como
 // día adicional y se conservan todos los días previos. Si no hizo nada todavía, simplemente se
 // mueve la fecha del día indicado (oldDate, o el último). Evita duplicar si newDate ya existe.
+// Devuelve cómo resolvió: 'added' (día agregado), 'moved' (fecha movida),
+// 'exists' (la nueva fecha ya estaba asignada — no hace nada), 'none' (sin tarea).
 function _applyReplanDate(t, analystId, oldDate, newDate){
-  if(!t)return;
+  if(!t)return 'none';
   if(!t.assignments)t.assignments=[];
-  if(t.assignments.some(function(a){return a.analyst===analystId&&a.date===newDate&&!a._removed;}))return;
+  if(t.assignments.some(function(a){return a.analyst===analystId&&a.date===newDate&&!a._removed;}))return 'exists';
   var _mine=t.assignments.filter(function(a){return a.analyst===analystId&&!a._removed;});
   var anyWork=_mine.some(function(a){return(a.realHours>0)||(a.sessions&&a.sessions.length>0)||a._started||a._completedBySup;});
   var idx=-1;
@@ -13230,11 +13498,21 @@ function _applyReplanDate(t, analystId, oldDate, newDate){
     var _last=_mine.slice().sort(function(a,b){return(a.date||'').localeCompare(b.date||'');})[_mine.length-1];
     if(_last)idx=t.assignments.indexOf(_last);
   }
+  t._ts=Date.now(); // sin bump, el cambio no se propaga bien en merges entre dispositivos
   if(anyWork||idx<0){
     t.assignments.push({analyst:analystId,date:newDate,_ts:Date.now()});
-  } else {
-    t.assignments[idx].date=newDate;
+    return 'added';
   }
+  // Mover fecha: tombstone del día viejo + día nuevo. Editar la fecha in-place hacía
+  // que el merge (por clave analista|fecha) conservara AMBOS días → días duplicados
+  // fantasma cuando otro dispositivo tenía la copia vieja.
+  var old=t.assignments[idx];
+  var moved=Object.assign({},old,{date:newDate,_ts:Date.now()});
+  delete moved._removed;delete moved._removedTs;delete moved._removedBy;delete moved._removeReason;
+  old._removed=true;old._removedTs=Date.now();old._removedBy=(currentUser?currentUser.id:'');
+  old._removeReason='replan';old._ts=Date.now();
+  t.assignments.push(moved);
+  return 'moved';
 }
 // El analista libera un día vacío (no iniciado) que no usará: porque no puede comenzar ese día
 // teniendo otros días asignados, o porque finalizó el análisis antes. Acción directa con aviso
@@ -13325,11 +13603,14 @@ function submitReplan(isSup){
     var _oldDateSup=(t.assignments||[]).find(a=>a.analyst===replanAnalystId&&!a._removed)?.date||'';
     _applyReplanDate(t, replanAnalystId, _oldDateSup, newDate);
     _recalcStatusAfterAssignment(t, true);
-    // Log as approved
+    auditLog('REPLAN','TASK',t.id,{analystId:replanAnalystId,newDate:newDate,description:'Replanificación directa por supervisor: '+t.producto+' '+t.lote},reason);
+    // Registro histórico: nace RESUELTA — con status 'approved' quedaba para siempre
+    // en "Replanificaciones pendientes" del panel (parecía una notificación bloqueada).
     replanNotifs.push({
       id:newNotifId(),type:'replan',taskId:replanTaskId,analystId:replanAnalystId,
       oldDate:_oldDateSup,
-      newDate,reason,requestedBy:'SUP',status:'approved',
+      newDate,reason,requestedBy:'SUP',status:'resolved',
+      resolvedHow:'approved',resolvedTs:Date.now(),resolvedBy:currentUser.id,resolvedByName:currentUser.name,
       ts:Date.now()
     });
   } else {
@@ -13345,22 +13626,35 @@ function submitReplan(isSup){
   }
   showReplanModal=false;replanTaskId=null;replanAnalystId=null;
   saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow submitReplan:',e);});
 }
 function resolveReplan(notifId, approved){
   if(approved) approveReplan(notifId); else rejectReplan(notifId);
 }
 function approveReplan(notifId){
-  const n=replanNotifs.find(x=>x.id===Number(notifId)||x.id===notifId);if(!n)return;
-  const t=tasks.find(x=>x.id===n.taskId);if(!t)return;
+  const n=replanNotifs.find(x=>x.id===Number(notifId)||x.id===notifId);
+  if(!n){showToast('Notificación no encontrada. Actualizá la vista e intentá de nuevo.','warn');return;}
+  const t=tasks.find(x=>x.id===n.taskId&&!x._deleted);
+  if(!t){
+    // La tarea ya no existe (eliminada/archivada): resolver igual para que la
+    // notificación no quede bloqueada para siempre.
+    resolveAllCopies({type:'replan',taskId:n.taskId,analystId:n.analystId},'task_missing');
+    showToast('El análisis ya no existe — la notificación fue resuelta.','warn');
+    saveLS();render();saveNow().catch(function(e){console.error(e);});
+    return;
+  }
   // Conserva el día iniciado (con sus horas) y agrega el nuevo; si no hay trabajo, mueve la fecha.
-  _applyReplanDate(t, n.analystId, n.oldDate||'', n.newDate);
+  var how=_applyReplanDate(t, n.analystId, n.oldDate||'', n.newDate);
   _recalcStatusAfterAssignment(t, true);
   resolveAllCopies({type:'replan',taskId:n.taskId,analystId:n.analystId},'accepted');
   auditLog('APPROVE','REPLAN',notifId,{analystId:n.analystId,newDate:n.newDate,description:'Replanificación aprobada: '+t.producto+' '+t.lote},'');
+  if(how==='exists')showToast('La fecha ya estaba asignada — solicitud resuelta sin cambios.','warn');
+  else showToast('Replanificación aprobada · '+fmtDDMMYY(n.newDate),'success');
   saveLS();render();saveNow().catch(function(e){console.error(e);});
 }
 function rejectReplan(notifId){
-  const n=replanNotifs.find(x=>x.id===Number(notifId)||x.id===notifId);if(!n)return;
+  const n=replanNotifs.find(x=>x.id===Number(notifId)||x.id===notifId);
+  if(!n){showToast('Notificación no encontrada. Actualizá la vista e intentá de nuevo.','warn');return;}
   var reason=prompt('Motivo del rechazo (opcional):','');
   if(reason===null)return;
   const t=tasks.find(x=>x.id===n.taskId);
@@ -13378,8 +13672,13 @@ function rejectResubmit(taskId, notifId){
   var reason=prompt('Motivo del rechazo (obligatorio):','');
   if(reason===null)return;
   if(!reason.trim()){alert('El motivo es obligatorio.');return;}
-  var t=tasks.find(function(x){return x.id===Number(taskId)||x.id===taskId;});
-  if(!t)return;
+  var t=tasks.find(function(x){return (x.id===Number(taskId)||x.id===taskId)&&!x._deleted;});
+  if(!t){
+    resolveAllCopies({type:'resubmit',taskId:Number(taskId)},'task_missing');
+    showToast('El análisis ya no existe — la notificación fue resuelta.','warn');
+    saveLS();render();saveNow().catch(function(e){console.error(e);});
+    return;
+  }
   var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
   if(!t.observations)t.observations=[];
   t.observations.push({ts:Date.now(),comment:reason,by:currentUser.id,byName:currentUser.name});
@@ -13402,9 +13701,14 @@ function rejectSamplingDone(notifId){
   var reason=prompt('Motivo del rechazo (opcional):','');
   if(reason===null)return;
   var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
-  if(!n)return;
-  var t=tasks.find(function(x){return x.id===n.taskId;});
-  if(!t)return;
+  if(!n){showToast('Notificación no encontrada. Actualizá la vista e intentá de nuevo.','warn');return;}
+  var t=tasks.find(function(x){return x.id===n.taskId&&!x._deleted;});
+  if(!t){
+    resolveAllCopies({type:'sampling_done',taskId:n.taskId},'task_missing');
+    showToast('El análisis ya no existe — la notificación fue resuelta.','warn');
+    saveLS();render();saveNow().catch(function(e){console.error(e);});
+    return;
+  }
   (t.samplerAssignments||[]).forEach(function(sa){
     if(sa.sampler===n.samplerId&&sa.done){
       sa.done=false;sa.doneAt=null;sa.realArrivalDate=null;sa.lotNotes=null;sa.hours=null;sa._ts=Date.now();
@@ -13423,7 +13727,7 @@ function rejectSamplingDone(notifId){
 // ── Aceptar solicitud de planificación: asignar analista directamente ──
 function acceptPlanifRequest(notifId){
   var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
-  if(!n)return;
+  if(!n){showToast('Notificación no encontrada. Actualizá la vista e intentá de nuevo.','warn');return;}
   var t=tasks.find(function(x){return x.id===(n.taskId||n.tid);});
   if(!t){alert('Análisis no encontrado.');return;}
   var dateStr=prompt('Fecha de asignación (AAAA-MM-DD):',n.requestedDate||t.due||today());
@@ -13446,7 +13750,7 @@ function rejectPlanifRequest(notifId){
   var reason=prompt('Motivo del rechazo (opcional):','');
   if(reason===null)return;
   var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
-  if(!n)return;
+  if(!n){showToast('Notificación no encontrada. Actualizá la vista e intentá de nuevo.','warn');return;}
   resolveAllCopies({type:'planification_request',taskId:n.taskId||n.tid,analystId:n.analystId},'rejected');
   replanNotifs.push({id:newNotifId(),type:'planification_rejected',
     taskId:n.taskId||n.tid,analystId:n.analystId,forUserId:n.analystId,
@@ -13460,7 +13764,7 @@ function declineFreeTaskById(ftId){
   var reason=prompt('Motivo por el que no podés realizar esta tarea (opcional):','');
   if(reason===null)return;
   var ft=freeTasks.find(function(x){return x.id===ftId;});
-  if(!ft)return;
+  if(!ft){showToast('La actividad ya no existe.','warn');return;}
   ft.status='declined';ft.declinedBy=currentUser.id;ft.declinedTs=Date.now();ft.declineReason=reason||'';
   replanNotifs.filter(function(n){return n.type==='free_task_assigned'&&n.freeTaskId===ftId&&n.status==='pending';}).forEach(function(n){n.status='resolved';});
   var supUser=USERS.find(function(u){return u.role==='supervisor';});
@@ -13476,7 +13780,7 @@ function declineFreeTask(notifId){
   var reason=prompt('Motivo por el que no podés realizar esta tarea (opcional):','');
   if(reason===null)return;
   var n=replanNotifs.find(function(x){return x.id===Number(notifId)||x.id===notifId;});
-  if(!n)return;
+  if(!n){showToast('Notificación no encontrada. Actualizá la vista e intentá de nuevo.','warn');return;}
   var ft=freeTasks.find(function(x){return x.id===n.freeTaskId;});
   if(ft){ft.status='declined';ft.declinedBy=currentUser.id;ft.declinedTs=Date.now();ft.declineReason=reason||'';}
   resolveAllCopies({type:'free_task_assigned',freeTaskId:n.freeTaskId,analystId:currentUser.id},'rejected');
@@ -13500,7 +13804,9 @@ function autoResolveNotifs(){
   // Re-evaluate each pending notification against current state
   replanNotifs.forEach(function(n){
     if(n.status==='resolved') return;
-    var task = n.taskId?tasks.find(function(t){return t.id===n.taskId||t.id===n.tid;}):null;
+    // Tareas con borrado lógico (_deleted) cuentan como inexistentes: si el producto
+    // se elimina, sus notificaciones se resuelven solas (antes quedaban bloqueadas).
+    var task = n.taskId?tasks.find(function(t){return (t.id===n.taskId||t.id===n.tid)&&!t._deleted;}):null;
     var ft   = n.freeTaskId?freeTasks.find(function(f){return f.id===n.freeTaskId;}):null;
     var stale = false;
     switch(n.type){
@@ -13600,7 +13906,9 @@ function renderNotifPanel(){
       &&(n.forUserId===uid||n.analystId===uid);
   }).sort(function(a,b){return b.ts-a.ts;});
   const pendReplan=replanNotifs.filter(function(n){
-    return n.type==='replan'&&n.status!=='resolved'&&(isSup||(n.analystId===uid));
+    // Solo 'pending': los registros históricos de replanificaciones directas del
+    // supervisor (status approved/resolved legado) no son accionables aquí.
+    return n.type==='replan'&&n.status==='pending'&&(isSup||(n.analystId===uid));
   }).sort(function(a,b){return b.ts-a.ts;});
   const schedPend=isSup
     ?scheduleRequests.filter(function(r){return r.status==='pending';})
@@ -14745,8 +15053,13 @@ function saveTask(){
   }
 }
 function acceptResubmit(taskId, notifId){
-  var t=tasks.find(function(x){return x.id===taskId;});
-  if(!t)return;
+  var t=tasks.find(function(x){return x.id===taskId&&!x._deleted;});
+  if(!t){
+    resolveAllCopies({type:'resubmit',taskId:Number(taskId)},'task_missing');
+    showToast('El análisis ya no existe — la notificación fue resuelta.','warn');
+    saveLS();render();saveNow().catch(function(e){console.error(e);});
+    return;
+  }
   var prevStatus=t.status;
   t.status='done';
   t._acceptedResubmit=Date.now();
@@ -14978,6 +15291,7 @@ function deleteFreeTask(ftId){
     'Eliminar tarea única',
     'Eliminar: '+ft.description+' ('+escH(u.name)+', '+fmtDF(ft.date)+', '+ft.hours+'h)',
     function(reason){
+      _regDeletion('freeTasks',ftId); // sin registro, el merge la resucitaría
       freeTasks=freeTasks.filter(function(x){return x.id!==ftId;});
       auditLog('DELETE','FREE_TASK',ftId,{
         description:ft.description,hours:ft.hours,
