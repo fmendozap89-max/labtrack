@@ -735,6 +735,12 @@ function applySnapshot(json){
       var activeA=(t.assignments||[]).filter(function(a){return !a._removed;}).length;
       if(t.status==='pending'&&activeA>0){t.status='scheduled';}
       if(t.status==='scheduled'&&activeA===0){t.status='pending';}
+      // Sin porciones activas no puede haber ejecución en curso ni confirmación
+      // pendiente (misma regla de coherencia que saveTask, aplicada al estado
+      // MERGEADO — p. ej. el supervisor quitó el único día mientras el analista
+      // lo completaba: el tombstone gana y el estado avanzado del analista
+      // quedaría huérfano sin esta corrección).
+      if((t.status==='progress'||t.status==='pending-confirm')&&activeA===0){t.status='pending';}
       // Ensure samplerAssignments array exists
       if(!t.samplerAssignments)t.samplerAssignments=[];
     });
@@ -814,7 +820,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se a
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026070902; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026070903; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -1236,6 +1242,9 @@ async function _executeSaveLocked() {
         var _syncModalTaskId=editingTask;
         applySnapshot(JSON.stringify(merged));
         currentUser = _prevUser;
+        // Carrera horas/quita de día: avisar y resolver notifs huérfanas ANTES del
+        // re-snapshot, así la limpieza viaja en este mismo PATCH
+        _checkLostPortions();
         // Re-snapshot: incluye las normalizaciones/podas determinísticas de applySnapshot
         contentToSave = getSnapshot();
         render();
@@ -1347,6 +1356,45 @@ function _showSaveFeedback(ok, errMsg) {
   el.style.opacity = '1';
   if (ok === true) setTimeout(function(){ if(el)el.style.opacity='0'; }, 2500);
   if (ok === 'offline') setTimeout(function(){ if(el)el.style.opacity='0'; }, 4000);
+}
+
+// ══════════════════════════════════════════════════════════════
+// CARRERA HORAS vs QUITA DE DÍA — aviso al analista y limpieza
+// ══════════════════════════════════════════════════════════════
+// Si mientras el analista cargaba horas el supervisor quitó ese día de la
+// planificación, el tombstone (más nuevo) gana el merge y las horas NO quedan
+// registradas — comportamiento intencional. Acá se detecta ESO tras cada merge
+// para que no sea silencioso: 1) se le avisa al analista, y 2) se resuelve la
+// notificación de "completado" huérfana que ya había viajado al supervisor.
+var _myRecentPortions=[]; // {taskId,analyst,date,ts,producto,lote} — ventana 15 min
+function _trackMyPortion(t,a){
+  if(!currentUser||!t||!a)return;
+  _myRecentPortions.push({taskId:t.id,analyst:currentUser.id,date:a.date||'',ts:Date.now(),producto:t.producto,lote:t.lote});
+  if(_myRecentPortions.length>20)_myRecentPortions=_myRecentPortions.slice(-20);
+}
+function _checkLostPortions(){
+  if(!_myRecentPortions.length)return false;
+  var now=Date.now(),changed=false,keep=[];
+  _myRecentPortions.forEach(function(p){
+    if(now-p.ts>15*60*1000)return; // fuera de ventana: dejar de vigilar
+    var t=tasks.find(function(x){return x.id===p.taskId;});
+    if(!t)return; // tarea ausente (caso anómalo): no avisar sin certeza
+    var a=(t.assignments||[]).find(function(x){return x.analyst===p.analyst&&(x.date||'')===p.date;});
+    if(a&&!a._removed){keep.push(p);return;} // porción viva: seguir vigilando
+    if(t._deleted){return;} // producto anulado: sus notifs ya se resuelven en softDeleteTask
+    // Porción quitada por el supervisor: avisar al analista (una sola vez)
+    if(currentUser&&currentUser.id===p.analyst){
+      try{showToast('⚠ El supervisor quitó el día '+(p.date?fmtDF(p.date):'')+' de '+p.producto+' '+p.lote+' de la planificación — las horas que registraste para ese día no quedaron guardadas.','warn');}catch(e){}
+    }
+    // Resolver la notificación de completado huérfana (resolved gana el merge)
+    replanNotifs.forEach(function(n){
+      if(n.type==='completed'&&n.taskId===p.taskId&&n.analystId===p.analyst&&n.status==='pending'){
+        n.status='resolved';n.resolvedHow='day_removed';n.resolvedTs=Date.now();changed=true;
+      }
+    });
+  });
+  _myRecentPortions=keep;
+  return changed;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1633,6 +1681,9 @@ async function _gistPullLocked() {
       applySnapshot(JSON.stringify(merged));
       currentUser = prevUser;
       _lastRemoteTs = remoteTs;
+      // Carrera horas/quita de día: avisar al analista y resolver notifs huérfanas.
+      // saveLS persiste la resolución y la envía con el próximo guardado.
+      if(_checkLostPortions())saveLS();
     }
 
     // ── Audit trail: SIEMPRE cargar desde remoto en cada sync ──
@@ -11617,6 +11668,7 @@ function saveTimeEntry(){
   // Update legacy realHours for compat
   ma.realHours=ma.timeLog.reduce((s,e)=>s+(e.hours||0),0);
   t._ts=Date.now();
+  _trackMyPortion(t,ma); // si el supervisor quitó este día en paralelo, avisar tras el merge
   auditLog('EDIT','TASK',timeLogTaskId,{
     field:'timeLog',description:'Registro de tiempo: '+start+'–'+end+' ('+hours+'h) en '+todayStr+' — '+t.producto+' '+t.lote
   },'');
@@ -12911,6 +12963,8 @@ function markDone(id,assignDate){
         }
         // Mark this specific assignment as pending confirmation
         if(myA){myA._pendingConfirm=true;myA._completedTs=Date.now();}
+        // Vigilar esta porción: si el supervisor la quitó en paralelo, avisar tras el merge
+        if(myA)_trackMyPortion(t,myA);
         // Avanzar a pending-confirm SOLO si todos los analistas/fechas completaron
         _tryAdvanceToPendingConfirm(t);
         if(t.status==='pending-confirm'){t.completedBy=currentUser.id;t.completedTs=Date.now();}
