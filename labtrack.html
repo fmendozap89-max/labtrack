@@ -814,7 +814,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se a
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 20260709;
+const APP_BUILD = 2026070902; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -2380,12 +2380,41 @@ async function cloudRestore() {
     +'</div>';
   document.body.appendChild(overlay);
   try{
-    const commits=await _gistFetch('GET','/'+GIST_CONFIG.gistId+'/commits');
-    if(!commits||!commits.length){document.getElementById('restore-list').textContent='No hay versiones anteriores disponibles.';return;}
-    var rows='<div style="display:flex;flex-direction:column;gap:6px;max-height:55vh;overflow-y:auto">';
-    for(var i=0;i<Math.min(30,commits.length);i++){
-      var c=commits[i];
-      var dt=new Date(c.committed_at).toLocaleString('es',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+    // GitHub guarda TODAS las revisiones del gist (una por guardado, indefinidamente).
+    // Traer hasta 5 páginas (500 revisiones) o hasta cubrir ~7 días — lo que llegue antes.
+    const RESTORE_WINDOW_MS=7*24*60*60*1000;
+    let commits=[];
+    for(let _pg=1;_pg<=5;_pg++){
+      const batch=await _gistFetch('GET','/'+GIST_CONFIG.gistId+'/commits?per_page=100&page='+_pg);
+      if(!batch||!batch.length)break;
+      commits=commits.concat(batch);
+      const oldest=new Date(batch[batch.length-1].committed_at).getTime();
+      if(batch.length<100||Date.now()-oldest>RESTORE_WINDOW_MS)break;
+    }
+    if(!commits.length){document.getElementById('restore-list').textContent='No hay versiones anteriores disponibles.';return;}
+    // Densidad útil: los 10 guardados más recientes tal cual; hacia atrás, un punto por
+    // hora (el último de cada hora) hasta 7 días. Cada punto es el estado COMPLETO.
+    const shown=[];const _seenHour={};
+    commits.forEach(function(c,i){
+      const t=new Date(c.committed_at);
+      const hourKey=t.getFullYear()+'-'+t.getMonth()+'-'+t.getDate()+'-'+t.getHours();
+      if(i<10){shown.push(c);_seenHour[hourKey]=true;return;}
+      if(Date.now()-t.getTime()>RESTORE_WINDOW_MS)return;
+      if(_seenHour[hourKey])return;
+      _seenHour[hourKey]=true;shown.push(c);
+    });
+    var rows='<div style="font-size:11px;color:var(--text3);margin-bottom:8px">Cada guardado crea un punto de recuperación en GitHub (se conservan todos). Se muestran los 10 más recientes y luego un punto por hora hasta 7 días — '+shown.length+' puntos listados. Restaurar no borra el historial: siempre se puede volver.</div>'
+      +'<div style="display:flex;flex-direction:column;gap:6px;max-height:55vh;overflow-y:auto">';
+    var _lastDay='';
+    for(var i=0;i<shown.length;i++){
+      var c=shown[i];
+      var _d=new Date(c.committed_at);
+      var dayLbl=_d.toLocaleDateString('es',{weekday:'long',day:'2-digit',month:'2-digit'});
+      if(dayLbl!==_lastDay){
+        _lastDay=dayLbl;
+        rows+='<div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;margin-top:'+(i?'8px':'0')+'">'+dayLbl+'</div>';
+      }
+      var dt=_d.toLocaleString('es',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
       var sha=c.version;
       var label=i===0?'<span style="font-size:10px;font-weight:700;padding:1px 6px;background:var(--blue);color:#fff;border-radius:8px;margin-left:6px">actual</span>':'';
       rows+='<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg)">'
@@ -2420,11 +2449,17 @@ async function _previewGistVersion(sha, label, parentOverlay){
       if(applySnapshot(content)){
         currentUser=_prevUser;
         render();
-        if(confirm('Datos restaurados en memoria ('+taskCount+' análisis, '+userCount+' usuarios).\n\n¿Guardar como estado actual en GitHub Gist?')){
+        if(confirm('Datos restaurados en memoria ('+taskCount+' análisis, '+userCount+' usuarios).\n\n¿Guardar como estado actual en GitHub Gist?\n\nTodos los dispositivos cargarán esta versión (la restauración es autoritativa).')){
+          // La restauración debe GANAR: sin bumpear la época, el merge del próximo
+          // sync uniría de nuevo los registros recientes (más "nuevos" por _ts) que
+          // justamente se quieren deshacer, y la versión restaurada no se impondría.
+          opEpoch=Date.now();
+          operationalBase={setAt:opEpoch,setBy:currentUser?currentUser.id:'?',setByName:currentUser?currentUser.name:'?',motivo:'Restauración a versión del '+label};
+          auditLog('SNAPSHOT_SET','SYSTEM','RESTORE',{description:'Restauración de versión anterior: '+label,sha:String(sha).slice(0,12)},'Restauración a versión del '+label);
           await saveNow();
-          alert('Versión restaurada y guardada en GitHub.');
+          alert('Versión restaurada y guardada en GitHub.\nTodos los dispositivos cargarán desde este punto.');
         }else{
-          alert('Versión cargada en memoria. Los cambios no se guardaron en GitHub aún.\nUsá "Guardar y conectar" o cualquier acción para sincronizar.');
+          alert('Versión cargada SOLO en memoria (vista previa). No se guardó en GitHub:\nel próximo sync volverá a la versión actual.');
         }
       }else{alert('No se pudo aplicar la versión seleccionada.');}
     }else{if(btn){btn.disabled=false;btn.textContent='Vista previa';}}
