@@ -436,6 +436,12 @@ function _regDeletion(kind,id){
   if(!deletionsReg[kind])deletionsReg[kind]={};
   deletionsReg[kind][id]=Date.now();
 }
+// ── Estado operativo (punto de inicio del supervisor) ──
+// opEpoch: época del último snapshot autoritativo (📌 Establecer estado operativo).
+// Un cliente cuyo estado tiene época MENOR adopta el remoto completo en el merge —
+// no une su estado viejo. Con épocas iguales (caso normal) el merge es campo a campo.
+var opEpoch=0;
+var operationalBase=null; // {setAt,setBy,setByName,motivo} — metadata informativa (diagnóstico)
 var _labConfigUnlocked=false; // desbloqueado por sesión en memoria
 var activeLabId=null;
 // ── Solicitudes inter-laboratorio ──
@@ -617,7 +623,13 @@ function getSnapshot(){
     deletions:deletionsReg,
     labRegistry:_labRegistry,
     labConfigPwd:labConfigPwd,
-    labConfigPwd_ts:labConfigPwd_ts
+    labConfigPwd_ts:labConfigPwd_ts,
+    // Punto de inicio del supervisor: viaja en TODOS los guardados (antes solo lo
+    // escribía el PATCH del botón y el siguiente save de cualquier usuario lo borraba)
+    opEpoch:opEpoch||0,
+    _operationalBase:operationalBase||null,
+    // Candado de versión: cada guardado eleva la vara al build propio (monotónico)
+    minAppBuild:Math.max(minAppBuild||0,APP_BUILD)
   });
 }
 function applySnapshot(json){
@@ -714,11 +726,15 @@ function applySnapshot(json){
       });
     });
     // Normalize status: pending↔scheduled based on active assignments
+    // SIN bumpear _ts: la corrección es determinística (todo cliente la re-deriva al
+    // aplicar cualquier snapshot). Bumpear acá hacía que un dispositivo con sesión
+    // VIEJA, al bootear, convirtiera sus tareas obsoletas en las "más nuevas" del
+    // merge y sus datos estancados pisaran las ediciones recientes del supervisor.
     tasks.forEach(function(t){
-      if(t._deleted)return; // no tocar tombstones (bumpear _ts los haría "ganar" merges)
+      if(t._deleted)return; // no tocar tombstones
       var activeA=(t.assignments||[]).filter(function(a){return !a._removed;}).length;
-      if(t.status==='pending'&&activeA>0){t.status='scheduled';t._ts=Date.now();}
-      if(t.status==='scheduled'&&activeA===0){t.status='pending';t._ts=Date.now();}
+      if(t.status==='pending'&&activeA>0){t.status='scheduled';}
+      if(t.status==='scheduled'&&activeA===0){t.status='pending';}
       // Ensure samplerAssignments array exists
       if(!t.samplerAssignments)t.samplerAssignments=[];
     });
@@ -739,6 +755,13 @@ function applySnapshot(json){
     // Solo actualiza nombres de labs YA conocidos localmente.
     // No agrega labs nuevos automáticamente (requiere acción del supervisor)
     // para evitar mezcla de datos entre laboratorios.
+    // Punto de inicio del supervisor (época + metadata para diagnóstico)
+    opEpoch=d.opEpoch||0;
+    operationalBase=d._operationalBase||null;
+    // Candado de versión: si el estado exige un build mayor, esta sesión es una
+    // versión vieja de la app → bloquear sync/escrituras y forzar recarga.
+    minAppBuild=Math.max(minAppBuild||0,d.minAppBuild||0);
+    if(minAppBuild>APP_BUILD)_enterOutdatedMode();
     // Cargar contraseña maestra de configuración de labs
     if(typeof d.labConfigPwd==='string'){labConfigPwd=d.labConfigPwd;labConfigPwd_ts=d.labConfigPwd_ts||0;}
     if(d.labRegistry&&Array.isArray(d.labRegistry)&&d.labRegistry.length>0){
@@ -770,10 +793,29 @@ let _saveLSTimer=null;
 // ═══════════════════════════════════════════════════════════════════════════
 
 const GIST_API = 'https://api.github.com/gists';
-const GIST_FILE_STATE = 'labtrack_state.json';
+// ── Corte de versiones viejas a nivel de DATOS (2026-07-09) ──
+// El estado vive ahora en labtrack_state_v2.json. En el archivo viejo queda un
+// MARCADOR ilegible como JSON: las versiones anteriores de la app (que leen y
+// escriben el archivo viejo) fallan el pull con error visible y ABORTAN el
+// guardado ("Estado remoto ilegible", endurecimiento del 2026-07-06) — quedan
+// rechazadas sin necesidad de rotar el token. La migración es automática y
+// ocurre dentro del MISMO gist (nunca se crea otro).
+const GIST_FILE_STATE = 'labtrack_state_v2.json';
+const GIST_FILE_STATE_LEGACY = 'labtrack_state.json';
+const LEGACY_STATE_MARKER = 'LABTRACK-MIGRADO: el estado ahora vive en labtrack_state_v2.json. Esta copia de la aplicación es antigua y no puede sincronizar — recargá la app (Ctrl+Shift+R) o pedí al supervisor la versión publicada actual.';
 const GIST_FILE_AUDIT = 'labtrack_audit.json';
 const GIST_FILE_ARCHIVE = 'labtrack_archive.json'; // histórico de aprobados viejos
 const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se archivan
+
+// ── Candado de versión ──
+// APP_BUILD se BUMPEA en cada publicación (AAAAMMDD, +1 si hay más de una en el día).
+// El estado lleva minAppBuild (monotónico, sube solo): cada guardado de una versión
+// nueva lo eleva en el Gist. Una sesión cuyo APP_BUILD es menor que el minAppBuild
+// remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
+// recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
+// contienen este candado; a las anteriores a él solo las corta rotar el token.
+const APP_BUILD = 20260709;
+let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
 let GIST_CONFIG = { token:'', gistId:'', configured:false };
@@ -921,6 +963,34 @@ async function _gistFileContent(gistObj, fileName){
   return await r.text();
 }
 
+// Archivo de estado de un gist AJENO (labs asociados): v2 si ese lab ya migró,
+// si no el legado — así el inter-lab sigue funcionando durante la transición.
+function _gistStateFileOf(gistObj){
+  return (gistObj && gistObj.files && gistObj.files[GIST_FILE_STATE]) ? GIST_FILE_STATE : GIST_FILE_STATE_LEGACY;
+}
+
+// Migración una-sola-vez del estado propio: legado → v2 + marcador en el legado.
+// Idempotente y segura ante concurrencia (dos clientes escriben el mismo contenido).
+// Devuelve el contenido de estado a usar (v2, o el legado si la escritura falló —
+// en ese caso se reintenta en el próximo boot/pull sin bloquear la carga).
+async function _migrateLegacyStateIfNeeded(gist){
+  var v2 = await _gistFileContent(gist, GIST_FILE_STATE);
+  if (v2) return v2;
+  var legacy = await _gistFileContent(gist, GIST_FILE_STATE_LEGACY);
+  if (!legacy) return null;
+  var parsed = null;
+  try { parsed = JSON.parse(legacy); } catch(e) {}
+  if (!parsed || !Array.isArray(parsed.tasks)) return null; // marcador u otro contenido: nada que migrar
+  try {
+    await _gistFetchRetry('PATCH', '/' + GIST_CONFIG.gistId, { files: {
+      [GIST_FILE_STATE]:        { content: legacy },
+      [GIST_FILE_STATE_LEGACY]: { content: LEGACY_STATE_MARKER }
+    }});
+    console.info('LabTrack: estado migrado a ' + GIST_FILE_STATE + ' (las versiones viejas quedan rechazadas).');
+  } catch(e) { console.warn('Migración a v2 pospuesta (se reintenta):', e.message); }
+  return legacy;
+}
+
 // ══════════════════════════════════════════════════════════════
 // GIST — crear o encontrar el gist de LabTrack
 // ══════════════════════════════════════════════════════════════
@@ -938,12 +1008,21 @@ async function _gistFindOrCreate() {
     if (list.length < 100) break;
     page++;
   }
-  // No encontrado — crear nuevo
+  // No encontrado — crear SOLO con autorización deliberada del supervisor.
+  // Cada Gist ES un laboratorio: crear uno por accidente (p. ej. un usuario que
+  // borró el campo Gist ID) parte al equipo en dos universos de datos.
+  if (window._gistCreateAuthorized !== true) {
+    GIST_CONFIG.configured = false;
+    throw new Error('No se encontró un laboratorio existente con este token. Usá «🔍 Descubrir» para conectarte a tu laboratorio. La creación de un laboratorio NUEVO la realiza únicamente el supervisor desde la configuración.');
+  }
+  window._gistCreateAuthorized = false; // autorización de un solo uso
   const created = await _gistFetch('POST', '', {
     description: 'LabTrack-Data',
     public: false,
     files: {
       [GIST_FILE_STATE]: { content: getSnapshot() },
+      // Marcador en el nombre legado: una app vieja apuntada a este lab no puede usarlo
+      [GIST_FILE_STATE_LEGACY]: { content: LEGACY_STATE_MARKER },
       [GIST_FILE_AUDIT]: { content: '[]' }
     }
   });
@@ -975,6 +1054,7 @@ async function writeAuditEntry(action, entity, entityId, details, reason) {
 
 async function _flushAuditBuffer() {
   _auditDebounce = null;
+  if (window._appOutdated) return; // versión vieja bloqueada: no escribir audit
   if (!_auditBuffer.length || !GIST_CONFIG.configured) return;
   const toFlush = [..._auditBuffer]; _auditBuffer = [];
   try {
@@ -1010,22 +1090,38 @@ function auditLog(action, entity, entityId, details, reason) {
 // ══════════════════════════════════════════════════════════════
 
 async function establecerEstadoOperativo() {
+  if (window._appOutdated) { alert('Esta copia de la app está desactualizada — recargá la aplicación antes de operar.'); return; }
   if (!isSupRole()) { alert('Solo el Supervisor puede establecer el estado operativo.'); return; }
   const motivo = prompt('Motivo (requerido — queda registrado en el audit trail):');
   if (!motivo?.trim()) { alert('Motivo requerido.'); return; }
   if (!confirm('¿Establecer el estado actual como punto de referencia único en GitHub?\n\nTodos los usuarios cargarán desde este snapshot al iniciar.')) return;
   _showSpinner('Estableciendo estado operativo…');
+  // Bumpear la época ANTES del snapshot: getSnapshot ya la incluye. Con época mayor,
+  // mergeSnapshot hace que todo cliente (aún con sesión vieja) ADOPTE este estado
+  // completo en su próximo sync, en lugar de mezclar su estado anterior.
+  const _prevEpoch = opEpoch, _prevBase = operationalBase;
+  opEpoch = Date.now();
+  operationalBase = { setAt: opEpoch, setBy: currentUser.id, setByName: currentUser.name, motivo };
   try {
     const snap = JSON.parse(getSnapshot());
-    snap._operationalBase = { setAt: Date.now(), setBy: currentUser.id, setByName: currentUser.name, motivo };
     await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
-      files: { [GIST_FILE_STATE]: { content: JSON.stringify(snap) } }
+      files: {
+        [GIST_FILE_STATE]: { content: JSON.stringify(snap) },
+        [GIST_FILE_STATE_LEGACY]: { content: LEGACY_STATE_MARKER }
+      }
     });
+    _lastRemoteTs = snap.savedAt; // lo recién escrito ES lo último conocido del remoto
+    _dirtyLocal = false;
+    try { localStorage.setItem(_labStateKey(), JSON.stringify(Object.assign({},snap,{auditTrail:[],_gistId:GIST_CONFIG.gistId||''}))); } catch(e2) {}
     await writeAuditEntry('SNAPSHOT_SET','SYSTEM','OPERATIONAL_STATE', { motivo }, motivo);
     await _flushAuditBuffer();
     _hideSpinner();
     alert('✓ Estado operativo establecido.\nTodos los usuarios cargarán desde este punto.');
-  } catch(e) { _hideSpinner(); alert('Error: ' + e.message); }
+  } catch(e) {
+    // El PATCH falló: revertir la época local para no declarar autoritativo un estado que no llegó al Gist
+    opEpoch = _prevEpoch; operationalBase = _prevBase;
+    _hideSpinner(); alert('Error: ' + e.message);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1080,6 +1176,7 @@ function saveLS(hint) {
 
 async function _executeSave() {
   _saveDebounce = null;
+  if(window._appOutdated)return; // versión vieja bloqueada: jamás escribir al Gist
   if(isAuditorRole())return; // solo lectura: nunca empujar al Gist
   if (!GIST_CONFIG.configured) return;
   if (_saveRetryTimer) { clearTimeout(_saveRetryTimer); _saveRetryTimer = null; }
@@ -1120,6 +1217,13 @@ async function _executeSaveLocked() {
         // pudimos leer es exactamente el tipo de sobreescritura que hay que impedir.
         if (!remoteState) throw new Error('Estado remoto ilegible — guardado abortado para no sobreescribir datos');
       }
+      // Candado de versión al momento de escribir: si el remoto exige un build
+      // mayor, esta sesión quedó vieja — abortar sin PATCH (los datos siguen en
+      // localStorage y sobreviven a la recarga que actualiza la app).
+      if (remoteState && (remoteState.minAppBuild||0) > APP_BUILD) {
+        _enterOutdatedMode();
+        throw new Error('Versión de la app desactualizada — guardado bloqueado');
+      }
       if (remoteState && (remoteState.savedAt||0) !== _lastRemoteTs) {
         // El remoto cambió desde lo último que conocemos → SIEMPRE mergear antes de
         // escribir (jamás sobreescritura total). Comparación por IDENTIDAD (!==), no por
@@ -1157,7 +1261,13 @@ async function _executeSaveLocked() {
     }
 
     await _gistFetchRetry('PATCH', '/' + GIST_CONFIG.gistId, {
-      files: { [GIST_FILE_STATE]: { content: contentToSave } }
+      files: {
+        [GIST_FILE_STATE]: { content: contentToSave },
+        // Re-sellar el archivo legado en cada guardado: si una app MUY vieja
+        // (anterior al endurecimiento del 2026-07-06) lo reescribió, vuelve a
+        // quedar ilegible en segundos y ninguna versión vieja puede usarlo.
+        [GIST_FILE_STATE_LEGACY]: { content: LEGACY_STATE_MARKER }
+      }
     });
     _lastRemoteTs = _chk.savedAt || Date.now();
     _dirtyLocal = false;
@@ -1274,6 +1384,48 @@ function _hideStaleBanner() {
   if (el) el.parentNode.removeChild(el);
 }
 
+// ══════════════════════════════════════════════════════════════
+// CANDADO DE VERSIÓN — bloqueo de sesiones con build viejo
+// ══════════════════════════════════════════════════════════════
+
+function _enterOutdatedMode() {
+  if (window._appOutdated) return;
+  window._appOutdated = true;
+  // Detener toda actividad de sync: esta sesión no debe volver a tocar el Gist.
+  try { if (_syncTimer) { clearInterval(_syncTimer); _syncTimer = null; } } catch(e) {}
+  try { if (_saveDebounce) { clearTimeout(_saveDebounce); _saveDebounce = null; } } catch(e) {}
+  try { if (_saveRetryTimer) { clearTimeout(_saveRetryTimer); _saveRetryTimer = null; } } catch(e) {}
+  gistStatus = 'error';
+  try { renderSpBadge(); } catch(e) {}
+  // Primer intento: recarga automática (el hosting sirve la versión publicada).
+  // sessionStorage evita el loop si tras recargar sigue viejo (copia local / caché dura).
+  var attempted = false;
+  try { attempted = sessionStorage.getItem('lt9-outdatedReload') === '1'; } catch(e) {}
+  if (!attempted) {
+    try { sessionStorage.setItem('lt9-outdatedReload', '1'); } catch(e) {}
+    setTimeout(function(){ window.location.reload(); }, 1500);
+  }
+  _showOutdatedOverlay(attempted);
+}
+
+function _showOutdatedOverlay(manual) {
+  if (document.getElementById('lt-outdated-overlay')) return;
+  var el = document.createElement('div');
+  el.id = 'lt-outdated-overlay';
+  el.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.88);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px';
+  el.innerHTML = '<div style="background:var(--surface,#fff);border-radius:12px;padding:30px 34px;max-width:440px;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.4)">'
+    + '<div style="font-size:34px;margin-bottom:10px">⬆</div>'
+    + '<div style="font-size:16px;font-weight:700;margin-bottom:8px">Versión de LabTrack desactualizada</div>'
+    + '<div style="font-size:13px;color:var(--text2,#555);line-height:1.6;margin-bottom:16px">'
+    + (manual
+        ? 'Esta copia de la aplicación es anterior a la versión en uso por el laboratorio y quedó bloqueada: no puede sincronizar ni guardar datos.<br><br>Forzá la recarga con <b>Ctrl+Shift+R</b>. Si el aviso persiste, esta copia es un archivo local viejo — abrí la versión publicada actual.'
+        : 'Hay una versión más nueva en uso. La aplicación se recargará automáticamente en unos segundos para actualizarse.')
+    + '</div>'
+    + '<button class="btn pri" style="padding:8px 22px" onclick="window.location.reload()">↻ Recargar ahora</button>'
+    + '</div>';
+  document.body.appendChild(el);
+}
+
 let _staleCheckTimer = null;
 function _isSyncStale() {
   return (Date.now() - _lastSuccessfulSync) >= STALE_SYNC_MS;
@@ -1344,7 +1496,7 @@ async function fetchPartnerGistData(partnerLab) {
     });
     if (!r.ok) return null;
     var gist = await r.json();
-    var content = await _gistFileContent(gist, GIST_FILE_STATE);
+    var content = await _gistFileContent(gist, _gistStateFileOf(gist));
     var data = content ? JSON.parse(content) : null;
     if (data) _partnerLabCache[partnerLab.id] = { data: data, ts: Date.now() };
     return data;
@@ -1352,6 +1504,7 @@ async function fetchPartnerGistData(partnerLab) {
 }
 
 async function pushNotifToPartnerGist(partnerLab, notif) {
+  if (window._appOutdated) return false; // versión vieja bloqueada
   if (!partnerLab || !partnerLab.token || !partnerLab.gistId) return false;
   try {
     var r = await fetch(GIST_API + '/' + partnerLab.gistId + '?_nc=' + Date.now(), {
@@ -1363,7 +1516,8 @@ async function pushNotifToPartnerGist(partnerLab, notif) {
     });
     if (!r.ok) return false;
     var gist = await r.json();
-    var content = await _gistFileContent(gist, GIST_FILE_STATE);
+    var _pFile = _gistStateFileOf(gist);
+    var content = await _gistFileContent(gist, _pFile);
     if (!content) return false;
     var partnerData = JSON.parse(content);
     partnerData.replanNotifs = partnerData.replanNotifs || [];
@@ -1379,7 +1533,7 @@ async function pushNotifToPartnerGist(partnerLab, notif) {
         'Content-Type': 'application/json',
         'X-GitHub-Api-Version': '2022-11-28'
       },
-      body: JSON.stringify({ files: { [GIST_FILE_STATE]: { content: JSON.stringify(partnerData) } } })
+      body: JSON.stringify({ files: { [_pFile]: { content: JSON.stringify(partnerData) } } })
     });
     if (patch.ok) _partnerLabCache[partnerLab.id] = null;
     return patch.ok;
@@ -1387,6 +1541,7 @@ async function pushNotifToPartnerGist(partnerLab, notif) {
 }
 
 async function updateRequestInPartnerGist(partnerLab, reqId, updates) {
+  if (window._appOutdated) return false; // versión vieja bloqueada
   if (!partnerLab || !partnerLab.token || !partnerLab.gistId) return false;
   try {
     var r = await fetch(GIST_API + '/' + partnerLab.gistId + '?_nc=' + Date.now(), {
@@ -1398,7 +1553,8 @@ async function updateRequestInPartnerGist(partnerLab, reqId, updates) {
     });
     if (!r.ok) return false;
     var gist = await r.json();
-    var content = await _gistFileContent(gist, GIST_FILE_STATE);
+    var _pFile2 = _gistStateFileOf(gist);
+    var content = await _gistFileContent(gist, _pFile2);
     if (!content) return false;
     var partnerData = JSON.parse(content);
     var reqs = partnerData.interLabRequests || [];
@@ -1416,7 +1572,7 @@ async function updateRequestInPartnerGist(partnerLab, reqId, updates) {
         'Content-Type': 'application/json',
         'X-GitHub-Api-Version': '2022-11-28'
       },
-      body: JSON.stringify({ files: { [GIST_FILE_STATE]: { content: JSON.stringify(partnerData) } } })
+      body: JSON.stringify({ files: { [_pFile2]: { content: JSON.stringify(partnerData) } } })
     });
     if (patch.ok) _partnerLabCache[partnerLab.id] = null;
     return patch.ok;
@@ -1428,6 +1584,7 @@ async function updateRequestInPartnerGist(partnerLab, reqId, updates) {
 // ══════════════════════════════════════════════════════════════
 
 async function gistSyncFromRemote() {
+  if (window._appOutdated) return; // versión vieja bloqueada
   if (!GIST_CONFIG.configured) return;
   // Si estamos rate-limited, no hacer nada hasta que expire el límite
   if (_rateLimitUntil && Date.now() < _rateLimitUntil) {
@@ -1459,10 +1616,13 @@ async function _gistPullLocked() {
     }
 
     // ── Estado operativo (contenido completo aunque la API lo trunque) ──
-    const stateContent = await _gistFileContent(gist, GIST_FILE_STATE);
+    // Migra legado→v2 si hiciera falta (p. ej. si el boot no pudo hacerlo)
+    const stateContent = await _migrateLegacyStateIfNeeded(gist);
     if (!stateContent) throw new Error('Archivo state no encontrado en el gist');
     let remoteState;
     try { remoteState = JSON.parse(stateContent); } catch(e) { throw new Error('State JSON inválido'); }
+    // Candado de versión: el remoto exige un build mayor → sesión vieja, no mergear
+    if ((remoteState.minAppBuild||0) > APP_BUILD) { _enterOutdatedMode(); renderSpBadge(); return; }
     const remoteTs = remoteState.savedAt || 0;
     if (remoteTs !== _lastRemoteTs) {
       // Cambió el remoto → aplicar por MERGE (no reemplazo total): protege cambios
@@ -1548,7 +1708,17 @@ function _hideSpinner() { const el=document.getElementById('lt-global-spinner');
 // ══════════════════════════════════════════════════════════════
 
 let showSpConfig = false;
-function openSpConfig()  { showSpConfig=true;  render(); }
+function openSpConfig()  {
+  // La configuración del Gist es información del laboratorio: una vez configurado
+  // el dispositivo, solo el supervisor puede verla o modificarla. En un dispositivo
+  // sin configurar queda accesible (primer acceso: conectarse a un lab existente).
+  if (GIST_CONFIG.configured && !isSupRole()) {
+    try { showToast('Solo el supervisor puede acceder a la configuración de sincronización.','warn'); }
+    catch(e) { alert('Solo el supervisor puede acceder a la configuración de sincronización.'); }
+    return;
+  }
+  showSpConfig=true;  render();
+}
 function closeSpConfig() { showSpConfig=false; render(); }
 
 function renderSpConfigModal() {
@@ -1576,15 +1746,15 @@ function renderSpConfigModal() {
     +'3. Nombre: <code>LabTrack</code> · Expiración: <code>No expiration</code><br>'
     +'4. Marcar solo el scope <b><code>gist</code></b> · Clic en <b>Generate token</b><br>'
     +'5. Copiar el token generado (empieza con <code>ghp_</code>) y pegarlo abajo<br>'
-    +'6. El Gist se crea automáticamente la primera vez'
+    +'6. Usar <b>«🔍 Descubrir labs»</b> para conectarse al laboratorio existente. Crear un laboratorio NUEVO (Gist ID vacío) es una acción exclusiva del supervisor.'
     +'</div>'
 
     +'<div class="frow"><label>Personal Access Token de GitHub</label>'
     +'<input type="password" id="gcfg-token" value="'+escH(cfg.token)+'" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" style="font-family:var(--mono);font-size:12px" autocomplete="off">'
     +'</div>'
 
-    +'<div class="frow"><label>Gist ID <span style="font-weight:400;color:var(--text3)">(dejar vacío para crear automáticamente)</span></label>'
-    +'<input type="text" id="gcfg-gistid" value="'+escH(cfg.gistId)+'" placeholder="Se completa automáticamente" style="font-family:var(--mono);font-size:12px" autocomplete="off">'
+    +'<div class="frow"><label>Gist ID <span style="font-weight:400;color:var(--text3)">(identifica al laboratorio — NO borrar; vacío = crear lab nuevo, solo supervisor)</span></label>'
+    +'<input type="text" id="gcfg-gistid" value="'+escH(cfg.gistId)+'" placeholder="Gist ID del laboratorio" style="font-family:var(--mono);font-size:12px" autocomplete="off">'
     +'</div>'
 
     +'<div style="background:var(--bg2);border-radius:var(--radius);padding:9px 12px;font-size:11px;color:var(--text2);margin-bottom:12px">'
@@ -1606,6 +1776,20 @@ async function saveGistConfig() {
   if (!token) { alert('El token es requerido.'); return; }
   if (!token.startsWith('ghp_') && !token.startsWith('github_pat_') && token.length < 20) {
     alert('El token no parece válido. Debe empezar con ghp_ o github_pat_'); return;
+  }
+  // Cada Gist ES un laboratorio. Crear uno nuevo o cambiar el existente es una
+  // acción deliberada que corresponde únicamente al supervisor.
+  const _prevGist = GIST_CONFIG.gistId || '';
+  if (!gistId) {
+    if (!isSupRole()) {
+      alert('El campo Gist ID está vacío: eso crearía un laboratorio NUEVO, acción reservada al supervisor.\n\nUsá «🔍 Descubrir labs» para conectarte al laboratorio existente de tu equipo.');
+      return;
+    }
+    if (!confirm('El campo Gist ID está vacío.\n\nSi este token no tiene todavía un laboratorio LabTrack, se creará un repositorio de datos NUEVO (un laboratorio nuevo, vacío).\n\n¿Continuar como supervisor?')) return;
+    window._gistCreateAuthorized = true; // autorización de un solo uso para _gistFindOrCreate
+  } else if (_prevGist && gistId !== _prevGist) {
+    if (!isSupRole()) { alert('Solo el supervisor puede cambiar el laboratorio (Gist ID) de este dispositivo.'); return; }
+    if (!confirm('Vas a cambiar el laboratorio de este dispositivo:\n' + _prevGist.slice(0,12) + '… → ' + gistId.slice(0,12) + '…\n\nLos datos locales serán reemplazados por los del nuevo laboratorio. El Gist anterior no se modifica.\n\n¿Continuar?')) return;
   }
   GIST_CONFIG = { token, gistId, configured:true };
   _saveGistConfig();
@@ -1979,6 +2163,7 @@ function _archCandidates(){
   });
 }
 async function archiveOldApproved(){
+  if(window._appOutdated)return; // versión vieja bloqueada
   if(!currentUser||isAuditorRole())return; // requiere sesión con permiso de escritura
   if(!GIST_CONFIG.configured)return;
   var cand=_archCandidates();
@@ -2048,7 +2233,8 @@ async function gistBoot() {
     // Leer estado remoto — invalidar ETag para garantizar datos frescos en el boot
     delete _gistETags['/' + GIST_CONFIG.gistId];
     const gist = await _gistFetchRetry('GET', '/' + GIST_CONFIG.gistId);
-    const stateContent = gist ? await _gistFileContent(gist, GIST_FILE_STATE) : null;
+    // Lee v2; si este gist aún no migró, migra automáticamente (legado→v2 + marcador)
+    const stateContent = gist ? await _migrateLegacyStateIfNeeded(gist) : null;
     if (stateContent) {
       const remoteState = JSON.parse(stateContent);
       _lastRemoteTs = remoteState.savedAt || 0;
@@ -2092,6 +2278,8 @@ async function gistBoot() {
       } catch(e) {}
     }
     _hideSpinner();
+    // Boot exitoso con build vigente: limpiar la marca de recarga por versión vieja
+    if (!window._appOutdated) { try { sessionStorage.removeItem('lt9-outdatedReload'); } catch(e) {} }
     gistStatus = 'ok'; gistLastSync = new Date();
     _lastSuccessfulSync = Date.now();
     renderSpBadge();
@@ -2218,7 +2406,8 @@ async function _previewGistVersion(sha, label, parentOverlay){
   if(btn){btn.disabled=true;btn.textContent='Cargando…';}
   try{
     const ver=await _gistFetch('GET','/'+GIST_CONFIG.gistId+'/'+sha);
-    const content=ver?await _gistFileContent(ver,GIST_FILE_STATE):null;
+    // Revisiones anteriores a la migración solo tienen el archivo legado
+    const content=ver?((await _gistFileContent(ver,GIST_FILE_STATE))||(await _gistFileContent(ver,GIST_FILE_STATE_LEGACY))):null;
     if(!content){alert('Esta versión no tiene datos de estado.');if(btn){btn.disabled=false;btn.textContent='Vista previa';}return;}
     var snap;try{snap=JSON.parse(content);}catch(e){alert('Versión con datos inválidos.');if(btn){btn.disabled=false;btn.textContent='Vista previa';}return;}
     var taskCount=(snap.tasks||[]).length;
@@ -2262,11 +2451,14 @@ async function cloudDiag() {
       else {
       out.push('✓ Gist accesible: ' + gist.description);
       out.push('  Archivos: ' + Object.keys(gist.files).join(', '));
-      const state = gist.files[GIST_FILE_STATE];
-      if (state) {
-        const s = JSON.parse(state.content);
-        out.push('  State savedAt: ' + new Date(s.savedAt||0).toLocaleString('es'));
-        out.push('  Base operativa: ' + (s._operationalBase ? 'Sí — ' + s._operationalBase.setByName + ' · ' + new Date(s._operationalBase.setAt).toLocaleString('es') : 'No establecida'));
+      const _stContent = await _gistFileContent(gist, _gistStateFileOf(gist));
+      if (_stContent) {
+        try {
+          const s = JSON.parse(_stContent);
+          out.push('  State savedAt: ' + new Date(s.savedAt||0).toLocaleString('es'));
+          out.push('  Base operativa: ' + (s._operationalBase ? 'Sí — ' + s._operationalBase.setByName + ' · ' + new Date(s._operationalBase.setAt).toLocaleString('es') : 'No establecida'));
+          out.push('  Build mínimo exigido: ' + (s.minAppBuild||'—') + ' (esta app: ' + APP_BUILD + ')');
+        } catch(e2) { out.push('  ⚠ Estado ilegible: ' + e2.message); }
       }
       } // cierre else (gist !== null)
     } catch(e) { out.push('✗ Error: ' + e.message); }
@@ -2378,9 +2570,9 @@ function _tryAdvanceToPendingConfirm(t){
   }
 }
 function prioClass(p){return{Normal:'nor',Alta:'hi',Urgente:'urg'}[p]||'nor';}
-function getAssignees(t){return[...new Set((t.assignments||[]).map(a=>a.analyst))];}
+function getAssignees(t){return[...new Set((t.assignments||[]).filter(a=>!a._removed).map(a=>a.analyst))];}
 function isMyTask(t){
-  return (t.assignments||[]).some(a=>a.analyst===currentUser.id);
+  return (t.assignments||[]).some(a=>a.analyst===currentUser.id&&!a._removed);
 }
 function today(){var d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
 function todayMs(){return new Date(today()+'T12:00:00').getTime();}
@@ -2558,7 +2750,7 @@ function checkAbsenceConflicts(){
   // ── Analysis task conflicts ──
   tasks.forEach(t=>{
     (t.assignments||[]).forEach(a=>{
-      if(!a.date)return;
+      if(a._removed||!a.date)return;
       const absent=isAbsent(a.analyst,a.date);
       const nonWork=!isWorkdayFor(a.analyst,a.date);
       if(absent||nonWork){
@@ -2770,7 +2962,7 @@ function renderSchedulesTab(){
 
 // Per-assignment hours helper — returns real hours logged
 var getAssignHours=function(task,analystId,dateStr){
-  var assigns=(task.assignments||[]).filter(function(a){return a.analyst===analystId&&(!dateStr||a.date===dateStr);});
+  var assigns=(task.assignments||[]).filter(function(a){return !a._removed&&a.analyst===analystId&&(!dateStr||a.date===dateStr);});
   return assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
 };
 function renderSchedulesWeek(isSup,rows,pendTotal){
@@ -2789,7 +2981,7 @@ function renderSchedulesWeek(isSup,rows,pendTotal){
     const absent=getAbsenceOnDate(analystId,d);
     const isWork=isWorkdayFor(analystId,d);
     const pendReq=scheduleRequests.find(r=>r.analystId===analystId&&r.dateStr===d&&r.status==='pending');
-    const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===analystId&&x.date===d));
+    const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===analystId&&x.date===d&&!x._removed));
     const mgmtOccs=(_dayMgmtCache[d]||[]).filter(o=>(o.analysts||[]).includes(analystId));
     const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,analystId,d),0);
     const extraH=Math.max(0,workH-h);
@@ -2964,7 +3156,7 @@ function renderSchedulesMonth(isSup,rows){
             const absent=getAbsenceOnDate(analyst.id,d);
             const isWork=isWorkdayFor(analyst.id,d);
             const pendReq=scheduleRequests.find(r=>r.analystId===analyst.id&&r.dateStr===d&&r.status==='pending');
-            const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===analyst.id&&x.date===d));
+            const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===analyst.id&&x.date===d&&!x._removed));
             const mgmtOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,d,d)).filter(o=>(o.analysts||[]).includes(analyst.id));
             const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,analyst.id,d),0);
             const approvedOT=scheduleRequests.find(r=>r.analystId===analyst.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime');
@@ -4220,7 +4412,7 @@ function renderCronogramaWeek(a, def){
     const pendSched=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime';});
     const pendOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime';});
     const approvedOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime';});
-    const myTasks=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===d;});});
+    const myTasks=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===d&&!x._removed;});});
     const mgmtOccs=(mgmtCache[d]||[]).filter(function(o){return(o.analysts||[]).includes(currentUser.id);});
     const workH=myTasks.reduce(function(acc,t){return acc+getAssignHours(t,currentUser.id,d);},0);
     const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
@@ -4357,7 +4549,7 @@ function renderCronogramaMonth(a, def){
       const pendSched=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime';});
       const pendOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime';});
       const approvedOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='approved'&&r.proposed.type==='overtime';});
-      const myTasks=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===dateStr;});});
+      const myTasks=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===dateStr&&!x._removed;});});
       const dayMgmt=mgmtOccsByDay[dateStr]||[];
       const workH=myTasks.reduce(function(acc,t){return acc+getAssignHours(t,currentUser.id,dateStr);},0);
       const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
@@ -4414,7 +4606,7 @@ function renderCronogramaMonth(a, def){
 }
 // Detalle de un día (vista Mes): lista COMPLETA de actividades sin alterar la grilla.
 function showDayActivitiesModal(dateStr){
-  var myTasks=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===dateStr;});});
+  var myTasks=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===dateStr&&!x._removed;});});
   var dayMgmt=mgmtTasks.flatMap(function(mt){return expandMgmt(mt,dateStr,dateStr);}).filter(function(o){return(o.analysts||[]).includes(currentUser.id);});
   var rows='';
   myTasks.forEach(function(t){
@@ -4474,7 +4666,7 @@ function renderMySchedWeek(a, def){
     const pendSched=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime');
     const pendOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime');
     const approvedOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime');
-    const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===d));
+    const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===d&&!x._removed));
     const mgmtOccs=(cache[d]||[]).filter(o=>(o.analysts||[]).includes(currentUser.id));
     const workH=myTasks.reduce((acc,t)=>acc+getAssignHours(t,currentUser.id,d),0);
     const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
@@ -4584,7 +4776,7 @@ function renderMySchedMonth(a, def){
       const pendSched=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime');
       const pendOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime');
       const approvedOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='approved'&&r.proposed.type==='overtime');
-      const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===dateStr));
+      const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===dateStr&&!x._removed));
       const mgmtOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,dateStr,dateStr)).filter(o=>(o.analysts||[]).includes(currentUser.id));
       const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,currentUser.id,dateStr||''),0);
       const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
@@ -5148,8 +5340,8 @@ function getTableData(tableId){
   const HEADERS=['Producto','Lote','Analistas','Fechas análisis','Vence','Prioridad','Estado','T.Real(h)','Notas'];
   function taskToRow(t){
     const analistas=getAssignees(t).map(id=>getU(id).name).join(', ');
-    const fechas=(t.assignments||[]).map(a=>getU(a.analyst).name.split(' ')[0]+': '+fmtDF(a.date)).join(' | ');
-    const realH=(t.assignments||[]).reduce((s,a)=>s+(a.realHours||0),0);
+    const fechas=(t.assignments||[]).filter(a=>!a._removed).map(a=>getU(a.analyst).name.split(' ')[0]+': '+fmtDF(a.date)).join(' | ');
+    const realH=(t.assignments||[]).filter(a=>!a._removed).reduce((s,a)=>s+(a.realHours||0),0);
     return[t.producto||'',t.lote||'',analistas,fechas,fmtDF(t.due),t.priority,statusLabel(t.status),realH||'',t.notes||''];
   }
   let taskList=[];
@@ -6012,13 +6204,13 @@ async function discoverLabsFromToken(token){
     if(batch.length<100)break;
     page++;
   }
-  var ltGists=allGists.filter(function(g){return g.files&&g.files[GIST_FILE_STATE];});
+  var ltGists=allGists.filter(function(g){return g.files&&(g.files[GIST_FILE_STATE]||g.files[GIST_FILE_STATE_LEGACY]);});
   if(!ltGists.length)return [];
   var results=await Promise.all(ltGists.map(async function(g){
     try{
       var r2=await fetch('https://api.github.com/gists/'+g.id,{headers:headers});
       var data=await r2.json();
-      var content=await _gistFileContent(data,GIST_FILE_STATE);
+      var content=await _gistFileContent(data,_gistStateFileOf(data));
       var name='';
       if(content){
         try{
@@ -6076,6 +6268,10 @@ function loginSyncSave(){
     // Modo manual (fallback)
     var gistId=(document.getElementById('ls-gistid')||{}).value||'';
     gistId=gistId.trim();
+    // Sin Gist ID no se conecta: dejarlo vacío crearía un laboratorio NUEVO — acción
+    // reservada al supervisor (desde Admin → Laboratorios). El primer acceso de un
+    // usuario general se hace con «🔍 Descubrir» o con el Gist ID que comparte el supervisor.
+    if(!gistId){alert('Ingresá el Gist ID del laboratorio (lo comparte el supervisor) o usá «🔍 Descubrir».\n\nLa creación de un laboratorio nuevo la realiza únicamente el supervisor.');return;}
     var gistCambio=gistId&&GIST_CONFIG.gistId&&gistId!==GIST_CONFIG.gistId;
     if(gistCambio){if(!confirm('Al cambiar el Gist ID se cargarán los datos de ese Gist y los datos locales actuales serán reemplazados.\n\nEl Gist anterior no se modifica.\n\n¿Continuar?'))return;}
     ownGistId=gistId;
@@ -6641,8 +6837,8 @@ function markObservedAll(){
         t.observations.push({by:currentUser.id,byName:currentUser.name,byRole:currentUser.role,
           ts:Date.now(),comment:comment.trim(),fromStatus:t.status});
         t.status='observed';t.observedBy=currentUser.id;t.observedTs=Date.now();
-        // Notificar analistas
-        const assignees=[...new Set((t.assignments||[]).map(function(a){return a.analyst;}))];
+        // Notificar analistas (solo asignaciones activas — no avisar a quien fue quitado del plan)
+        const assignees=[...new Set((t.assignments||[]).filter(function(a){return !a._removed;}).map(function(a){return a.analyst;}))];
         assignees.forEach(function(analystId){
           replanNotifs.push({id:newNotifId(),type:'observation',taskId:t.id,analystId:analystId,forUserId:analystId,
             status:'pending',ts:Date.now(),fromUser:currentUser.id,fromName:currentUser.name,
@@ -6700,7 +6896,7 @@ function renderInformes(){
 
   // ── build rows ──
   var rows=filtered.map(function(t){
-    var assigns=t.assignments||[];
+    var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
     var analistas=assigns.map(function(a){return escH(getU(a.analyst).name.split(' ')[0]);}).join(', ');
     var hReal=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
 
@@ -6895,6 +7091,18 @@ function mergeSnapshot(local, remote) {
     var R = typeof remote === 'string' ? JSON.parse(remote) : remote;
     if(!L || !R) return L || R; // FIX: preferir local ante falta de datos
 
+    // ── Punto de inicio del supervisor: el estado con época MAYOR es autoritativo
+    // y se ADOPTA completo (sin unión). Un dispositivo con sesión anterior al
+    // snapshot firmado NO mezcla su estado viejo — es la garantía de que
+    // «📌 Establecer estado operativo» realmente unifica a todos los clientes.
+    // Con épocas iguales (operación normal) el merge sigue campo a campo.
+    var _LE=L.opEpoch||0, _RE=R.opEpoch||0;
+    if(_RE>_LE){
+      try{showToast('📌 Se aplicó el estado operativo establecido por el supervisor — el estado local anterior fue descartado.','warn');}catch(e){}
+      return R;
+    }
+    if(_LE>_RE) return L;
+
     var merged = Object.assign({}, R); // start from remote base
 
     // ── Registro de borrados: unión por id (gana el timestamp mayor) ──
@@ -6936,6 +7144,9 @@ function mergeSnapshot(local, remote) {
     (R.productSuggestions||[]).forEach(function(s){psMap[s.id]=s;});
     (L.productSuggestions||[]).forEach(function(s){var rs=psMap[s.id];if(!rs||(s._ts||0)>(rs._ts||0))psMap[s.id]=s;});
     merged.productSuggestions=Object.values(psMap);
+
+    // ── Candado de versión: monotónico, gana el mayor ──
+    merged.minAppBuild    = Math.max(L.minAppBuild||0,    R.minAppBuild||0);
 
     // ── Counters: keep max ──
     merged.nextId         = Math.max(L.nextId||0,         R.nextId||0);
@@ -7111,7 +7322,7 @@ function quickActivateDay(dateStr, analystId) {
   var affectedAnalysts = new Set();
   tasks.forEach(function(t){
     (t.assignments||[]).forEach(function(a){
-      if(a.date===dateStr) affectedAnalysts.add(a.analyst);
+      if(!a._removed&&a.date===dateStr) affectedAnalysts.add(a.analyst);
     });
   });
   mgmtTasks.forEach(function(mt){
@@ -8041,7 +8252,7 @@ function renderDashboard(){
 
   var myDone=myTasks.filter(function(t){return _termSt.includes(t.status);});
   var myHReal=myTasks.reduce(function(s,t){
-    return s+(t.assignments||[]).filter(function(a){return a.analyst===_myId;})
+    return s+(t.assignments||[]).filter(function(a){return a.analyst===_myId&&!a._removed;})
       .reduce(function(s2,a){return s2+(a.realHours||0);},0);
   },0);
   var totalAction=pastCombos.length+todayCombos.length+_myFTPast.length+_myFTToday.length+_myMgmtPast.length+_myMgmtToday.length;
@@ -9079,13 +9290,13 @@ function renderCalWeek(sup){
         :`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
       ${rows.map(a=>`<div class="wrow" style="${cols}">
         <div class="wcell-name"><div class="av ${a.av}" style="flex-shrink:0">${escH(a.avInit)}</div>${escH(a.name.split(' ')[0])}</div>
-        ${wd.map(d=>{if(_collapsed[d])return`<div class="wcell" style="background:var(--bg2);padding:0" title="No laborable"></div>`;const dt=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=activeTasks().filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;const dmg=(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id));const absOnly=ab&&dt.length===0&&dft.length===0&&dst.length===0&&dmg.length===0;const _wk=isWorkdayFor(a.id,d);const _rowAssign=canAssign&&(a.role==='analyst'||a.role==='reviewer');return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} ${_rowAssign&&_wk?`onclick="calCellClick(event,'${a.id}','${d}')" title="Clic en el espacio vacío para asignar un producto pendiente"`:''} style="background:${ab?typ.color:d===todayStr?'rgba(26,79,138,.04)':''};${absOnly?'justify-content:center;align-items:center;':''}${_rowAssign&&_wk?'cursor:pointer;':''}">${_rowAssign&&_wk&&!ab&&dt.length===0?`<div style="font-size:10px;color:var(--blue);opacity:.55;text-align:center;padding:2px 0;pointer-events:none">＋ asignar</div>`:''}${_rowAssign&&!_wk&&!ab?`<div style="font-size:9px;color:var(--text3);opacity:.6;text-align:center;padding:1px 0;pointer-events:none">No lab.</div>`:''}${ab?(absOnly?`<div style="font-size:10px;font-weight:700;color:${typ.text};text-align:center;letter-spacing:.02em"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`:`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.text}1a;text-align:center"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`):''}${dt.map(t=>{const _canDrag=sup&&d>=_yesterdayStr&&t.status==='scheduled';return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ '+'':''}${t._interLab?`<div style="font-size:8px;color:#1d4ed8;font-weight:700;margin-bottom:1px">🔗 ${escH(t._interLab.fromLabName||'Inter-lab')}</div>`:''}${_inline?`<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="font-weight:600">${escH(t.producto)}</span> <span style="font-size:9px;opacity:.75;font-family:var(--mono)">${escH(t.lote)}</span></div>`:`<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div>`}</div>`;}).join('')}${dmg.map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
+        ${wd.map(d=>{if(_collapsed[d])return`<div class="wcell" style="background:var(--bg2);padding:0" title="No laborable"></div>`;const dt=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d&&!x._removed));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=activeTasks().filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;const dmg=(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id));const absOnly=ab&&dt.length===0&&dft.length===0&&dst.length===0&&dmg.length===0;const _wk=isWorkdayFor(a.id,d);const _rowAssign=canAssign&&(a.role==='analyst'||a.role==='reviewer');return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} ${_rowAssign&&_wk?`onclick="calCellClick(event,'${a.id}','${d}')" title="Clic en el espacio vacío para asignar un producto pendiente"`:''} style="background:${ab?typ.color:d===todayStr?'rgba(26,79,138,.04)':''};${absOnly?'justify-content:center;align-items:center;':''}${_rowAssign&&_wk?'cursor:pointer;':''}">${_rowAssign&&_wk&&!ab&&dt.length===0?`<div style="font-size:10px;color:var(--blue);opacity:.55;text-align:center;padding:2px 0;pointer-events:none">＋ asignar</div>`:''}${_rowAssign&&!_wk&&!ab?`<div style="font-size:9px;color:var(--text3);opacity:.6;text-align:center;padding:1px 0;pointer-events:none">No lab.</div>`:''}${ab?(absOnly?`<div style="font-size:10px;font-weight:700;color:${typ.text};text-align:center;letter-spacing:.02em"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`:`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.text}1a;text-align:center"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`):''}${dt.map(t=>{const _canDrag=sup&&d>=_yesterdayStr&&t.status==='scheduled';return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ '+'':''}${t._interLab?`<div style="font-size:8px;color:#1d4ed8;font-weight:700;margin-bottom:1px">🔗 ${escH(t._interLab.fromLabName||'Inter-lab')}</div>`:''}${_inline?`<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="font-weight:600">${escH(t.producto)}</span> <span style="font-size:9px;opacity:.75;font-family:var(--mono)">${escH(t.lote)}</span></div>`:`<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div>`}</div>`;}).join('')}${dmg.map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
       </div>`).join('')}
     </div>
   </div>
   ${!sup?`<div class="sec" style="margin-top:16px">Mis análisis del período</div><div class="tbl">
     <div class="thead" style="grid-template-columns:1.4fr .8fr .7fr .7fr .9fr"><div>Producto / Lote</div><div>Fecha asig.</div><div>Prioridad</div><div>Estado</div><div></div></div>
-    ${activeTasks().filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date))&&(t.status!=='observed'||_analystSeesObs(t,currentUser.id))).map(t=>tRowsAna(t)).join('')||'<div class="empty">Sin análisis en este período</div>'}
+    ${activeTasks().filter(t=>t.status!=='a-ingresar'&&(t.assignments||[]).some(a=>a.analyst===currentUser.id&&wd.includes(a.date)&&!a._removed)&&(t.status!=='observed'||_analystSeesObs(t,currentUser.id))).map(t=>tRowsAna(t)).join('')||'<div class="empty">Sin análisis en este período</div>'}
   </div>`:''}
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text2)">
     ${sup?'<span style="display:flex;align-items:center;gap:4px;background:var(--bg2);padding:2px 7px;border-radius:10px">✋ Arrastrá un análisis programado a otro día u analista</span>':''}
@@ -9236,7 +9447,7 @@ function renderCalMonth(sup){
       // Collect content for this day filtered by selected analyst
       const dayTasks=activeTasks().filter(function(t){
         return(t.assignments||[]).some(function(a){
-          return a.date===dateStr&&rows.some(function(r){return r.id===a.analyst;});
+          return !a._removed&&a.date===dateStr&&rows.some(function(r){return r.id===a.analyst;});
         });
       });
       const dayMgmt=monthMgmt.filter(function(o){
@@ -9272,8 +9483,8 @@ function renderCalMonth(sup){
       // Analysis task chips
       // Analysis task chips — TODOS sin límite
       dayTasks.forEach(function(t){
-        const analystOnTask=(t.assignments||[]).filter(function(a){return rows.some(function(r){return r.id===a.analyst;})&&a.date===dateStr;});
-        const chip=rows.find(function(r){return(t.assignments||[]).some(function(a){return a.analyst===r.id&&a.date===dateStr;});});
+        const analystOnTask=(t.assignments||[]).filter(function(a){return !a._removed&&rows.some(function(r){return r.id===a.analyst;})&&a.date===dateStr;});
+        const chip=rows.find(function(r){return(t.assignments||[]).some(function(a){return !a._removed&&a.analyst===r.id&&a.date===dateStr;});});
         const chipBg=chip?chip.chipBg:'#dbeafe';
         const chipTxt=chip?chip.chipTxt:'#1e3a8a';
         const anaAvatars=analystOnTask.map(function(a){const au=getU(a.analyst);return'<span class="av '+au.av+'" style="width:13px;height:13px;font-size:6px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;flex-shrink:0">'+escH(au.avInit)+'</span>';}).join('');
@@ -9398,14 +9609,27 @@ function calDrop(ev,newAnalystId,newDate){
   var destUser=getU(newAnalystId);
   if(!destUser){alert('Analista destino no encontrado.');return;}
   if(destUser.role!=='analyst'&&destUser.role!=='reviewer'){alert('Solo se pueden asignar análisis a usuarios que realizan análisis (analista o revisor).');return;}
-  // Mover asignación — evitando duplicados si la celda destino ya tiene esta tarea
+  // Mover asignación: TOMBSTONE en el origen + entrada nueva en el destino (misma
+  // semántica que _applyReplanDate). Editar analista/fecha in-place dejaba la celda
+  // de origen sin marca → un dispositivo desactualizado la resucitaba al mergear y
+  // la tarea aparecía en el día viejo Y en el nuevo (planificación mezclada).
   var dupIdx=assigns.findIndex(function(a,i){return i!==idx&&a.analyst===newAnalystId&&a.date===newDate&&!a._removed;});
   var newAssigns=assigns.slice();
+  var _nowTs=Date.now();
+  var _src=newAssigns[idx];
+  // Tombstone mínimo: las horas/sesiones viajan con la asignación al destino, no
+  // quedan duplicadas en la marca del día de origen.
+  var _tomb={analyst:_src.analyst,date:_src.date||'',_removed:true,_removedTs:_nowTs,_removedBy:currentUser?currentUser.id:'',_removeReason:'dragdrop',_ts:_nowTs};
   if(dupIdx>=0){
-    // La celda destino ya tiene una asignación activa de esta tarea: quitar la de origen (no duplicar)
-    newAssigns.splice(idx,1);
+    // La celda destino ya tiene una asignación activa de esta tarea: solo retirar la de origen (no duplicar)
+    newAssigns[idx]=_tomb;
   } else {
-    newAssigns[idx]=Object.assign({},newAssigns[idx],{analyst:newAnalystId,date:newDate});
+    var _dest=Object.assign({},_src,{analyst:newAnalystId,date:newDate,_ts:_nowTs});
+    delete _dest._removed;delete _dest._removedTs;delete _dest._removedBy;delete _dest._removeReason;
+    newAssigns[idx]=_tomb;
+    // Si el destino tenía un tombstone previo de esta tarea, reemplazarlo (reactivación)
+    var _prevTombIdx=newAssigns.findIndex(function(a,i){return i!==idx&&a.analyst===newAnalystId&&a.date===newDate&&a._removed;});
+    if(_prevTombIdx>=0)newAssigns[_prevTombIdx]=_dest;else newAssigns.push(_dest);
   }
   t.assignments=newAssigns;
   t._ts=Date.now();
@@ -10953,7 +11177,8 @@ async function adminClearAllILR(){
       });
       if(!r.ok){errors.push(pl.name||pl.id);continue;}
       var gist=await r.json();
-      var content=await _gistFileContent(gist,GIST_FILE_STATE);
+      var _plFile=_gistStateFileOf(gist);
+      var content=await _gistFileContent(gist,_plFile);
       if(!content){errors.push(pl.name||pl.id);continue;}
       var pdata=JSON.parse(content);
       var changed=false;
@@ -10979,7 +11204,7 @@ async function adminClearAllILR(){
         var patch=await fetch(GIST_API+'/'+pl.gistId,{
           method:'PATCH',
           headers:{'Authorization':'Bearer '+pl.token,'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},
-          body:JSON.stringify({files:{[GIST_FILE_STATE]:{content:JSON.stringify(pdata)}}})
+          body:JSON.stringify({files:{[_plFile]:{content:JSON.stringify(pdata)}}})
         });
         if(!patch.ok)errors.push(pl.name||pl.id);
         else _partnerLabCache[pl.id]=null;
@@ -11290,7 +11515,7 @@ function getTimeVal(id){
 
 function renderTimeLogModal(){
   const t=tasks.find(x=>x.id===timeLogTaskId);if(!t)return'';
-  const ma=(t.assignments||[]).find(a=>a.analyst===currentUser.id);if(!ma)return'';
+  const ma=(t.assignments||[]).find(a=>a.analyst===currentUser.id&&!a._removed);if(!ma)return'';
   if(!ma.timeLog)ma.timeLog=[];
   const todayStr=today();
   const existEntry=ma.timeLog.find(e=>e.date===todayStr);
@@ -11337,7 +11562,7 @@ function renderTimeLogModal(){
 
 function saveTimeEntry(){
   const t=tasks.find(x=>x.id===timeLogTaskId);if(!t)return;
-  const ma=(t.assignments||[]).find(a=>a.analyst===currentUser.id);if(!ma)return;
+  const ma=(t.assignments||[]).find(a=>a.analyst===currentUser.id&&!a._removed);if(!ma)return;
   if(!ma.timeLog)ma.timeLog=[];
   const start=getTimeVal('tl-start');
   const end=getTimeVal('tl-end');
@@ -11366,7 +11591,7 @@ function saveTimeEntry(){
 function deleteTimeEntry(taskId,dateStr){
   if(!confirm('¿Eliminar esta entrada de tiempo? Esta acción no se puede deshacer.'))return;
   const t=tasks.find(x=>x.id===taskId);if(!t)return;
-  const ma=(t.assignments||[]).find(a=>a.analyst===currentUser.id);if(!ma||!ma.timeLog)return;
+  const ma=(t.assignments||[]).find(a=>a.analyst===currentUser.id&&!a._removed);if(!ma||!ma.timeLog)return;
   auditLog('DELETE','TASK',taskId,{
     field:'timeLog',description:'Eliminación de entrada de tiempo del '+dateStr+' — '+t.producto+' '+t.lote
   },'');
@@ -11438,7 +11663,7 @@ function renderTaskModal(){
     multiAssigns=(t.assignments||[]).filter(function(a){return !a._removed;}).map(function(a,i){return{_key:a.analyst+'_'+i,analyst:a.analyst,date:a.date||'',realHours:a.realHours||0};});
     selectedAnalysts=[...new Set(multiAssigns.map(function(r){return r.analyst;}).filter(Boolean))];
     analystDates={};
-    (t.assignments||[]).forEach(function(a){if(a.analyst){analystDates[a.analyst]=a.date;}});
+    (t.assignments||[]).forEach(function(a){if(a.analyst&&!a._removed){analystDates[a.analyst]=a.date;}});
     // Pre-carga desde una solicitud (replan / planificación): asegurar al analista solicitante
     // seleccionado y su fecha en el campo "Fecha por analista". La fecha elegida por el supervisor
     // se conserva en _reqEditPrefill.supDate para sobrevivir re-renders mientras el modal está abierto.
@@ -11745,7 +11970,7 @@ function renderDateAssigns(){
     // Filas de fecha por cada d\u00eda asignado a este analista
     rows.forEach(function(row,localIdx){
       var existAss=editT?(editT.assignments||[]).find(function(a){
-        return a.analyst===row.analyst&&(a.date===row.date||!row.date);
+        return !a._removed&&a.analyst===row.analyst&&(a.date===row.date||!row.date);
       }):null;
       var tl=existAss&&existAss.timeLog?existAss.timeLog:[];
       var realH=tl.reduce(function(s,e){return s+(e.hours||0);},0)||(existAss&&existAss.realHours||0);
@@ -12088,7 +12313,7 @@ function confirmImport(){
     showImportModal=false;
     // Check for due date issues on imported tasks
     var lateImports=newTasks.filter(function(t){
-      return t.due&&(t.assignments||[]).some(function(a){return a.date&&a.date>=t.due;});
+      return t.due&&(t.assignments||[]).some(function(a){return !a._removed&&a.date&&a.date>=t.due;});
     });
     if(lateImports.length>0){
       alert('⚠ AVISO: '+lateImports.length+' análisis importados tienen fecha de análisis igual o posterior a la fecha límite de aprobación. Revisar: '+lateImports.map(function(t){return t.producto+' '+t.lote;}).join(', '));
@@ -12155,7 +12380,7 @@ function doExportXLSX(){
   const rows=tasks.map(t=>{
     const asigs=(t.assignments||[]).filter(a=>!a._removed).map(a=>getU(a.analyst).name).join(', ');
     const fechas=(t.assignments||[]).filter(a=>!a._removed).map(a=>getU(a.analyst).name.split(' ')[0]+': '+fmtDF(a.date)).join(' | ');
-    const realH=(t.assignments||[]).reduce(function(s,a){return s+(a.realHours||0);},0);
+    const realH=(t.assignments||[]).filter(function(a){return !a._removed;}).reduce(function(s,a){return s+(a.realHours||0);},0);
     return{
       'Producto':t.producto,
       'Lote':t.lote,
@@ -12632,7 +12857,7 @@ function markDone(id,assignDate){
         var myA=_assignDate
           ?(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed&&!a._completedBySup&&a.date===_assignDate;})
           :(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed&&!a._completedBySup;});
-        if(!myA&&(t.assignments||[]).some(function(a){return a.analyst===currentUser.id&&a._completedBySup;})){
+        if(!myA&&(t.assignments||[]).some(function(a){return !a._removed&&a.analyst===currentUser.id&&a._completedBySup;})){
           alert('Este análisis fue completado por el supervisor. Aguardá la confirmación.');return;
         }
         if(myA){
@@ -13026,8 +13251,8 @@ document.body.appendChild(obsDiv);
     t.status='observed';
     t.observedBy=currentUser.id;
     t.observedTs=Date.now();
-    // Notify: if specific analyst selected, only them; else all
-    const toNotify=selAnalyst?[selAnalyst]:[...new Set((t.assignments||[]).map(function(a){return a.analyst;}))];
+    // Notify: if specific analyst selected, only them; else all (solo asignaciones activas)
+    const toNotify=selAnalyst?[selAnalyst]:[...new Set((t.assignments||[]).filter(function(a){return !a._removed;}).map(function(a){return a.analyst;}))];
     toNotify.forEach(function(analystId){
       if(!Array.isArray(replanNotifs))replanNotifs=[];
       replanNotifs.push({id:newNotifId(),type:'observation',taskId:tid,analystId:analystId,forUserId:analystId,
@@ -13048,10 +13273,10 @@ function confirmAssignment(taskId, analystId, assignDate){
   if(!t)return;
   // Use assignDate to target the specific assignment when analyst has multiple dates
   var a=(t.assignments||[]).find(function(x){
-    return x.analyst===analystId&&(!assignDate||x.date===assignDate);
+    return !x._removed&&x.analyst===analystId&&(!assignDate||x.date===assignDate);
   });
   // Fallback: if not found by date, try first match (backwards compat)
-  if(!a)a=(t.assignments||[]).find(function(x){return x.analyst===analystId;});
+  if(!a)a=(t.assignments||[]).find(function(x){return !x._removed&&x.analyst===analystId;});
   if(!a)return;
   // Mark this assignment as confirmed
   a._pendingConfirm=false;
@@ -13431,8 +13656,8 @@ function markProg(id,assignDate){
     var todayDate=new Date(today()+'T12:00:00');
     // If a specific assignment date is provided, only check that one
     var checkAssigns=assignDate
-      ?(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&a.date===assignDate;})
-      :(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id;});
+      ?(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&a.date===assignDate&&!a._removed;})
+      :(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
     if(checkAssigns.length>0){
       // Ventana permitida: 3 días hacia atrás hasta 1 día adelante
       var allOutOfWindow=checkAssigns.every(function(ma){
@@ -13447,8 +13672,8 @@ function markProg(id,assignDate){
   }
   // Mark the specific assignment as started (per-assignment independent tracking)
   var targetAssign=assignDate
-    ?(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&a.date===assignDate;})
-    :(t.assignments||[]).find(function(a){return a.analyst===currentUser.id;});
+    ?(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&a.date===assignDate&&!a._removed;})
+    :(t.assignments||[]).find(function(a){return a.analyst===currentUser.id&&!a._removed;});
   if(targetAssign)targetAssign._started=true;
   // Only advance task status if not already running/further along
   var prevStatus=t.status;
@@ -13748,7 +13973,7 @@ function submitReplan(isSup){
     replanNotifs.push({
       id:newNotifId(),type:'replan',taskId:replanTaskId,analystId:replanAnalystId,
       forUserId:_replanSup?_replanSup.id:'',
-      oldDate:(t.assignments||[]).find(a=>a.analyst===replanAnalystId)?.date||t.due,
+      oldDate:(t.assignments||[]).find(a=>a.analyst===replanAnalystId&&!a._removed)?.date||t.due,
       newDate,reason,requestedBy:currentUser.id,status:'pending',
       ts:Date.now()
     });
@@ -14953,14 +15178,16 @@ function saveTask(){
     ?multiAssigns.map(function(row){
         var d=row.date||due;
         var existing=_editForSave?((_editForSave.assignments||[]).find(function(a){
-          return a.analyst===row.analyst&&a.date===d&&!_usedKeys[row.analyst+'|'+a.date];
+          // Solo asignaciones ACTIVAS: heredar de un tombstone re-agregaría datos
+          // (horas/sesiones) de un día que el supervisor había quitado.
+          return !a._removed&&a.analyst===row.analyst&&a.date===d&&!_usedKeys[row.analyst+'|'+a.date];
         })):null;
         if(existing)_usedKeys[row.analyst+'|'+existing.date]=true;
         return Object.assign({},existing||{},{analyst:row.analyst,date:d,_formRealHours:row.realHours||0});
       })
     :selectedAnalysts.map(function(id){
         var editT=_editForSave;
-        var existing=editT?(editT.assignments||[]).find(function(a){return a.analyst===id;}):null;
+        var existing=editT?(editT.assignments||[]).find(function(a){return !a._removed&&a.analyst===id;}):null;
         return Object.assign({},existing||{},{analyst:id,date:analystDates[id]||due});
       });
   // Auto-derive status; analyst is optional
@@ -15026,7 +15253,8 @@ function saveTask(){
       var _supHoursChanged=false;
       const mergedAssignments=assignments.map(function(newA){
         const oldA=(t.assignments||[]).find(function(a){
-          return a.analyst===newA.analyst&&a.date===newA.date;
+          // Solo activas: heredar de un tombstone re-agregaría horas de un día quitado
+          return !a._removed&&a.analyst===newA.analyst&&a.date===newA.date;
         });
         if(oldA){
           var merged=Object.assign({},oldA,{analyst:newA.analyst,date:newA.date});
@@ -15065,9 +15293,45 @@ function saveTask(){
         }
         return _newA;
       });
-      // Reasignaciones eliminadas por el supervisor: los datos se borran completamente.
-      // (Permite corregir errores donde el analista marcó horas que no realizó en la práctica.)
-      const finalAssignments=mergedAssignments;
+      // Días presentes en el formulario = ACTIVOS. Si la clave analista|fecha coincidía
+      // con un tombstone previo (re-agregar un día antes quitado), limpiar la marca
+      // heredada — sin esto la asignación re-agregada nacía oculta (_removed).
+      const finalAssignments=mergedAssignments.map(function(a){
+        if(!a._removed)return a;
+        var c=Object.assign({},a);
+        delete c._removed;delete c._removedTs;delete c._removedBy;delete c._removeReason;
+        c._ts=Date.now();
+        return c;
+      });
+      // Días NUEVOS o reactivados en esta edición: bumpear _ts de la asignación —
+      // sin esto, un tombstone remoto reciente del mismo día le ganaría el merge
+      // y el día re-agregado desaparecería.
+      var _prevActiveKeys={};
+      (t.assignments||[]).forEach(function(a){ if(!a._removed)_prevActiveKeys[a.analyst+'|'+(a.date||'')]=true; });
+      finalAssignments.forEach(function(a){
+        if(!_prevActiveKeys[a.analyst+'|'+(a.date||'')])a._ts=Date.now();
+      });
+      // Reasignaciones eliminadas en esta edición: quedan como TOMBSTONE (_removed),
+      // igual que en la replanificación. Borrarlas sin marca permitía que cualquier
+      // dispositivo desactualizado las RESUCITARA al mergear (la unión por
+      // analista|fecha re-agregaba el día quitado → planificación vieja mezclada).
+      // El tombstone es MÍNIMO: sin horas/sesiones/timeLog — al quitar el día, el
+      // supervisor borra también el registro de dedicación (decisión intencional;
+      // el merge propaga el borrado a todos los dispositivos). Oculto en todas las
+      // vistas y podado a los 60 días.
+      var _activeKeys={};
+      finalAssignments.forEach(function(a){_activeKeys[a.analyst+'|'+(a.date||'')]=true;});
+      (t.assignments||[]).forEach(function(a){
+        var k=a.analyst+'|'+(a.date||'');
+        if(_activeKeys[k])return;
+        if(a._removed){finalAssignments.push(a);return;} // conservar tombstones previos (replan/dragdrop)
+        finalAssignments.push({
+          analyst:a.analyst,date:a.date||'',
+          _removed:true,_removedTs:Date.now(),
+          _removedBy:currentUser?currentUser.id:'',
+          _removeReason:'edit',_ts:Date.now()
+        });
+      });
       // Aplicar solo campos de planificación
       t.producto=prod;t.lote=lote;t.created=created;t.due=due;
       t.priority=priority;t.notes=notes;t.tipo=tipo||'';
