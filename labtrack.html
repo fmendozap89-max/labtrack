@@ -507,6 +507,11 @@ let absenceTypesDef={
   absence:{label:'Falta',color:'#fdeee4',text:'#8a3c10'},
   training:{label:'Capacitación',color:'#e8eff8',text:'#1a4f8a'},
 };
+// Copias prístinas para reset al cambiar de laboratorio (applySnapshot solo
+// sobreescribe estos campos si vienen en el snapshot remoto — sin reset, los
+// valores personalizados del lab saliente contaminarían al entrante)
+const _DEFAULT_MGMT_CATEGORIES=JSON.parse(JSON.stringify(mgmtCategories));
+const _DEFAULT_ABSENCE_TYPES=JSON.parse(JSON.stringify(absenceTypesDef));
 
 // Derived (rebuilt after any USERS change)
 let ANALYSTS=[];   // solo analistas
@@ -774,18 +779,35 @@ function applySnapshot(json){
       var _changed=false;
       d.labRegistry.forEach(function(entry){
         if(!entry.gistId||!entry.id)return;
-        var existing=labProfiles.find(function(l){return l.id===entry.id;})
-                   ||labProfiles.find(function(l){return l.gistId===entry.gistId;});
+        var _canon=_canonLabId(entry.gistId);
+        // Registrar el alias del id histórico ANTES de mergear: permite remapear
+        // las referencias guardadas (solicitudes inter-lab) a la identidad canónica
+        if(entry.id!==_canon)_labIdAliases[entry.id]=_canon;
+        var existing=labProfiles.find(function(l){return l.gistId===entry.gistId;})
+                   ||labProfiles.find(function(l){return l.id===entry.id||l.id===_canon;});
         if(existing){
           if(entry.name&&entry.name!==existing.name){existing.name=entry.name;_changed=true;}
         } else if(GIST_CONFIG.token&&entry.gistId!==GIST_CONFIG.gistId){
-          // Auto-agregar lab nuevo descubierto en el registry usando el token ya configurado
-          labProfiles.push({id:entry.id,name:entry.name||entry.id,token:GIST_CONFIG.token,gistId:entry.gistId});
+          // Auto-agregar lab nuevo descubierto en el registry usando el token ya
+          // configurado — SIEMPRE con id canónico, nunca el efímero del registry
+          labProfiles.push({id:_canon,name:entry.name||_canon,token:GIST_CONFIG.token,gistId:entry.gistId});
           _changed=true;
         }
       });
       if(_changed)_saveLabProfiles();
+      _canonicalizeLabProfiles();
     }
+    // Remapeo de ids de laboratorio históricos → canónicos en referencias guardadas.
+    // Determinístico y SIN bump de _ts (igual que las normalizaciones de estado):
+    // todos los clientes con esta versión convergen al mismo resultado.
+    (interLabRequests||[]).forEach(function(r){
+      if(r.srcLabId)r.srcLabId=_remapLabId(r.srcLabId);
+      if(r.destLabId)r.destLabId=_remapLabId(r.destLabId);
+    });
+    (tasks||[]).forEach(function(t){
+      if(t._interLab&&t._interLab.fromLab&&t._interLab.fromLab.id)
+        t._interLab.fromLab.id=_remapLabId(t._interLab.fromLab.id);
+    });
     return true;
   }catch(e){return false;}
 }
@@ -820,7 +842,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se a
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026071101; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026071102; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -1886,6 +1908,7 @@ async function adminDiscoverLabs(){
       }
     });
     _saveLabProfiles();
+    _canonicalizeLabProfiles(); // perfiles preexistentes con id efímero → canónico
     var msg=added>0?'✓ '+added+' laboratorio'+(added!==1?'s':'')+'  nuevo'+(added!==1?'s':'')+' agregado'+(added!==1?'s':'')+'.'
       :'Sin laboratorios nuevos. Los '+labs.length+' labs encontrados ya están configurados.';
     alert(msg);
@@ -1913,6 +1936,54 @@ function _labStateKey(){return activeLabId?'lt9-state-'+activeLabId:'lt9-state';
 
 function _getActiveLab(){return labProfiles.find(function(l){return l.id===activeLabId;})||null;}
 
+// ── Identidad CANÓNICA de laboratorio ──
+// El id de un laboratorio se deriva de su gistId (estable y global). Los ids
+// generados con Date.now() eran distintos en cada dispositivo/reconfiguración:
+// una solicitud inter-lab enviada a "lab_X" desaparecía cuando el perfil del
+// destino se recreaba con otro id (incidente Glucosa/Planta B, 2026-07-11).
+function _canonLabId(gistId){return gistId?('lab_'+String(gistId).slice(0,8)):null;}
+var _labIdAliases={}; // id histórico → id canónico (para remapear referencias guardadas)
+function _remapLabId(id){
+  var hops=0;
+  while(id&&_labIdAliases[id]&&hops<5){id=_labIdAliases[id];hops++;}
+  return id;
+}
+// Normaliza todos los perfiles al id canónico: renombra ids efímeros, migra la
+// clave de estado local, actualiza activeLabId y deduplica perfiles del mismo gist.
+function _canonicalizeLabProfiles(){
+  var changed=false;
+  labProfiles.forEach(function(l){
+    if(!l.gistId)return; // sin gist todavía: conserva su id provisorio
+    var canon=_canonLabId(l.gistId);
+    if(l.id===canon)return;
+    _labIdAliases[l.id]=canon;
+    try{
+      var oldKey='lt9-state-'+l.id,newKey='lt9-state-'+canon;
+      var oldSt=localStorage.getItem(oldKey);
+      if(oldSt&&!localStorage.getItem(newKey))localStorage.setItem(newKey,oldSt);
+      if(oldSt)localStorage.removeItem(oldKey);
+    }catch(e){}
+    if(activeLabId===l.id){
+      activeLabId=canon;
+      try{localStorage.setItem('lt9-active-lab',canon);}catch(e){}
+    }
+    l.id=canon;changed=true;
+  });
+  // Dedup: dos perfiles del mismo gist (uno por descubrimiento y otro manual)
+  var _seenGist={};
+  var deduped=labProfiles.filter(function(l){
+    var key=l.gistId||('__'+l.id);
+    var keep=_seenGist[key];
+    if(!keep){_seenGist[key]=l;return true;}
+    if(!keep.token&&l.token)keep.token=l.token;
+    if((!keep.name||keep.name==='Laboratorio')&&l.name)keep.name=l.name;
+    changed=true;return false;
+  });
+  if(deduped.length!==labProfiles.length)labProfiles=deduped;
+  if(changed)_saveLabProfiles();
+  return changed;
+}
+
 function _saveLabProfiles(){
   try{localStorage.setItem('lt9-labs',JSON.stringify(labProfiles));}catch(e){}
   try{if(activeLabId)localStorage.setItem('lt9-active-lab',activeLabId);}catch(e){}
@@ -1925,8 +1996,9 @@ function _loadLabProfiles(){
   try{
     var _oldCfg=JSON.parse(localStorage.getItem('lt9-gist-config')||'null');
     if(_oldCfg&&_oldCfg.token&&labProfiles.length===0){
-      var _labId='lab_'+Date.now().toString(36);
-      labProfiles=[{id:_labId,name:'Planta C',token:_oldCfg.token,gistId:_oldCfg.gistId||''}];
+      // Id canónico si ya hay gistId; el nombre real llega por labName/labRegistry del gist
+      var _labId=_canonLabId(_oldCfg.gistId)||('lab_'+Date.now().toString(36));
+      labProfiles=[{id:_labId,name:'Laboratorio',token:_oldCfg.token,gistId:_oldCfg.gistId||''}];
       activeLabId=_labId;
       _saveLabProfiles();
       // Copiar estado existente al key por laboratorio
@@ -1934,6 +2006,7 @@ function _loadLabProfiles(){
       if(_oldState)localStorage.setItem('lt9-state-'+_labId,_oldState);
     }
   }catch(e){}
+  _canonicalizeLabProfiles(); // ids efímeros heredados → canónicos (migración única por dispositivo)
 }
 
 function loadSpConfig() {
@@ -1946,6 +2019,27 @@ function loadSpConfig() {
       if(c&&c.token)GIST_CONFIG={token:c.token,gistId:c.gistId||'',configured:true};
     }catch(e){}
   }
+}
+
+// Estado en memoria a CERO antes de bootear otro laboratorio. Sin esto, si el
+// boot remoto falla y el lab entrante no tiene estado local, lo que queda en
+// memoria es del lab SALIENTE — y un guardado posterior lo escribiría bajo la
+// clave (y eventualmente el gist) del lab equivocado.
+function _clearStateForLabSwitch(){
+  tasks=[];nextId=1;nextUid=1;nextNotifId=1;nextAbsId=1;nextMgmtId=1;
+  freeTasks=[];nextFreeTaskId=1;productSuggestions=[];nextSuggId=1;
+  USERS=[];passwords={};passwords_ts={};rebuildDerived();
+  replanNotifs=[];absences={};absences_ts={};
+  workdayConfig={weekdays:{1:true,2:true,3:true,4:true,5:true,0:false,6:false},extra:[],off:[],guideUrl:''};
+  mgmtTasks=[];analystSchedules={};scheduleRequests=[];nextSchedReqId=1;
+  mgmtCategories=JSON.parse(JSON.stringify(_DEFAULT_MGMT_CATEGORIES));
+  absenceTypesDef=JSON.parse(JSON.stringify(_DEFAULT_ABSENCE_TYPES));
+  customTipos=[];customTipos_ts=0;
+  if(typeof _rebuildSampleTypes==='function')_rebuildSampleTypes();
+  interLabRequests=[];externalLabs=[];_partnerLabCache={};
+  deletionsReg={users:{},freeTasks:{},mgmtTasks:{},externalLabs:{}};
+  opEpoch=0;operationalBase=null;minAppBuild=0;
+  window._archTasks=null;
 }
 
 // Cambiar al laboratorio seleccionado
@@ -1964,6 +2058,8 @@ async function switchLab(labId){
   _auditBuffer=[];
   auditTrail=[];
   _lastRemoteTs=0;
+  _dirtyLocal=false; // lo pendiente era del lab saliente (ya persistido en su lt9-state)
+  _clearStateForLabSwitch();
   activeLabId=labId;
   localStorage.setItem('lt9-active-lab',labId);
   var _lab=_getActiveLab();
@@ -1979,8 +2075,10 @@ function saveLabProfile(labId,name,token,gistId){
   var idx=labProfiles.findIndex(function(l){return l.id===labId;});
   var prof={id:labId,name:name||'Laboratorio',token:token,gistId:gistId};
   if(idx>=0)labProfiles[idx]=prof;else labProfiles.push(prof);
+  var wasActive=(labId===activeLabId);
   _saveLabProfiles();
-  if(labId===activeLabId){GIST_CONFIG={token:token,gistId:gistId,configured:!!token};_saveGistConfig();}
+  _canonicalizeLabProfiles(); // si se asignó gistId, el id pasa a ser el canónico
+  if(wasActive){GIST_CONFIG={token:token,gistId:gistId,configured:!!token};_saveGistConfig();}
 }
 
 // Agregar nuevo laboratorio (llamado desde Administración)
@@ -6378,11 +6476,13 @@ function loginSyncSave(){
     var gistCambio=gistId&&GIST_CONFIG.gistId&&gistId!==GIST_CONFIG.gistId;
     if(gistCambio){if(!confirm('Al cambiar el Gist ID se cargarán los datos de ese Gist y los datos locales actuales serán reemplazados.\n\nEl Gist anterior no se modifica.\n\n¿Continuar?'))return;}
     ownGistId=gistId;
-    if(!activeLabId){var _nid='lab_'+Date.now().toString(36);activeLabId=_nid;labProfiles.push({id:_nid,name:'Laboratorio',token:token,gistId:gistId});}
+    if(!activeLabId){var _nid=_canonLabId(gistId);activeLabId=_nid;labProfiles.push({id:_nid,name:'Laboratorio',token:token,gistId:gistId});}
     else{var _lab2=_getActiveLab();if(_lab2){_lab2.token=token;_lab2.gistId=gistId;}}
   }
   GIST_CONFIG={token:token,gistId:ownGistId,configured:true};
-  _saveLabProfiles();_saveGistConfig();
+  _saveLabProfiles();
+  _canonicalizeLabProfiles(); // el id activo queda derivado del gistId recién configurado
+  _saveGistConfig();
   _discoverState=null;_selectedDiscoverGistId=null;loginShowSync=false;
   gistBoot().then(function(){currentUser=null;selectedLoginUser=null;loginStep=1;loginError='';render();}).catch(function(e){console.error('loginSyncSave gistBoot:',e);render();});
 }
@@ -9954,12 +10054,24 @@ function _ilrStatusInfo(status){
   return map[status]||{label:status,cls:'pend',icon:'•'};
 }
 
-function _ilrLabName(labId){
-  var p=labProfiles.find(function(l){return l.id===labId;});
+function _ilrLabName(labId,fallbackName){
+  var id=_remapLabId(labId);
+  var p=labProfiles.find(function(l){return l.id===id;})
+      ||labProfiles.find(function(l){return l.gistId&&_canonLabId(l.gistId)===id;});
   if(p)return p.name;
-  var e=externalLabs.find(function(l){return l.id===labId;});
+  var e=externalLabs.find(function(l){return l.id===id||l.id===labId;});
   if(e)return e.name;
-  return labId||'—';
+  // Último recurso: el nombre estampado al crear la solicitud — nunca el id crudo
+  return fallbackName||labId||'—';
+}
+// ¿La solicitud está dirigida a ESTE laboratorio? El contrato es por gistId
+// (identidad estable); el id de perfil solo se acepta como compatibilidad.
+function _ilrIsForThisLab(r){
+  if(!r||r._deleted)return false;
+  if(r.destGistId&&GIST_CONFIG.gistId)return r.destGistId===GIST_CONFIG.gistId;
+  var d=_remapLabId(r.destLabId);
+  if(d===activeLabId)return true;
+  return !!GIST_CONFIG.gistId&&d===_canonLabId(GIST_CONFIG.gistId);
 }
 // ¿La solicitud va a un laboratorio externo (que no usa la app)?
 function _ilrIsExternal(req){
@@ -10011,7 +10123,7 @@ function renderSolicitudes(){
       var t2=r.taskId?tasks.find(function(x){return x.id===r.taskId;}):null;
       return (r.producto||'').toLowerCase().includes(_eq)
         ||(r.lote||'').toLowerCase().includes(_eq)
-        ||(_ilrLabName(r.destLabId)||'').toLowerCase().includes(_eq)
+        ||(_ilrLabName(r.destLabId,r.destLabName)||'').toLowerCase().includes(_eq)
         ||(r.analisis||'').toLowerCase().includes(_eq)
         ||(t2&&t2.producto?t2.producto.toLowerCase().includes(_eq):false);
     });
@@ -10037,7 +10149,7 @@ function renderSolicitudes(){
         var si=_ilrStatusInfo(req.status);
         var ext=_ilrIsExternal(req);
         var es=ext?_ilrExtStep(req):null;
-        var destName=_ilrLabName(req.destLabId);
+        var destName=_ilrLabName(req.destLabId,req.destLabName);
         var sentDate=req.ts?fmtDF(new Date(req.ts).toISOString().slice(0,10)):'—';
         var limitDate=req.dueDate?fmtDF(req.dueDate):'—';
         var assignedName=req.assignedToName||req.assignedToId||(ext?'Lab externo':'—');
@@ -10117,7 +10229,7 @@ async function _loadRecibidas(partnerLabs,containerId,isSup,isRev,uid){
     var pl=partnerLabs[i];
     var pdata=await fetchPartnerGistData(pl);
     if(!pdata)continue;
-    var preqs=(pdata.interLabRequests||[]).filter(function(r){return r.destLabId===activeLabId&&!r._deleted;});
+    var preqs=(pdata.interLabRequests||[]).filter(_ilrIsForThisLab);
     preqs.forEach(function(r){r._fromLab=pl;r._fromLabName=pl.name;});
     allReceived=allReceived.concat(preqs);
   }
@@ -10248,7 +10360,7 @@ async function _refreshIncomingILR(){
     var pdata=await fetchPartnerGistData(partners[i]);
     if(!pdata)continue;
     count+=(pdata.interLabRequests||[]).filter(function(r){
-      return r.destLabId===activeLabId&&!r._deleted&&(r.status==='pendiente'||r.status==='en_proceso');
+      return _ilrIsForThisLab(r)&&(r.status==='pendiente'||r.status==='en_proceso');
     }).length;
   }
   if(window._incomingILRCount!==count){
@@ -10410,7 +10522,7 @@ async function _showILRDetails(reqId){
   var req=interLabRequests.find(function(r){return r.id===reqId;});
   if(!req)return;
   var si=_ilrStatusInfo(req.status);
-  var destName=_ilrLabName(req.destLabId);
+  var destName=_ilrLabName(req.destLabId,req.destLabName);
   var mid='ilrd-'+Date.now();
   var canConfirm=req.status==='docs_enviados'&&(isSupRole()||isReviewerRole());
   var mhtml='<div id="'+mid+'" class="modal-overlay" style="z-index:1010" onclick="if(event.target===this)document.getElementById(\''+mid+'\').remove()">'
@@ -10457,7 +10569,9 @@ async function _showILRDetails(reqId){
   var detEl=document.getElementById(mid+'-det');
   if(!detEl)return;
 
-  var destLab=labProfiles.find(function(l){return l.id===req.destLabId;});
+  var destLab=(req.destGistId?labProfiles.find(function(l){return l.gistId===req.destGistId;}):null)
+            ||labProfiles.find(function(l){return l.id===_remapLabId(req.destLabId);})
+            ||labProfiles.find(function(l){return l.gistId&&_canonLabId(l.gistId)===_remapLabId(req.destLabId);});
   if(!destLab||!req.localTaskId){
     detEl.innerHTML='<div style="font-size:12px;color:var(--text3);text-align:center;padding:8px 0">'
       +(req.status==='pendiente'?'La solicitud aún no fue recibida por el laboratorio destino.'
@@ -10535,7 +10649,7 @@ function _openExtTrackModal(reqId){
   var req=interLabRequests.find(function(r){return r.id===reqId;});
   if(!req)return;
   var _inp='width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);box-sizing:border-box;margin-top:2px;font-size:12px';
-  var destName=_ilrLabName(req.destLabId);
+  var destName=_ilrLabName(req.destLabId,req.destLabName);
   var prod=req.producto||((req.taskId&&(tasks.find(function(x){return x.id===req.taskId;})||{}).producto))||'';
   var div=document.createElement('div');
   div.id='ext-track-modal';
@@ -10579,7 +10693,7 @@ function _saveExtTrack(reqId){
   req.ts=req.ts||Date.now();
   req._ts=Date.now();
   var m=document.getElementById('ext-track-modal');if(m)m.remove();
-  auditLog('EDIT','ILR',req.id,{description:'Seguimiento lab externo: '+(req.producto||'')+' '+(req.lote||'')+' → '+_ilrLabName(req.destLabId)},'');
+  auditLog('EDIT','ILR',req.id,{description:'Seguimiento lab externo: '+(req.producto||'')+' '+(req.lote||'')+' → '+_ilrLabName(req.destLabId,req.destLabName)},'');
   saveLS();render();
   saveNow().catch(function(e){console.error('_saveExtTrack:',e);});
 }
@@ -10624,7 +10738,9 @@ function openSolicitudModal(taskId){
     if(!accessibleTasks.length){alert('No hay tareas activas disponibles para solicitar análisis.');return;}
   }
 
-  var partnerOpts=labProfiles.filter(function(l){return l.id!==activeLabId;}).map(function(l){return'<option value="lab:'+escH(l.id)+'">'+escH(l.name)+' (interno)</option>';}).join('');
+  // Solo labs con gistId+token: sin ellos la solicitud sería inentregable (el
+  // receptor matchea por gistId y la notificación necesita escribir en su gist)
+  var partnerOpts=labProfiles.filter(function(l){return l.id!==activeLabId&&l.gistId&&l.token;}).map(function(l){return'<option value="lab:'+escH(l.id)+'">'+escH(l.name)+' (interno)</option>';}).join('');
   var extOpts=externalLabs.map(function(l){return'<option value="ext:'+escH(l.id)+'">'+escH(l.name)+'</option>';}).join('');
   var destOpts='<option value="">Seleccionar destino…</option>'+partnerOpts+extOpts;
 
@@ -10697,11 +10813,12 @@ async function _saveSolicitud(taskId){
   if(!destVal||destVal===''){alert('Selecciona un destino.');return;}
   if(!analisis){alert('Describe los análisis solicitados.');return;}
 
-  var destLabId,destName,isInternal=false;
+  var destLabId,destName,destGistId=null,isInternal=false;
   if(destVal.startsWith('lab:')){
     destLabId=destVal.slice(4);
     var destLab=labProfiles.find(function(l){return l.id===destLabId;});
     destName=destLab?destLab.name:destLabId;
+    destGistId=destLab?(destLab.gistId||null):null;
     isInternal=true;
   } else {
     destLabId=destVal.slice(4);
@@ -10715,7 +10832,9 @@ async function _saveSolicitud(taskId){
     producto:producto,
     lote:lote,
     srcLabId:activeLabId,
+    srcGistId:GIST_CONFIG.gistId||null,
     destLabId:destLabId,
+    destGistId:destGistId, // contrato estable: el receptor matchea por su propio gistId
     destLabName:destName,
     analisis:analisis,
     dueDate:due||null,
@@ -11289,7 +11408,7 @@ async function adminClearAllILR(){
       (pdata.tasks||[]).forEach(function(t){
         if(t._deleted||!t._interLab)return;
         var il=t._interLab;
-        var mine=(il.fromLab&&il.fromLab.id===activeLabId)||myReqIds.indexOf(il.sourceId)>=0;
+        var mine=(il.fromLab&&(il.fromLab.id===activeLabId||(il.fromLab.gistId&&il.fromLab.gistId===GIST_CONFIG.gistId)))||myReqIds.indexOf(il.sourceId)>=0;
         if(mine){t._deleted=true;t._ts=Date.now();changed=true;cleaned++;}
       });
       // Notificaciones ILR generadas por solicitudes de este lab. Se marcan
@@ -11299,7 +11418,7 @@ async function adminClearAllILR(){
         if(!_isILRNotif(nf)||nf.status!=='pending')return;
         var mine=myReqIds.indexOf(nf.reqId)>=0
           ||(nf.srcLabName&&nf.srcLabName===myLabName)
-          ||(nf.forLabId&&nf.forLabId===pl.id&&myReqIds.length===0); // huérfanas: el emisor ya no tiene solicitudes
+          ||(nf.forLabId&&_remapLabId(nf.forLabId)===pl.id&&myReqIds.length===0); // huérfanas: el emisor ya no tiene solicitudes
         if(mine){nf.status='resolved';nf.resolvedTs=Date.now();nf.resolvedByName='Limpieza inter-lab';nf.ts=Date.now();changed=true;notifsCleaned++;}
       });
       if(changed){
@@ -11734,7 +11853,7 @@ function renderTaskModal(){
     }else if(_taskILRs.length){
       var _ri=_taskILRs[_taskILRs.length-1];
       var _si=_ilrStatusInfo(_ri.status);
-      var _destName=_ilrLabName(_ri.destLabId);
+      var _destName=_ilrLabName(_ri.destLabId,_ri.destLabName);
       _ilrBlock='<div style="border-top:1px solid var(--border);margin-top:12px;padding-top:10px;background:#eff6ff;border-radius:var(--radius);padding:10px 12px;margin-top:12px;font-size:12px">'
         +'<div style="font-weight:700;color:#1d4ed8;margin-bottom:6px">🔗 Solicitud inter-laboratorio</div>'
         +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">'
@@ -11835,7 +11954,7 @@ function renderTaskModal(){
       +_editILRs.map(function(r){
         var si=_ilrStatusInfo(r.status);
         return'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:3px">'
-          +'<span style="color:var(--text2);font-size:11px">→ <b>'+escH(_ilrLabName(r.destLabId))+'</b></span>'
+          +'<span style="color:var(--text2);font-size:11px">→ <b>'+escH(_ilrLabName(r.destLabId,r.destLabName))+'</b></span>'
           +'<span class="pill '+si.cls+'" style="font-size:9px;padding:1px 5px">'+si.icon+' '+escH(si.label)+'</span>'
           +(r.dueDate?'<span style="font-size:10px;font-family:var(--mono);color:var(--text3)">'+fmtDF(r.dueDate)+'</span>':'')
           +'</div>';
