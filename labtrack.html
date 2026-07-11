@@ -820,7 +820,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se a
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026070903; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026071101; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -922,8 +922,25 @@ async function _gistFetch(method, path, body) {
       const bodyTxt = t.toLowerCase();
       if (bodyTxt.includes('rate limit') || bodyTxt.includes('rate_limit') || r.status === 429) {
         err._isRateLimit = true;
-        const resetHdr = r.headers.get('x-ratelimit-reset');
-        err._rateLimitReset = resetHdr ? parseInt(resetHdr) * 1000 : (Date.now() + 60 * 60 * 1000);
+        // Distinguir límite SECUNDARIO (anti-ráfaga) del PRIMARIO (cuota horaria).
+        // El secundario aparece al disparar varias llamadas al mismo gist en pocos
+        // segundos: la cuota primaria sigue casi intacta (remaining alto) y se libera
+        // en ~1 min. El header 'x-ratelimit-reset' apunta al reset de la cuota HORARIA
+        // (hasta ~1 h), así que usarlo para esperar sobre-pausa la app decenas de minutos.
+        // Prioridad: 'retry-after' (autoritativo p/ secundario) > secundario (~1 min) > reset horario.
+        const retryAfter = r.headers.get('retry-after');
+        const remaining  = parseInt(r.headers.get('x-ratelimit-remaining') || '', 10);
+        const resetHdr   = r.headers.get('x-ratelimit-reset');
+        const isSecondary = bodyTxt.includes('secondary rate limit') || bodyTxt.includes('abuse')
+                            || (!isNaN(remaining) && remaining > 0);
+        if (retryAfter != null && retryAfter !== '') {
+          var _ra = parseInt(retryAfter, 10); // GitHub lo envía en segundos
+          err._rateLimitReset = Date.now() + (isNaN(_ra) ? 60000 : Math.max(_ra, 1) * 1000);
+        } else if (isSecondary) {
+          err._rateLimitReset = Date.now() + 60000; // ráfaga: reintentar en ~1 min
+        } else {
+          err._rateLimitReset = resetHdr ? parseInt(resetHdr) * 1000 : (Date.now() + 60 * 60 * 1000);
+        }
       }
     }
     throw err;
