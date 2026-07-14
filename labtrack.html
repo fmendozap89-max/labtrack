@@ -808,6 +808,32 @@ function applySnapshot(json){
       if(t._interLab&&t._interLab.fromLab&&t._interLab.fromLab.id)
         t._interLab.fromLab.id=_remapLabId(t._interLab.fromLab.id);
     });
+    // Notificaciones ILR que quedaron activas tras cerrar su solicitud (bug
+    // histórico: nada las resolvía al confirmar recepción). Normalización
+    // determinística: deriva del estado de la solicitud/tarea local y usa sus
+    // timestamps — converge en todos los clientes; el merge de replanNotifs
+    // prioriza resolved sobre pending, así que no reviven.
+    (replanNotifs||[]).forEach(function(nf){
+      if(nf.status!=='pending'||!_isILRNotif(nf)||!nf.reqId)return;
+      if(nf.type==='ilr_docs_sent'){
+        // Vive en el lab EMISOR: la solicitud referida es propia
+        var _rq=(interLabRequests||[]).find(function(r){return r.id===nf.reqId;});
+        if(_rq&&(_rq.status==='completado'||_rq._deleted)){
+          nf.status='resolved';nf.resolvedTs=_rq.completedTs||_rq._ts||nf.ts;
+          nf.resolvedHow='auto_request_closed';
+          if(!nf.resolvedByName)nf.resolvedByName='Recepción confirmada';
+        }
+      } else {
+        // interlab_request vive en el lab RECEPTOR: si ya existe la tarea IL
+        // local, la solicitud ya fue recibida y la notificación cumplió su función
+        var _tk=(tasks||[]).find(function(t){return t._interLab&&t._interLab.sourceId===nf.reqId&&!t._deleted;});
+        if(_tk){
+          nf.status='resolved';nf.resolvedTs=_tk._ts||nf.ts;
+          nf.resolvedHow='auto_request_received';
+          if(!nf.resolvedByName)nf.resolvedByName='Solicitud recibida';
+        }
+      }
+    });
     return true;
   }catch(e){return false;}
 }
@@ -842,7 +868,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se a
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026071102; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026071103; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -10408,6 +10434,9 @@ async function _rcvMarkReceived(reqId, fromLabJson){
     tasks.splice(tasks.indexOf(newTask),1);nextId--;
     alert('Error al actualizar en el laboratorio de origen. La tarea no fue creada.');return;
   }
+  // La notificación "solicitud inter-lab recibida" ya cumplió su función,
+  // también cuando se recibe desde la vista (no solo desde la campana)
+  _resolveILRNotifs(reqId,'Solicitud recibida');
   saveLS();
   render();
   setView('tasks');
@@ -10622,6 +10651,19 @@ async function _showILRDetails(reqId){
   if(detEl.isConnected)detEl.innerHTML=dhtml;
 }
 
+// Resuelve las notificaciones locales ligadas a una solicitud inter-lab cerrada
+// (p.ej. "Documentos inter-lab recibidos"): sin esto quedaban en Activas para
+// siempre — el botón Leída solo marca readBy, nunca cambia el status.
+function _resolveILRNotifs(reqId,how){
+  replanNotifs.forEach(function(nf){
+    if(_isILRNotif(nf)&&nf.status==='pending'&&nf.reqId===reqId){
+      nf.status='resolved';nf.resolvedTs=Date.now();
+      nf.resolvedByName=(currentUser&&currentUser.name)||how||'Sistema';
+      if(how)nf.resolvedHow=how;
+    }
+  });
+}
+
 function _markILRCompleto(reqId){
   var req=interLabRequests.find(function(r){return r.id===reqId;});
   if(!req)return;
@@ -10629,6 +10671,7 @@ function _markILRCompleto(reqId){
   req.completedTs=Date.now();
   req.completedBy=currentUser.id;
   req._ts=Date.now();
+  _resolveILRNotifs(reqId,'Recepción confirmada');
   saveLS();saveNow().catch(function(e){console.error('_markILRCompleto:',e);});
   render();
 }
@@ -10639,6 +10682,7 @@ function _deleteILR(reqId){
   // solicitud si desaparece del array sin marca. mergeSnapshot la filtra.
   var req=interLabRequests.find(function(r){return r.id===reqId;});
   if(req){req._deleted=true;req._ts=Date.now();}
+  _resolveILRNotifs(reqId,'Solicitud eliminada');
   saveLS();saveNow().catch(function(e){console.error('_deleteILR:',e);});
   render();
 }
