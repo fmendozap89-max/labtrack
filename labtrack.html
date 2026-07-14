@@ -868,7 +868,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se a
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026071103; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026071301; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -2842,18 +2842,20 @@ function isWorkdayFor(analystId, dateStr){
     const ov=stored.overrides[dateStr];
     if(ov.status==='approved'||ov.status==='assigned') return true;
   }
+  // Date-specific extra (e.g. "Activar día") is an explicit exception that must
+  // win over the recurring weekly pattern (global or per-analyst). Grant-only:
+  // if it matches, force workday; otherwise fall through to the normal rules.
+  const extra=workdayConfig.extra.find(e=>(e.date||e)===dateStr);
+  if(extra){
+    const analysts=extra.analysts||[];
+    if(analysts==='all'||analysts.includes(analystId)) return true;
+  }
   // Check per-analyst workday config (stored as analystSchedules[id].workdays)
   if(stored&&stored.workdays){
     const day=new Date(dateStr+'T12:00:00').getDay();
     // workdays is an object like {1:true,2:true,...} same as global
     if(stored.workdays[day]===true) return true;
     if(stored.workdays[day]===false) return false;
-  }
-  // Check if there's a per-analyst extra for this date
-  const extra=workdayConfig.extra.find(e=>(e.date||e)===dateStr);
-  if(extra){
-    const analysts=extra.analysts||[];
-    return analysts==='all'||analysts.includes(analystId);
   }
   const day=new Date(dateStr+'T12:00:00').getDay();
   return workdayConfig.weekdays[day]===true;
