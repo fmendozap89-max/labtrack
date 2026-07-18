@@ -868,7 +868,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se a
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026071802; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026071803; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -2874,7 +2874,7 @@ function _notifyIncompletePortions(t){
     +'</div>'
     +rows
     +'<div class="modal-btns" style="margin-top:10px">'
-    +'<button class="btn" onclick="document.getElementById(\'incomplete-portions-modal\').remove()">Dejar pendiente</button>'
+    +'<button class="btn" data-esc onclick="document.getElementById(\'incomplete-portions-modal\').remove()">Dejar pendiente</button>'
     +'</div></div></div>';
   document.body.appendChild(div);
 }
@@ -7910,6 +7910,77 @@ function requireSignature(action, label, callback) {
     if(e.key==='Enter') document.getElementById('sig-confirm').click();
   };
 }
+
+// ── TECLADO GLOBAL DE VENTANAS: Escape retrocede/cancela · Enter confirma ──
+// Cubre los modales estándar (.modal-overlay), los overlays fijos custom pegados a
+// <body> (firma, completar-por-analista, historial, restauración) y el panel de
+// notificaciones. Reglas:
+//  · Escape clickea el botón de salida del modal SUPERIOR (data-esc, «Cancelar»,
+//    «Cerrar» o «✕») — mismo efecto que clickearlo a mano. Sin botón de salida
+//    reconocible (p. ej. overlay de versión desactualizada) no hace nada.
+//  · Enter clickea el botón primario SOLO si es inequívoco: un único .pri, si no
+//    un único .suc, si no el confirmador conocido por id. Nunca botones .dan.
+//  · Enter no interfiere con textarea (salto de línea), select (elección abierta),
+//    botones/links enfocados ni inputs con manejo propio de Enter (login, firma,
+//    renombres inline): esos conservan su comportamiento.
+function _kbTopOverlay(){
+  var cands=Array.prototype.slice.call(document.querySelectorAll('.modal-overlay'));
+  // Overlays fijos custom: hijos directos de <body>, pantalla completa y con botones
+  Array.prototype.forEach.call(document.body.children,function(el){
+    if(el.tagName!=='DIV'||cands.indexOf(el)>=0)return;
+    if(el.querySelector&&el.querySelector('.modal-overlay'))return; // wrapper de un modal estándar ya contado
+    // OJO: leer el.style (no getAttribute) — el navegador re-serializa cssText con espacios
+    var cs=el.style;
+    if(cs.position!=='fixed')return;
+    var _z=function(v){return v==='0'||v==='0px';};
+    if(!(_z(cs.inset)||(_z(cs.top)&&_z(cs.left))))return; // pantalla completa (excluye toasts/badges)
+    if(el.id==='lt-global-spinner')return;
+    if(!el.querySelector('button'))return;
+    cands.push(el);
+  });
+  var np=document.getElementById('notif-panel');
+  if(np&&cands.indexOf(np)<0)cands.push(np);
+  if(!cands.length)return null;
+  var top=null,topZ=-1;
+  cands.forEach(function(ov){
+    var z=parseInt(getComputedStyle(ov).zIndex,10)||0;
+    // Empate de z-index: gana el que aparece después en el DOM (se pinta encima)
+    if(z>topZ||(z===topZ&&top&&(top.compareDocumentPosition(ov)&Node.DOCUMENT_POSITION_FOLLOWING))){topZ=z;top=ov;}
+  });
+  return top;
+}
+document.addEventListener('keydown',function(ev){
+  if(ev.key!=='Escape'&&ev.key!=='Enter')return;
+  if(ev.defaultPrevented)return;
+  var t=ev.target;
+  if(ev.key==='Enter'&&t&&(t.tagName==='TEXTAREA'||t.tagName==='SELECT'||t.tagName==='BUTTON'||t.tagName==='A'||t.onkeydown))return;
+  var ov=_kbTopOverlay();
+  if(!ov)return;
+  if(ov.id==='notif-panel'){
+    if(ev.key==='Escape'){ev.preventDefault();showNotifPanel=false;render();}
+    return;
+  }
+  var btns=Array.prototype.slice.call(ov.querySelectorAll('button')).filter(function(b){
+    return !b.disabled&&b.getClientRects().length>0;
+  });
+  if(ev.key==='Escape'){
+    var cb=btns.find(function(b){return b.hasAttribute('data-esc');})
+      ||btns.find(function(b){var x=(b.textContent||'').trim();return x==='Cancelar'||x==='Cerrar';})
+      ||btns.find(function(b){return (b.textContent||'').trim()==='✕';});
+    if(cb){ev.preventDefault();cb.click();}
+    return;
+  }
+  var act=btns.filter(function(b){return !b.classList.contains('dan');});
+  var pris=act.filter(function(b){return b.classList.contains('pri');});
+  var target=null;
+  if(pris.length===1)target=pris[0];
+  else if(!pris.length){
+    var sucs=act.filter(function(b){return b.classList.contains('suc');});
+    if(sucs.length===1)target=sucs[0];
+    else target=act.find(function(b){return b.id==='ctfa-next'||b.id==='sig-confirm';})||null;
+  }
+  if(target){ev.preventDefault();target.click();}
+});
 
 // ── Immutability guard: check if a task can still be edited ──
 function canEditTask(t) {
@@ -14394,7 +14465,7 @@ function _offerReleaseRemainingDays(taskId, dates){
     +'<div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:var(--radius);padding:8px 12px;font-size:12px;color:var(--amber-text);margin-bottom:12px">Si liberás esos días, el análisis se considerará <b>terminado de tu parte</b> y pasará a confirmación del supervisor. Si elegís conservarlos, los días quedan reservados y el producto sigue pendiente.</div>'
     +'<div class="frow"><label style="font-size:11px">Motivo (el supervisor lo verá)</label><input type="text" id="rel-motivo" value="Finalizó el análisis antes de usar todos los días asignados" style="width:100%"></div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
-    +'<button class="btn" onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)">No, conservar los días</button>'
+    +'<button class="btn" data-esc onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)">No, conservar los días</button>'
     +'<button class="btn pri" onclick="window._doReleaseRemaining('+t.id+')">Sí, liberar y dar por terminado</button>'
     +'</div></div></div>';
   document.body.appendChild(dv);
@@ -14861,7 +14932,7 @@ function renderNotifPanel(){
 
   if(!showNotifPanel){return '';}
 
-  var html='<div style="position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.3);display:flex;align-items:flex-start;justify-content:flex-end;padding:8px">'
+  var html='<div id="notif-panel" style="position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.3);display:flex;align-items:flex-start;justify-content:flex-end;padding:8px">'
     +'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);width:min(360px,calc(100vw - 16px));max-height:calc(100dvh - 16px);max-height:calc(100vh - 16px);overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2)">'
     +'<div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;position:sticky;top:0;background:var(--surface);z-index:1">'
     +'<span style="font-size:14px;font-weight:600">Notificaciones</span>'
