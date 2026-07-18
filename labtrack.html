@@ -868,7 +868,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se a
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026071801; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026071802; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -4497,15 +4497,18 @@ function renderMgmtList(isSup, weekOccs, myOccs){
           <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
             ${isSup
               ?`<button class="btn sm" onclick="event.stopPropagation();openMgmtModal(${o.id})" title="Editar definición">✎</button>`
-                +(ocCompls.length>0
-                  ?ocCompls.map(c=>
-                      (c.status==='pending-confirm'
-                        ?`<button class="btn sm suc" onclick="event.stopPropagation();confirmMgmtCompl(${o.id},'${o.occDate}','${c.analystId}')" title="Confirmar realización" style="font-size:10px;padding:3px 6px">✓</button>`
-                        :'')
-                      +`<button class="btn sm" onclick="event.stopPropagation();openMgmtComplModal(${o.id},'${o.occDate}')" title="Editar realización" style="font-size:10px;padding:3px 6px">✎✓</button>`
-                      +`<button class="btn sm dan" onclick="event.stopPropagation();deleteMgmtCompl(${o.id},'${o.occDate}','${c.analystId}')" title="Eliminar registro" style="font-size:11px;padding:3px 6px">🗑</button>`
-                    ).join('')
-                  :`<button class="btn sm suc" onclick="event.stopPropagation();openMgmtComplModal(${o.id},'${o.occDate}')" title="Registrar como realizada" style="font-size:10px;padding:3px 7px">✓</button>`)
+                +ocCompls.map(c=>
+                    (c.status==='pending-confirm'
+                      ?`<button class="btn sm suc" onclick="event.stopPropagation();confirmMgmtCompl(${o.id},'${o.occDate}','${c.analystId}')" title="Confirmar realización" style="font-size:10px;padding:3px 6px">✓</button>`
+                      :'')
+                    +`<button class="btn sm" onclick="event.stopPropagation();openMgmtComplModal(${o.id},'${o.occDate}')" title="Editar realización" style="font-size:10px;padding:3px 6px">✎✓</button>`
+                    +`<button class="btn sm dan" onclick="event.stopPropagation();deleteMgmtCompl(${o.id},'${o.occDate}','${c.analystId}')" title="Eliminar registro" style="font-size:11px;padding:3px 6px">🗑</button>`
+                  ).join('')
+                // Registrar sigue disponible mientras algún asignado no tenga registro
+                // (antes desaparecía con el primer registro y bloqueaba al 2º analista)
+                +(ocCompls.length===0||(o.analysts||[]).some(id=>!ocCompls.some(c=>c.analystId===id))
+                  ?`<button class="btn sm suc" onclick="event.stopPropagation();openMgmtComplModal(${o.id},'${o.occDate}')" title="Registrar como realizada${ocCompls.length>0?' (analista pendiente)':''}" style="font-size:10px;padding:3px 7px">✓</button>`
+                  :'')
               :isMyOcc?(function(){
                   var _td=today();
                   var _dOld=o.occDate<_td?Math.round((new Date(_td+'T12:00:00')-new Date(o.occDate+'T12:00:00'))/86400000):0;
@@ -5356,17 +5359,23 @@ function saveMgmt(){
   if(!isSupRole()){alert('Solo el Supervisor puede guardar actividades de gestión.');return;}
   const catId=document.getElementById('mg-cat')?.value||mgmtCategories[0]?.id;
   const analysts=CAL_USERS.filter(a=>document.getElementById('mgac-'+a.id)?.classList.contains('selected')).map(a=>a.id);
+  const isEditMgmt=editingMgmt!==null;
+  // La edición conserva completions/exceptions (registros de horas ya cargados) y
+  // bumpea _ts: sin bump, el merge de sync restaura la definición remota anterior
+  // (p. ej. revierte el alta de un segundo analista y sus registros).
+  const prevMgmt=isEditMgmt?mgmtTasks.find(m=>m.id===editingMgmt):null;
   const obj={
-    id:editingMgmt!==null?editingMgmt:nextMgmtId++,
+    ...(prevMgmt||{}),
+    id:isEditMgmt?editingMgmt:nextMgmtId++,
     category:catId,
     frequency:document.getElementById('mg-freq')?.value||'once',
     startDate:document.getElementById('mg-start')?.value||today(),
     endDate:document.getElementById('mg-end')?.value||'',
     dedicacion:parseFloat(document.getElementById('mg-dedicacion')?.value)||0,
     analysts,
-    notes:document.getElementById('mg-notes')?.value||''
+    notes:document.getElementById('mg-notes')?.value||'',
+    _ts:Date.now()
   };
-  const isEditMgmt=editingMgmt!==null;
   if(isEditMgmt){const idx=mgmtTasks.findIndex(m=>m.id===editingMgmt);if(idx>=0)mgmtTasks[idx]=obj;else mgmtTasks.push(obj);}
   else mgmtTasks.push(obj);
   const cat=getMgmtCat(obj.category);
@@ -5445,10 +5454,13 @@ function openMgmtComplModal(mgmtId,occDate){
   var exc=(mt.exceptions||[]).find(function(e){return e.date===occDate;});
   var effAnalysts=(exc&&exc.analysts&&exc.analysts.length)?exc.analysts:(mt.analysts||[]);
   if(!effAnalysts.length)effAnalysts=[currentUser.id];
-  var defaultAnalystId=isSup?effAnalysts[0]:currentUser.id;
   function getExistingCompl(analystId){
     return(mt.completions||[]).find(function(c){return c.date===occDate&&c.analystId===analystId;});
   }
+  // Supervisor: preseleccionar al primer analista SIN registro (si todos tienen, el primero)
+  var defaultAnalystId=isSup
+    ?(effAnalysts.find(function(id){return !getExistingCompl(id);})||effAnalysts[0])
+    :currentUser.id;
   var existingCompl=getExistingCompl(defaultAnalystId);
   if(!isSup&&existingCompl&&(existingCompl.status==='confirmed'||!existingCompl.status)){
     alert('Esta actividad ya fue confirmada por el supervisor y no puede modificarse.');return;
@@ -5465,7 +5477,7 @@ function openMgmtComplModal(mgmtId,occDate){
     // Analyst selector (supervisor only)
     +(isSup?'<div style="margin-bottom:12px"><label style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Analista *</label>'
       +'<select id="mc-analyst" style="width:100%;margin-top:6px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
-      +effAnalysts.map(function(id){var u=getU(id);return'<option value="'+id+'">'+escH(u.name)+'</option>';}).join('')
+      +effAnalysts.map(function(id){var u=getU(id);return'<option value="'+id+'"'+(id===defaultAnalystId?' selected':'')+'>'+escH(u.name)+'</option>';}).join('')
       +'</select></div>':'')
     +(mt.dedicacion?'<div style="background:var(--blue-bg);border-radius:var(--radius);padding:7px 10px;font-size:12px;margin-bottom:14px;color:var(--blue-text)">⏱ Dedicación planificada: <b class="u-mono">'+mt.dedicacion+'h</b></div>':'')
     // Hours
@@ -5629,6 +5641,9 @@ function renderMgmtOccModal(){
     +'</div></details>';
 
   html+='<div class="modal-btns">'
+    // Acceso directo al registro de horas: Semana/Mes/Calendario llegan a este modal
+    // y antes no ofrecían ningún camino para registrar la realización
+    +(!isSkipped?'<button class="btn suc" onclick="closeMgmtOccModal();openMgmtComplModal('+mt.id+',\''+mgmtOccDate+'\')">✓ Registrar horas</button>':'')
     +(exc?'<button class="btn" onclick="removeMgmtExc()">Restaurar original</button>':'')
     +'<button class="btn dan" onclick="skipMgmtOcc()">'+(isSkipped?'Ya omitido':'Omitir este día')+'</button>'
     +'<button class="btn" onclick="closeMgmtOccModal()">Cancelar</button>'
@@ -13844,36 +13859,32 @@ function getNotifEventLabel(n){
 
 function confirmDone(id){
   var t=tasks.find(function(x){return x.id===id;});if(!t)return;
-  requireSignature(
-    'Confirmar análisis completado',
-    'Confirmación: '+t.producto+' — '+t.lote,
-    function(reason){
-      // Delegates to confirmAssignment for all pending assignments of this task
-      var assigns=(t.assignments||[]).filter(function(a){return !a._removed&&a._pendingConfirm&&!a._supervisorConfirmed;});
-      if(assigns.length===0){
-        // No pending — if all have hours, just advance
-        var allH=(t.assignments||[]).filter(function(a){return !a._removed;}).every(function(a){
-          return (a.realHours>0)||(a.sessions&&a.sessions.length>0);
-        });
-        if(allH&&t.status==='pending-confirm'){
-          t.status='done';t.confirmedBy=currentUser.id;t.confirmedTs=Date.now();
-          t._ts=Date.now();
-          auditLog('CONFIRM','TASK',id,{field:'status',oldVal:'pending-confirm',newVal:'done',description:t.producto+' '+t.lote},reason);
-          saveLS();render();saveNow().catch(function(e){console.error(e);});
-        }else{
-          // Feedback: el supervisor firmó pero no había nada confirmable
-          showToast(allH?'Nada para confirmar: el producto no está pendiente de confirmación.':'No se confirmó: hay porciones sin horas registradas.','warn');
-          if(!allH)_notifyIncompletePortions(t);
-        }
-        return;
-      }
-      window._cdBatch=true;
-      try{assigns.forEach(function(a){confirmAssignment(id,a.analyst,a.date);});}
-      finally{window._cdBatch=false;}
-      // Aviso único al final del lote: si el producto no llegó a revisión, mostrar qué falta
-      if(t.status!=='done')_notifyIncompletePortions(t);
+  // Confirmar las horas ES confirmar el completado: sin firma ni paso extra
+  // (mismo criterio que la confirmación por porción desde la campana)
+  // Delegates to confirmAssignment for all pending assignments of this task
+  var assigns=(t.assignments||[]).filter(function(a){return !a._removed&&a._pendingConfirm&&!a._supervisorConfirmed;});
+  if(assigns.length===0){
+    // No pending — if all have hours, just advance
+    var allH=(t.assignments||[]).filter(function(a){return !a._removed;}).every(function(a){
+      return (a.realHours>0)||(a.sessions&&a.sessions.length>0);
+    });
+    if(allH&&t.status==='pending-confirm'){
+      t.status='done';t.confirmedBy=currentUser.id;t.confirmedTs=Date.now();
+      t._ts=Date.now();
+      auditLog('CONFIRM','TASK',id,{field:'status',oldVal:'pending-confirm',newVal:'done',description:t.producto+' '+t.lote},'');
+      saveLS();render();saveNow().catch(function(e){console.error(e);});
+    }else{
+      // Feedback: no había nada confirmable
+      showToast(allH?'Nada para confirmar: el producto no está pendiente de confirmación.':'No se confirmó: hay porciones sin horas registradas.','warn');
+      if(!allH)_notifyIncompletePortions(t);
     }
-  );
+    return;
+  }
+  window._cdBatch=true;
+  try{assigns.forEach(function(a){confirmAssignment(id,a.analyst,a.date);});}
+  finally{window._cdBatch=false;}
+  // Aviso único al final del lote: si el producto no llegó a revisión, mostrar qué falta
+  if(t.status!=='done')_notifyIncompletePortions(t);
 }
 function markSampleReceived(id){
   var t=tasks.find(function(x){return x.id===id;});
@@ -14149,7 +14160,7 @@ function completeTaskForAnalyst(taskId,analystId,assignDate){
   if(!t)return;
   var u=getU(analystId);
   var uName=u?u.name:'Analista';
-  // Show hours input overlay before signature
+  // Overlay de horas — la carga por el supervisor no requiere firma y confirma en el mismo acto
   var overlay=document.createElement('div');
   overlay.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
   overlay.innerHTML='<div style="background:var(--surface);border-radius:var(--radius-lg);padding:24px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.3)">'
@@ -14166,7 +14177,7 @@ function completeTaskForAnalyst(taskId,analystId,assignDate){
     +'</div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end">'
     +'<button id="ctfa-cancel" style="padding:8px 16px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px">Cancelar</button>'
-    +'<button id="ctfa-next" style="padding:8px 16px;border:none;border-radius:var(--radius);background:var(--blue);color:#fff;cursor:pointer;font-size:13px;font-weight:600">Continuar →</button>'
+    +'<button id="ctfa-next" style="padding:8px 16px;border:none;border-radius:var(--radius);background:var(--blue);color:#fff;cursor:pointer;font-size:13px;font-weight:600">✓ Completar</button>'
     +'</div></div>';
   document.body.appendChild(overlay);
   document.getElementById('ctfa-cancel').onclick=function(){overlay.remove();};
@@ -14175,33 +14186,31 @@ function completeTaskForAnalyst(taskId,analystId,assignDate){
     var errEl=document.getElementById('ctfa-err');
     if(!hVal||hVal<=0){errEl.textContent='Ingresá las horas reales.';errEl.style.display='block';return;}
     overlay.remove();
-    requireSignature('Completar análisis por analista','Completar: '+t.producto+' | Lote: '+t.lote+' | En nombre de: '+uName+' | Horas: '+hVal,function(reason){
-      var nowTs=Date.now();
-      var todayStr2=today();
-      var aIdx=(t.assignments||[]).findIndex(function(a){return a.analyst===analystId&&!a._removed&&(!assignDate||a.date===assignDate);});
-      // La firma del supervisor vale como confirmación: la porción queda confirmada
-      // en el mismo acto (antes exigía un segundo "Confirmar" redundante en la campana)
-      var _supFields={realHours:hVal,sessions:[{date:todayStr2,hours:hVal}],
-        _pendingConfirm:false,_completedBySup:true,_completedBySupId:currentUser.id,_completedBySupTs:nowTs,
-        _supervisorConfirmed:true,_confirmedBy:currentUser.id,_confirmedTs:nowTs};
-      if(aIdx>=0){
-        Object.assign(t.assignments[aIdx],_supFields);
-      } else {
-        (t.assignments=t.assignments||[]).push(Object.assign({analyst:analystId,date:todayStr2},_supFields));
-      }
-      _tryAdvanceToPendingConfirm(t);
-      _tryAdvanceToDone(t); // si era la última porción, el producto pasa directo a revisión
-      resolveAllCopies({type:'completed',taskId:taskId,analystId:analystId},'accepted');
-      t._ts=Date.now();
-      auditLog('COMPLETE_BY_SUP','TASK',taskId,{
-        description:'Completado por supervisor en nombre de '+uName+' | '+t.producto+' | Lote: '+t.lote+' | Horas: '+hVal,
-        producto:t.producto,lote:t.lote,analystId:analystId,analystName:uName,realHours:hVal
-      },reason);
-      saveLS();saveNow().catch(function(e){console.error('completeTaskForAnalyst:',e);});
-      render();
-      if(t.status==='done')showToast('✓ Producto enviado a revisión','success');
-      else _notifyIncompletePortions(t);
-    });
+    var nowTs=Date.now();
+    var todayStr2=today();
+    var aIdx=(t.assignments||[]).findIndex(function(a){return a.analyst===analystId&&!a._removed&&(!assignDate||a.date===assignDate);});
+    // La carga del supervisor vale como confirmación: la porción queda confirmada
+    // en el mismo acto, sin firma ni un segundo "Confirmar" en la campana
+    var _supFields={realHours:hVal,sessions:[{date:todayStr2,hours:hVal}],
+      _pendingConfirm:false,_completedBySup:true,_completedBySupId:currentUser.id,_completedBySupTs:nowTs,
+      _supervisorConfirmed:true,_confirmedBy:currentUser.id,_confirmedTs:nowTs};
+    if(aIdx>=0){
+      Object.assign(t.assignments[aIdx],_supFields);
+    } else {
+      (t.assignments=t.assignments||[]).push(Object.assign({analyst:analystId,date:todayStr2},_supFields));
+    }
+    _tryAdvanceToPendingConfirm(t);
+    _tryAdvanceToDone(t); // si era la última porción, el producto pasa directo a revisión
+    resolveAllCopies({type:'completed',taskId:taskId,analystId:analystId},'accepted');
+    t._ts=Date.now();
+    auditLog('COMPLETE_BY_SUP','TASK',taskId,{
+      description:'Completado por supervisor en nombre de '+uName+' | '+t.producto+' | Lote: '+t.lote+' | Horas: '+hVal,
+      producto:t.producto,lote:t.lote,analystId:analystId,analystName:uName,realHours:hVal
+    },'');
+    saveLS();saveNow().catch(function(e){console.error('completeTaskForAnalyst:',e);});
+    render();
+    if(t.status==='done')showToast('✓ Producto enviado a revisión','success');
+    else _notifyIncompletePortions(t);
   };
   document.getElementById('ctfa-hours').focus();
 }
