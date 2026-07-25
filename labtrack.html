@@ -868,7 +868,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se a
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026071803; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026072501; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -1127,6 +1127,11 @@ async function _flushAuditBuffer() {
   _auditDebounce = null;
   if (window._appOutdated) return; // versión vieja bloqueada: no escribir audit
   if (!_auditBuffer.length || !GIST_CONFIG.configured) return;
+  // Guardado inminente → el PATCH del estado lleva el audit coalescido (1 sola
+  // escritura de la cuota de ~100/h). Reprogramar como red de seguridad por si
+  // ese guardado se cancelara. NO mirar _dirtyLocal: switchLab hace flush
+  // explícito con _dirtyLocal aún true y ahí sí debe escribirse por separado.
+  if (_saveDebounce) { _auditDebounce = setTimeout(_flushAuditBuffer, AUDIT_DEBOUNCE); return; }
   const toFlush = [..._auditBuffer]; _auditBuffer = [];
   try {
     // Leer audit actual del gist
@@ -1137,8 +1142,12 @@ async function _flushAuditBuffer() {
       : ((await _gistFileContent(gist, GIST_FILE_AUDIT)) || '[]');
     let existing = [];
     try { existing = JSON.parse(raw); } catch(e) {}
-    // Prepend nuevos (más reciente primero), cap 1000 entradas (~200 KB, holgado para gist)
-    const merged = [...toFlush, ...existing].slice(0, 1000);
+    // Prepend nuevos (más reciente primero), cap 1000 entradas (~200 KB, holgado
+    // para gist). Filtrar por id: la base 304 es auditTrail, que YA contiene las
+    // entradas del buffer (writeAuditEntry las agrega a ambos) — sin el filtro se
+    // duplicaban en el archivo remoto.
+    const _fIds = new Set(toFlush.map(e => e.id));
+    const merged = [...toFlush, ...existing.filter(e => !_fIds.has(e.id))].slice(0, 1000);
     await _gistFetch('PATCH', '/' + GIST_CONFIG.gistId, {
       files: { [GIST_FILE_AUDIT]: { content: JSON.stringify(merged) } }
     });
@@ -1276,6 +1285,7 @@ async function _executeSave() {
 }
 
 async function _executeSaveLocked() {
+  var _auditToFlush = null; // entradas de audit tomadas para este PATCH (re-encolar si falla)
   try {
     // ── REGLA DE ORO: nunca escribir al Gist sin haber leído el remoto en ESTE ciclo ──
     // Si el GET falla, NO se guarda (los datos quedan en localStorage y se reintenta).
@@ -1347,15 +1357,34 @@ async function _executeSaveLocked() {
       try { showToast('⚠ El archivo de datos pesa ' + Math.round(contentToSave.length/1024) + ' KB (límite ~1024). La app lo irá reduciendo automáticamente.', 'warn'); } catch(e) {}
     }
 
-    await _gistFetchRetry('PATCH', '/' + GIST_CONFIG.gistId, {
-      files: {
-        [GIST_FILE_STATE]: { content: contentToSave },
-        // Re-sellar el archivo legado en cada guardado: si una app MUY vieja
-        // (anterior al endurecimiento del 2026-07-06) lo reescribió, vuelve a
-        // quedar ilegible en segundos y ninguna versión vieja puede usarlo.
-        [GIST_FILE_STATE_LEGACY]: { content: LEGACY_STATE_MARKER }
-      }
-    });
+    var _files = {
+      [GIST_FILE_STATE]: { content: contentToSave },
+      // Re-sellar el archivo legado en cada guardado: si una app MUY vieja
+      // (anterior al endurecimiento del 2026-07-06) lo reescribió, vuelve a
+      // quedar ilegible en segundos y ninguna versión vieja puede usarlo.
+      [GIST_FILE_STATE_LEGACY]: { content: LEGACY_STATE_MARKER }
+    };
+    // ── Audit coalescido: las entradas pendientes viajan en ESTE MISMO PATCH.
+    // En escritura aparte, cada acción costaba 2 de las ~100 escrituras/h de gist
+    // que GitHub permite por usuario (cuota no documentada, compartida por todo
+    // el lab) — la mitad del margen (incidentes 2026-07-11 y 2026-07-25).
+    if (_auditBuffer.length) {
+      if (_auditDebounce) { clearTimeout(_auditDebounce); _auditDebounce = null; }
+      _auditToFlush = [..._auditBuffer]; _auditBuffer = [];
+      var _auditBase = [];
+      try {
+        var _aRaw = (remoteGist === null)
+          ? JSON.stringify(auditTrail) // 304: base = audit en memoria (ya incluye lo local)
+          : ((await _gistFileContent(remoteGist, GIST_FILE_AUDIT)) || '[]');
+        _auditBase = JSON.parse(_aRaw) || [];
+      } catch(e2) { _auditBase = Array.isArray(auditTrail) ? auditTrail.slice() : []; }
+      // Filtrar por id: si la base ya contiene entradas del buffer, no duplicarlas
+      var _aIds = new Set(_auditToFlush.map(function(e2){ return e2.id; }));
+      var _auditMerged = [..._auditToFlush, ..._auditBase.filter(function(e2){ return !_aIds.has(e2.id); })].slice(0, 1000);
+      _files[GIST_FILE_AUDIT] = { content: JSON.stringify(_auditMerged) };
+    }
+
+    await _gistFetchRetry('PATCH', '/' + GIST_CONFIG.gistId, { files: _files });
     _lastRemoteTs = _chk.savedAt || Date.now();
     _dirtyLocal = false;
     gistStatus = 'ok'; gistLastSync = new Date();
@@ -1365,6 +1394,9 @@ async function _executeSaveLocked() {
 
   } catch(e) {
     console.error('save:', e);
+    // Audit tomado para el PATCH fallido: re-encolar para el reintento (el
+    // guardado que vuelva a intentar lo llevará coalescido)
+    if (_auditToFlush) { _auditBuffer = [..._auditToFlush, ..._auditBuffer]; _auditToFlush = null; }
     // Falla de red transitoria (celular): estado "sin conexión" con reintento
     // silencioso — NO es un error de la app y no debe alarmar.
     if (!e._isRateLimit && _isNetworkErr(e)) {
