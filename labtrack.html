@@ -657,13 +657,15 @@ function applySnapshot(json){
     // Eliminar U108 de passwords también
     delete passwords['U108'];
     replanNotifs=d.replanNotifs||[];
-    // Retención: purgar notificaciones NO pendientes con más de 45 días (636 notifs
-    // llegaron a ocupar ~180 KB del state; la poda es determinística → converge entre
-    // clientes). Las pendientes nunca se purgan por edad; el audit conserva el registro.
-    var _notifCutoff=Date.now()-45*24*60*60*1000;
+    // Retención: purgar notificaciones NO pendientes con más de 12 días. La única
+    // vista que las lee es "Historial (10d)" — retener 45 días acumulaba ~450 notifs
+    // resueltas (~120 KB) que nada mostraba. 12 = 10 de la vista + margen de merge.
+    // Poda determinística → converge entre clientes. Las pendientes nunca se purgan
+    // por edad; el audit conserva el registro completo.
+    var _notifCutoff=Date.now()-12*24*60*60*1000;
     replanNotifs=replanNotifs.filter(function(n){
       if(n.status==='pending')return true; // activas: nunca purgar por edad
-      // resolved/read/approved (legado): purgar con más de 45 días
+      // resolved/read/approved (legado): purgar con más de 12 días
       var ts=n.resolvedTs||n.readTs||n.ts||0;
       return ts>_notifCutoff;
     });
@@ -697,7 +699,19 @@ function applySnapshot(json){
     freeTasks=(d.freeTasks||[]).filter(function(f){return !deletionsReg.freeTasks[f.id];});
     nextFreeTaskId=d.nextFreeTaskId||freeTasks.length+1;
     productSuggestions=d.productSuggestions||[];
-    nextSuggId=d.nextSuggId||productSuggestions.length+1;
+    nextSuggId=d.nextSuggId||productSuggestions.length+1; // ANTES de podar (evita reuso de ids)
+    // Retención: sugerencias ya resueltas (confirmed/rejected) con más de 30 días.
+    // La vista solo muestra las últimas 20 no-pendientes; 142 sugerencias llegaron a
+    // ocupar ~39 KB. Guard: no podar si una notif PENDIENTE aún la referencia (el
+    // render de esa notif la busca por suggId). Determinística → converge.
+    var _suggCut=Date.now()-30*24*60*60*1000;
+    var _pendSuggIds={};
+    replanNotifs.forEach(function(n){if(n.status==='pending'&&n.suggId!=null)_pendSuggIds[n.suggId]=true;});
+    productSuggestions=productSuggestions.filter(function(s){
+      if(s.status==='pending')return true; // sin resolver: nunca purgar por edad
+      if(_pendSuggIds[s.id])return true;   // referenciada por notif activa
+      return Math.max(s._ts||0,s.suggestedTs||0)>_suggCut;
+    });
     nextId=d.nextId||11;
     nextUid=d.nextUid||100;
     // Tombstones de asignaciones (_removed): se CONSERVAN — son la marca que impide
@@ -723,12 +737,20 @@ function applySnapshot(json){
     // y solo los campos que la vista de historial muestra (status/notes/due/priority).
     // Las copias profundas de assignments llegaron a ocupar ~280 KB del archivo de
     // estado (riesgo de truncado en la API) y nada las leía. Poda determinística.
+    // Además: colapsar entradas CONSECUTIVAS idénticas (mismo editor y snapshot igual
+    // — ediciones repetidas sin cambio de status/notes/due/priority): 209 duplicadas
+    // llegaron a ocupar ~30 KB y la vista las muestra como "Sin cambios registrados".
+    // Se conserva la PRIMERA (la fecha original del cambio real). Determinística.
     tasks.forEach(function(t){
       if(!t._history)return;
-      if(t._history.length>5)t._history=t._history.slice(-5);
       t._history.forEach(function(h){
         if(h.snapshot){delete h.snapshot.assignments;delete h.snapshot.producto;delete h.snapshot.lote;}
       });
+      var _hSig=function(h){return (h.editedBy||'')+'|'+JSON.stringify([h.snapshot&&h.snapshot.status,h.snapshot&&h.snapshot.notes,h.snapshot&&h.snapshot.due,h.snapshot&&h.snapshot.priority]);};
+      t._history=t._history.filter(function(h,i,arr){
+        return i===0||_hSig(h)!==_hSig(arr[i-1]);
+      });
+      if(t._history.length>5)t._history=t._history.slice(-5);
     });
     // Normalize status: pending↔scheduled based on active assignments
     // SIN bumpear _ts: la corrección es determinística (todo cliente la re-deriva al
@@ -859,7 +881,10 @@ const GIST_FILE_STATE_LEGACY = 'labtrack_state.json';
 const LEGACY_STATE_MARKER = 'LABTRACK-MIGRADO: el estado ahora vive en labtrack_state_v2.json. Esta copia de la aplicación es antigua y no puede sincronizar — recargá la app (Ctrl+Shift+R) o pedí al supervisor la versión publicada actual.';
 const GIST_FILE_AUDIT = 'labtrack_audit.json';
 const GIST_FILE_ARCHIVE = 'labtrack_archive.json'; // histórico de aprobados viejos
-const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se archivan
+// 45 días: cubre el ciclo de informes del mes anterior; lo más viejo se consulta con
+// "Ver archivados". Con 120 nunca se archivó nada y el estado llegó a ~870 KB de los
+// ~1024 en que la API de Gist trunca (los aprobados eran ~60% del peso de tasks).
+const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 
 // ── Candado de versión ──
 // APP_BUILD se BUMPEA en cada publicación (AAAAMMDD, +1 si hay más de una en el día).
@@ -868,7 +893,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 120; // aprobados hace más de ~4 meses se a
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026072501; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026072601; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -8250,6 +8275,13 @@ function activeTasks(){return tasks.filter(function(t){return !t._deleted;});}
 function saveTaskVersion(t) {
   if(!t) return;
   if(!t._history) t._history = [];
+  // Si la última versión es idéntica (mismo editor, mismos campos versionados), no
+  // duplicar: la vista la mostraría como "Sin cambios registrados" y solo engorda el
+  // estado (misma regla que el dedup determinístico de applySnapshot).
+  var _last = t._history[t._history.length-1];
+  if(_last && _last.editedBy===(currentUser?currentUser.id:'?') && _last.snapshot
+    && _last.snapshot.status===t.status && _last.snapshot.notes===t.notes
+    && _last.snapshot.due===t.due && _last.snapshot.priority===t.priority) return;
   // Solo los campos que muestra renderTaskHistory. La copia profunda de assignments
   // que se guardaba acá llegó a pesar ~245 KB en el gist y nada la leía.
   t._history.push({
