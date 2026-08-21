@@ -151,8 +151,9 @@
 
     <div class="step sx">
       <h4>2 · «Análisis»: tu tablero de control <span class="who s">Supervisor</span></h4>
-      <p>El centro de la operación, con dos pestañas: <b>🔬 Análisis</b> (todos los lotes activos: estado, analistas, fechas, prioridad — desde cada fila editás, asignás o anulás) e <b>💡 Ingresos</b> (las sugerencias de producto del personal, para confirmarlas como análisis reales, y la sección <b>⭐ Estándares secundarios</b>).</p>
-      <div class="tip"><b>⭐ Estándares secundarios:</b> cuando el estándar secundario de una materia prima activa está por vencer o queda poca cantidad, cualquiera del equipo registra la <b>necesidad de desarrollo</b> en Ingresos. Desde ese momento, toda MP activa que matchee muestra el aviso ⭐: al muestreador le pide <b>cantidad adicional</b> al registrar el muestreo, y si el análisis de aprobación está en curso se pueden sumar los ensayos de calificación. El muestreo extra deja la necesidad como «muestreado»; vos la <b>cerrás</b> cuando el estándar quedó fraccionado y en uso.</div>
+      <p>El centro de la operación, con tres pestañas: <b>🔬 Análisis</b> (todos los lotes activos: estado, analistas, fechas, prioridad — desde cada fila editás, asignás o anulás), <b>💡 Ingresos</b> (las sugerencias de producto del personal, para confirmarlas como análisis reales) y <b>⭐ Estándares</b> (el desarrollo de estándares secundarios, en su pestaña propia para no enterrar los ingresos pendientes).</p>
+      <div class="tip"><b>⭐ Estándares secundarios — el flujo:</b> cuando el estándar secundario de una materia prima activa está por vencer o queda poca cantidad, cualquiera del equipo registra la <b>necesidad de desarrollo</b>. Cada vez que un ingreso activo <b>matchea</b> una necesidad, te llega una notificación a la campana para <span class="btnref">✓ Validar p/ desarrollo</span> (el lote queda marcado ⭐ como lote de desarrollo del estándar) o <span class="btnref">✗ Falso match</span> (descarta el aviso para ese ingreso). Al muestreador el aviso le pide <b>cantidad adicional</b> al registrar el muestreo; el muestreo extra deja la necesidad como «muestreado» y vos la <b>cerrás</b> cuando el estándar quedó fraccionado y en uso. <b>Validar, rechazar matches, cerrar y eliminar necesidades son acciones exclusivas tuyas.</b></div>
+      <div class="tip"><b>Filtrar el desarrollo de estándares:</b> el lote validado conserva su tipo MP y lleva la marca ⭐ permanente — el botón <span class="btnref">⭐ STD</span> en los filtros de la tabla de Análisis y de Informes muestra solo los lotes de desarrollo, para seguirlos o analizar sus tiempos.</div>
       <ul class="clean">
         <li>Cada producto guarda su <b>historial</b>: hitos del flujo (ingresado, iniciado, completado, revisado, aprobado) y los comentarios asociados.</li>
         <li>Todas las listas tienen buscador y filtros por tipo/estado, con <span class="btnref">✕ Limpiar filtros</span> para restablecerlos de una.</li>
@@ -276,7 +277,7 @@
 
     <div class="step rx">
       <h4>3 · «Análisis»: también analizás <span class="who r">Revisor</span></h4>
-      <p>Tu módulo <b>Análisis</b> abre en <b>⏰ Pendientes</b> (lo accionable primero: productos sin asignar que podés <b>Solicitar</b>, y tus análisis por iniciar), sigue <b>💡 Ingresos</b> y cierra <b>🔬 Análisis</b> — que a diferencia del analista muestra el <b>listado completo</b> de análisis y lotes, igual que el supervisor. Cuando te asignan lotes, los ejecutás igual que un analista: iniciar, registrar horas, completar, replanificar (ver la <a href="#analista">Guía del Analista</a>).</p>
+      <p>Tu módulo <b>Análisis</b> abre en <b>⏰ Pendientes</b> (lo accionable primero: productos sin asignar que podés <b>Solicitar</b>, y tus análisis por iniciar), sigue <b>💡 Ingresos</b>, luego <b>🔬 Análisis</b> y cierra <b>⭐ Estándares</b> — que a diferencia del analista muestra el <b>listado completo</b> de análisis y lotes, igual que el supervisor. Cuando te asignan lotes, los ejecutás igual que un analista: iniciar, registrar horas, completar, replanificar (ver la <a href="#analista">Guía del Analista</a>).</p>
     </div>
 
     <div class="step rx">
@@ -288,7 +289,7 @@
   <!-- ============ ANALISTA ============ -->
   <section id="analista">
     <h2><span class="num c-a">A</span>Guía del Analista</h2>
-    <p class="lead">El analista <b>ejecuta los análisis que le asignan</b>: los inicia, registra sus horas, los completa para revisión y, si le observan uno, lo corrige y lo re-envía. También puede pedir tomar productos sin asignar, ajustar su planificación (replanificar o liberar días), registrar la llegada de muestras y sugerir ingresos. Su menú tiene 4 módulos: <b>Mi día</b>, <b>Mis análisis</b> (pestañas Pendientes · Ingresos · Mis análisis), <b>Calendario equipo</b> y <b>Gestión</b>.</p>
+    <p class="lead">El analista <b>ejecuta los análisis que le asignan</b>: los inicia, registra sus horas, los completa para revisión y, si le observan uno, lo corrige y lo re-envía. También puede pedir tomar productos sin asignar, ajustar su planificación (replanificar o liberar días), registrar la llegada de muestras y sugerir ingresos. Su menú tiene 4 módulos: <b>Mi día</b>, <b>Mis análisis</b> (pestañas Pendientes · Ingresos · Mis análisis · ⭐ Estándares), <b>Calendario equipo</b> y <b>Gestión</b>.</p>
 
     <div class="step">
       <h4>1 · Tu pantalla de inicio: «Mi día» <span class="who a">Analista</span></h4>
@@ -367,7 +368,7 @@
     <div class="step">
       <h4>9 · Pestaña «💡 Ingresos»: registrar llegadas y sugerir productos <span class="who a">Analista</span></h4>
       <p>Dentro de <b>Mis análisis</b>, la pestaña <b>💡 Ingresos</b> muestra las muestras pendientes de ingresar. Con <span class="btnref">📥 Registrar llegada</span> confirmás que la muestra llegó/se muestreó (fecha real y horas). Con <span class="btnref">+ Nueva sugerencia</span> proponés un ingreso: el supervisor la recibe y confirma.</p>
-      <p><b>⭐ Estándares secundarios:</b> en la misma pestaña, si durante un análisis detectás que el estándar secundario de una MP activa está por vencer o se está agotando, registrá la <b>necesidad de desarrollo</b> con <span class="btnref">+ Registrar necesidad</span>. Cuando esa MP vuelva a ingresar, el aviso ⭐ le pedirá al muestreador cantidad adicional; si el análisis de aprobación está en curso, se pueden sumar ahí los ensayos de calificación. El supervisor la cierra cuando el estándar quedó fraccionado.</p>
+      <p><b>⭐ Estándares secundarios:</b> si durante un análisis detectás que el estándar secundario de una MP activa está por vencer o se está agotando, registrá la <b>necesidad de desarrollo</b> en la pestaña <b>⭐ Estándares</b> con <span class="btnref">+ Registrar necesidad</span>. El supervisor recibe la notificación de cada ingreso que matchee y decide validar el lote para el desarrollo o descartar el match; al muestreador el aviso ⭐ le pedirá cantidad adicional. Si el análisis de aprobación está en curso, se pueden sumar ahí los ensayos de calificación. Solo el supervisor valida, descarta, cierra o elimina.</p>
       <figure class="shot" data-snap="ana_ingresos"><figcaption>«Mis análisis» — pestaña 💡 Ingresos.</figcaption></figure>
       <figure class="shot" data-snap="ana_modal_sugerir" data-modal="1"><figcaption>Cuadro real «Sugerir ingreso de producto».</figcaption></figure>
     </div>

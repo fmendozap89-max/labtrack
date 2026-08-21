@@ -424,7 +424,7 @@ var _ingresosSearch='';
 let mgmtListPeriod='week';
 let showImportModal=false,showChangePwd=false;
 let tasksView='lote';
-let filterAnalyst='',filterStatus='',filterSearch='',filterTipo='';
+let filterAnalyst='',filterStatus='',filterSearch='',filterTipo='',filterStdDev=false;
 let _tipoFilter=[];
 let _ingresosTypeFilter=[];
 function _toggleIngresosType(id){var i=_ingresosTypeFilter.indexOf(id);if(i>=0)_ingresosTypeFilter.splice(i,1);else _ingresosTypeFilter.push(id);render();}
@@ -903,7 +903,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082003; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082004; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -3791,7 +3791,9 @@ function getNotifBadge(){
   var ilrC=(isSup||isRev)?replanNotifs.filter(function(n){return n.type==='interlab_request'&&n.status==='pending';}).length:0;
   var ilrDocsC=(isSup||isRev)?replanNotifs.filter(function(n){return n.type==='ilr_docs_sent'&&n.status==='pending'&&!(n.readBy||[]).includes(uid);}).length:0;
   var revApprC=isSup?replanNotifs.filter(function(n){return n.type==='reviewer_approval'&&n.status==='pending';}).length:0;
-  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC+samplingC+responseC+overdueC+suggC+mgmtC+ilrC+ilrDocsC+revApprC;
+  // Estándares secundarios: necesidad creada / match a validar / muestreo extra realizado
+  var stdC=isSup?replanNotifs.filter(function(n){return(n.type==='stdsec_created'||n.type==='stdsec_match'||n.type==='stdsec_sampled')&&n.status!=='resolved'&&!(n.readBy||[]).includes(uid);}).length:0;
+  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC+samplingC+responseC+overdueC+suggC+mgmtC+ilrC+ilrDocsC+revApprC+stdC;
 }
 function renderNotifBtn(){
   var totalAlerts=getNotifBadge();
@@ -6114,8 +6116,7 @@ function renderSugerencias(){
       +(window.suggSearch?'<button class="btn sm" onclick="window.suggSearch=\'\';render()">✕ Limpiar</button>':'')
       +'</div>';
 
-    // Estándares secundarios (necesidades de desarrollo + matching con ingresos)
-    html+=renderStdSecSection(true);
+    // Estándares secundarios: viven en su pestaña propia (⭐ Estándares del módulo Análisis)
 
     // Pendientes
     html+='<div style="margin-bottom:24px">';
@@ -6211,8 +6212,11 @@ function renderSugerencias(){
     html+='<div style="margin-bottom:20px;font-size:12px;color:var(--text3)">Sin sugerencias pendientes de respuesta.</div>';
   }
 
-  // Sección: Estándares secundarios (todos los roles de escritura pueden registrar)
-  html+='<div style="border-top:1px solid var(--border);padding-top:20px">'+renderStdSecSection(false)+'</div>';
+  // Estándares secundarios: analista/revisor los ven en la pestaña ⭐ del módulo Análisis;
+  // staff y muestreador no tienen ese módulo, así que conservan la sección acá.
+  if(isStaffRole()||isSamplerRole()){
+    html+='<div style="border-top:1px solid var(--border);padding-top:20px">'+renderStdSecSection(false)+'</div>';
+  }
 
   // Sección: Productos pendientes de ingreso (abajo)
   html+='<div style="border-top:1px solid var(--border);padding-top:20px">';
@@ -6379,6 +6383,8 @@ function stdSecNeedsForTask(t){return openStdSecNeeds().filter(function(n){retur
 function stdSecTasksForNeed(need){return activeTasks().filter(function(t){return stdSecMatchesTask(need,t);});}
 // Badge ⭐ para tarjetas/listados: ámbar = falta muestrear extra; violeta = ya muestreado
 function stdSecBadge(t){
+  // Lote validado para desarrollo de estándar: marca permanente y filtrable
+  if(t.stdSecDev)return '<span title="Lote asignado a desarrollo de estándar secundario" style="background:#5b21b6;color:#fff;border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap;cursor:help">⭐ STD</span>';
   var ns=stdSecNeedsForTask(t);
   if(!ns.length)return'';
   var pend=ns.some(function(n){return n.status==='pendiente';});
@@ -6391,9 +6397,13 @@ function stdSecBadge(t){
 // Recuadro informativo para el detalle del producto (modal): visible para todos los
 // roles mientras haya una necesidad abierta que matchee esta MP.
 function _stdSecInfoBox(t){
+  var _devBox=t.stdSecDev
+    ?'<div style="background:#5b21b6;color:#fff;border-radius:var(--radius);padding:8px 12px;margin-bottom:12px;font-size:12px"><b>⭐ Lote asignado a desarrollo de estándar secundario</b>'
+      +'<div style="font-size:11px;margin-top:2px;opacity:.9">Validado por '+escH((getU(t.stdSecDev.by)||{}).name||'')+(t.stdSecDev.ts?' el '+new Date(t.stdSecDev.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}):'')+'. Incluir los ensayos de calificación como estándar.</div></div>'
+    :'';
   var ns=stdSecNeedsForTask(t);
-  if(!ns.length)return'';
-  return ns.map(function(n){
+  if(!ns.length)return _devBox;
+  return _devBox+ns.map(function(n){
     var pend=n.status==='pendiente';
     return '<div style="background:'+(pend?'#fef3c7':'#ede9fe')+';border:1px solid '+(pend?'#f59e0b':'#8b5cf6')+';border-radius:var(--radius);padding:8px 12px;margin-bottom:12px;font-size:12px;color:'+(pend?'#92400e':'#5b21b6')+'">'
       +'<b>⭐ Desarrollo de estándar secundario'+(pend?' pendiente':'')+'</b>'
@@ -6447,6 +6457,8 @@ function submitStdSecNeed(){
   }
   auditLog('CREATE','STDSEC',need.id,{producto:prod,due:need.due||undefined,
     description:'Necesidad de estándar secundario registrada: '+prod},'');
+  // Notificar al supervisor cada ingreso activo que ya matchea (validar / rechazar)
+  _stdSecNotifyMatches(need);
   showStdSecModal=false;
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow stdsec:',e);});
@@ -6474,8 +6486,8 @@ function stdSecClose(id){
 }
 function stdSecDelete(id){
   var n=stdSecNeeds.find(function(x){return x.id===id;});if(!n)return;
-  // Supervisor borra cualquiera; el creador solo la propia mientras esté pendiente
-  if(!isSupRole()&&!(n.createdBy===currentUser.id&&n.status==='pendiente')){alert('Solo el supervisor puede eliminar esta necesidad.');return;}
+  // SOLO el supervisor elimina necesidades (ni siquiera el creador de la propia)
+  if(!isSupRole()){alert('Solo el Supervisor puede eliminar una necesidad de estándar secundario.');return;}
   if(!confirm('¿Eliminar la necesidad de estándar secundario de "'+n.producto+'"? Los avisos dejarán de mostrarse.'))return;
   n._removed=true;n._removedTs=Date.now();n._ts=Date.now();
   resolveAllCopies({type:'stdsec_created',needId:id},'deleted');
@@ -6483,6 +6495,41 @@ function stdSecDelete(id){
   auditLog('DELETE','STDSEC',id,{producto:n.producto,description:'Necesidad de estándar secundario eliminada: '+n.producto},'');
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow stdsec del:',e);});
+}
+// Notificar al supervisor los matches nuevos (necesidad ↔ ingreso). Dedup por par
+// (taskId) registrado en la necesidad (notifiedPairs) para no repetir avisos entre
+// guardados/dispositivos. Se dispara en puntos de acción (crear necesidad, guardar
+// tarea), nunca en render.
+function _stdSecNotifyMatches(need){
+  if(!need||need._removed||need.status==='cerrado')return;
+  var _sup=USERS.find(function(u){return u.role==='supervisor';});
+  if(!need.notifiedPairs)need.notifiedPairs=[];
+  var _new=stdSecTasksForNeed(need).filter(function(t){return need.notifiedPairs.indexOf(t.id)<0&&!t.stdSecDev;});
+  if(!_new.length)return;
+  _new.forEach(function(t){
+    need.notifiedPairs.push(t.id);
+    replanNotifs.push({id:newNotifId(),type:'stdsec_match',needId:need.id,taskId:t.id,
+      producto:t.producto,lote:t.lote,needProducto:need.producto,
+      forUserId:_sup?_sup.id:'',status:'pending',ts:Date.now(),_ts:Date.now()});
+  });
+  need._ts=Date.now();
+}
+// Validar un match: marca el LOTE como asignado a desarrollo de estándar secundario.
+// La marca (t.stdSecDev) es permanente y filtrable — es la alternativa al tipo STD:
+// el producto sigue siendo MP (un STD es una MP) y la marca permite analizar aparte.
+function stdSecValidateMatch(taskId,needId){
+  if(!isSupRole()){alert('Solo el Supervisor puede validar un match de estándar secundario.');return;}
+  var t=tasks.find(function(x){return x.id===taskId;});if(!t)return;
+  var n=stdSecNeeds.find(function(x){return x.id===needId;});
+  if(!confirm('¿Asignar "'+t.producto+' — '+t.lote+'" al desarrollo de estándar secundario'+(n?' ('+n.producto+')':'')+'?\n\nEl lote queda marcado ⭐ para seguimiento y análisis.'))return;
+  t.stdSecDev={needId:needId,by:currentUser.id,ts:Date.now()};
+  t._ts=Date.now();
+  resolveAllCopies({type:'stdsec_match',needId:needId,taskId:taskId},'validated');
+  auditLog('EDIT','TASK',taskId,{field:'stdSecDev',newVal:needId,
+    description:'Lote asignado a desarrollo de estándar secundario: '+t.producto+' '+t.lote},'');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow stdsec val:',e);});
+  try{showToast('⭐ '+t.producto+' '+t.lote+' asignado a desarrollo de estándar','success');}catch(e){}
 }
 // Marcar vista una notificación stdsec (no toca la necesidad, solo la campana)
 function markStdSecNotifSeen(notifId){
@@ -6501,6 +6548,7 @@ function stdSecIgnoreMatch(taskId,needId){
   if(!t.stdSecIgnore)t.stdSecIgnore=[];
   if(t.stdSecIgnore.indexOf(needId)<0)t.stdSecIgnore.push(needId);
   t._ts=Date.now();
+  resolveAllCopies({type:'stdsec_match',needId:needId,taskId:taskId},'rejected');
   auditLog('EDIT','TASK',taskId,{field:'stdSecIgnore',newVal:needId,description:'Aviso de estándar secundario descartado para '+t.producto+' '+t.lote},'');
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow stdsec ign:',e);});
@@ -6534,14 +6582,19 @@ function renderStdSecSection(isSup){
         +'</div>'
         +(matches.length
           ?'<div style="margin-top:6px;font-size:11px"><span style="font-weight:600;color:var(--text2)">Ingresos que matchean:</span> '
-            +matches.map(function(t){return '<span style="display:inline-block;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:1px 6px;margin:2px 2px 0 0">'+escH(t.producto)+' — '+escH(t.lote)+' <span style="color:var(--text3)">('+statusLabel(t.status)+')</span>'
-              +(isSupRole()?' <span onclick="stdSecIgnoreMatch('+t.id+',\''+n.id+'\')" title="Descartar este aviso (falso positivo) — solo supervisor" style="cursor:pointer;color:var(--text3)">✕</span>':'')+'</span>';}).join('')
+            +matches.map(function(t){
+              var _val=t.stdSecDev&&t.stdSecDev.needId===n.id;
+              return '<span style="display:inline-block;background:'+(_val?'#ede9fe':'var(--bg2)')+';border:1px solid '+(_val?'#8b5cf6':'var(--border)')+';border-radius:4px;padding:1px 6px;margin:2px 2px 0 0">'+escH(t.producto)+' — '+escH(t.lote)+' <span style="color:var(--text3)">('+statusLabel(t.status)+')</span>'
+                +(_val?' <span style="color:#5b21b6;font-weight:700">⭐ desarrollo</span>':'')
+                +(isSupRole()&&!_val?' <span onclick="stdSecValidateMatch('+t.id+',\''+n.id+'\')" title="Validar: asignar este lote al desarrollo del estándar" style="cursor:pointer;color:var(--green);font-weight:700">✓</span>':'')
+                +(isSupRole()&&!_val?' <span onclick="stdSecIgnoreMatch('+t.id+',\''+n.id+'\')" title="Descartar este aviso (falso positivo) — solo supervisor" style="cursor:pointer;color:var(--text3)">✕</span>':'')
+                +'</span>';}).join('')
             +'</div>'
           :(pend?'<div style="margin-top:6px;font-size:11px;color:var(--text3)">Sin ingresos activos de esta MP por ahora — el aviso saltará al ingresarla.</div>':''))
-        +((isSup&&isSupRole())||(!isSup&&(isSupRole()||n.createdBy===currentUser.id&&pend))
+        +(isSupRole()
           ?'<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'
-            +(isSupRole()&&n.status==='muestreado'?'<button class="btn sm suc" onclick="stdSecClose(\''+n.id+'\')" style="font-size:11px">✓ Cerrar (fraccionado y en uso)</button>':'')
-            +(isSupRole()&&pend?'<button class="btn sm" onclick="stdSecClose(\''+n.id+'\')" style="font-size:11px" title="Cerrar sin registrar muestreo (p. ej. resuelto por otra vía)">✓ Cerrar</button>':'')
+            +(n.status==='muestreado'?'<button class="btn sm suc" onclick="stdSecClose(\''+n.id+'\')" style="font-size:11px">✓ Cerrar (fraccionado y en uso)</button>':'')
+            +(pend?'<button class="btn sm" onclick="stdSecClose(\''+n.id+'\')" style="font-size:11px" title="Cerrar sin registrar muestreo (p. ej. resuelto por otra vía)">✓ Cerrar</button>':'')
             +'<button class="btn sm dan" onclick="stdSecDelete(\''+n.id+'\')" style="font-size:11px">🗑 Eliminar</button>'
             +'</div>':'')
         +'</div>';
@@ -6644,6 +6697,7 @@ function renderInformes(){
   if(informeFilterStatus==='late') filtered=filtered.filter(function(t){return t._dueStatus==='late';});
   else if(informeFilterStatus) filtered=filtered.filter(function(t){return t.status===informeFilterStatus;});
   if(informeFilterTipo){if(informeFilterTipo==='none')filtered=filtered.filter(function(t){return !(t.tipo||'');});else filtered=filtered.filter(function(t){return (t.tipo||'')===informeFilterTipo;});}
+  if(window.informeFilterStd)filtered=filtered.filter(function(t){return !!t.stdSecDev;}); // solo desarrollo de estándar
   if(filterSearch){var q=filterSearch.toLowerCase();filtered=filtered.filter(function(t){return t.producto.toLowerCase().includes(q)||t.lote.toLowerCase().includes(q);});}
 
   // ── build rows ──
@@ -6716,6 +6770,7 @@ function renderInformes(){
     +'<option value="">Todos los tipos</option>'
     +SAMPLE_TYPES.map(function(st){return'<option value="'+st.id+'"'+(informeFilterTipo===st.id?' selected':'')+'>'+st.label+' — '+st.title+'</option>';}).join('')
     +'</select>'
+    +'<button class="btn sm" onclick="window.informeFilterStd=!window.informeFilterStd;render()" title="Solo lotes asignados a desarrollo de estándar secundario" style="'+(window.informeFilterStd?'background:#5b21b6;border-color:#5b21b6;color:#fff;':'')+'font-weight:700">⭐ STD</button>'
     +'<button class="btn sm'+(window.informeIncludeArch?' pri':'')+'" onclick="toggleArchView(\'informeIncludeArch\')" title="Incluir productos del archivo histórico (aprobados hace más de '+ARCHIVE_APPROVED_AFTER_DAYS+' días)">📦 '+(window.informeIncludeArch?'Archivados: sí'+(window._archTasks?' ('+window._archTasks.length+')':''):'Ver archivados')+'</button>'
     +'<span style="font-size:12px;color:var(--text3)">'+filtered.length+' muestras</span>'
     +'<div style="display:flex;gap:5px;margin-left:auto">'
@@ -8411,6 +8466,7 @@ function renderTasks(){
   if(filterTipo){if(filterTipo==='none')f=f.filter(function(t){return !(t.tipo||'');});else f=f.filter(function(t){return (t.tipo||'')===filterTipo;});}
   if(filterSearch){var fs2=filterSearch.toLowerCase();f=f.filter(function(t){return t.producto.toLowerCase().includes(fs2)||t.lote.toLowerCase().includes(fs2);});}
   f=f.filter(_tipoMatch);
+  if(filterStdDev)f=f.filter(function(t){return !!t.stdSecDev;}); // solo lotes de desarrollo de estandar
   // Filtro de mes opcional (por fecha de ingreso; default: todos)
   var _tkGet=function(t){return t.created||t.due||'';};
   f=monthFilterApply('tasks',f,_tkGet,true);
@@ -8461,9 +8517,10 @@ function renderTasks(){
     +'<option value="approved"'+(filterStatus==='approved'?' selected':'')+'>Aprobado</option>'
     +'<option value="observed"'+(filterStatus==='observed'?' selected':'')+'>Observado</option>'
     +'</select>'
+    +'<button class="btn sm" onclick="filterStdDev=!filterStdDev;render()" title="Solo lotes asignados a desarrollo de estandar secundario" style="'+(filterStdDev?'background:#5b21b6;border-color:#5b21b6;color:#fff;':'')+'font-weight:700">⭐ STD</button>'
     +monthFilterSelect('tasks',sup?activeTasks():activeTasks().filter(isMyTask),_tkGet,true)
-    +((filterAnalyst||filterStatus||filterSearch||_tipoFilter.length||(listMonthFilter['tasks']&&listMonthFilter['tasks']!=='all'))
-      ?'<button class="btn sm" onclick="filterAnalyst=\'\';filterStatus=\'\';filterSearch=\'\';_tipoFilter=[];delete listMonthFilter[\'tasks\'];render()" title="Restablecer todos los filtros">✕ Limpiar filtros</button>':'')
+    +((filterAnalyst||filterStatus||filterSearch||filterStdDev||_tipoFilter.length||(listMonthFilter['tasks']&&listMonthFilter['tasks']!=='all'))
+      ?'<button class="btn sm" onclick="filterAnalyst=\'\';filterStatus=\'\';filterSearch=\'\';filterStdDev=false;_tipoFilter=[];delete listMonthFilter[\'tasks\'];render()" title="Restablecer todos los filtros">✕ Limpiar filtros</button>':'')
     +viewToggle
     +'<span class="count-lbl">'+f.length+' lote'+(f.length!==1?'s':'')+(filterSearch?' — «'+escH(filterSearch)+'»':'')+'</span>'
     +(sup?'<button id="copybtn-tbl-tasks" class="btn sm" onclick="copyTableToClipboard(\'tbl-tasks\')" style="margin-left:auto">📋 Copiar</button>':'')
@@ -8536,13 +8593,18 @@ function renderTasksModule(){
   var _verTodos=_isSup||isReviewerRole();
   var _tabAnalisis=_tt('analisis',_verTodos?'🔬 Análisis':'🔬 Mis análisis',_verTodos?'Listado completo de análisis y lotes':'Todos los análisis asignados a vos, incluidos los históricos');
   var _tabIngresos=_tt('ingresos','💡 Ingresos'+(_ingCnt?' ('+_ingCnt+')':''),_isSup?'Sugerencias de ingreso enviadas por el equipo':'Sugerir ingreso de productos y ver respuestas del supervisor');
+  // Estándares secundarios: pestaña propia para no enterrar los ingresos pendientes
+  var _ssnCnt=openStdSecNeeds().length;
+  var _tabStdSec=_tt('stdsec','⭐ Estándares'+(_ssnCnt?' ('+_ssnCnt+')':''),'Necesidades de desarrollo de estándar secundario y sus ingresos matcheados');
   var tb='<div class="tab-bar">'
     +(!_isSup?_tt('pendientes','⏰ Pendientes'+(_pendCnt?' ('+_pendCnt+')':''),'Productos pendientes, programados y en análisis — incluye solicitar asignación de productos omitidos'):'')
     // Fuera del supervisor, Ingresos va antes del listado de análisis.
     +(_isSup?_tabAnalisis+_tabIngresos:_tabIngresos+_tabAnalisis)
+    +_tabStdSec
     +'</div>';
   var body=(window.tasksTab==='pendientes'&&!_isSup)?renderPendientesList()
     :window.tasksTab==='ingresos'?renderSugerencias()
+    :window.tasksTab==='stdsec'?renderStdSecSection(_isSup)
     :renderTasks();
   return tb+body;
 }
@@ -14140,7 +14202,7 @@ function renderNotifPanel(){
     :0;
   // Estándar secundario: necesidad registrada / muestreo adicional realizado (supervisor)
   var stdSecNotifs=isSup
-    ?replanNotifs.filter(function(n){return (n.type==='stdsec_created'||n.type==='stdsec_sampled')&&n.status!=='resolved';})
+    ?replanNotifs.filter(function(n){return (n.type==='stdsec_created'||n.type==='stdsec_sampled'||n.type==='stdsec_match')&&n.status!=='resolved';})
         .sort(function(a,b){return(b.ts||0)-(a.ts||0);})
     :[];
   var overdueAlerts=[];
@@ -14432,15 +14494,19 @@ function renderNotifPanel(){
         +'<div style="font-size:12px;font-weight:600;color:#92400e;margin-bottom:8px">⭐ Estándares secundarios ('+stdSecNotifs.length+')</div>';
       stdSecNotifs.forEach(function(n){
         var isCreated=n.type==='stdsec_created';
-        html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid '+(isCreated?'#f59e0b':'#8b5cf6')+'">'
+        var isMatch=n.type==='stdsec_match';
+        html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid '+(isCreated||isMatch?'#f59e0b':'#8b5cf6')+'">'
           +'<div class="u-12b">'+escH(n.producto||'')+(n.lote?' — '+escH(n.lote):'')+'</div>'
           +'<div style="font-size:11px;color:var(--text2);margin:3px 0">'
-          +(isCreated?'Necesidad de desarrollo registrada por <b>'+escH(n.fromName||'')+'</b>'
+          +(isMatch?'Ingreso que matchea la necesidad de estándar <b>'+escH(n.needProducto||'')+'</b> — validá el lote para el desarrollo o rechazá el match'
+            :isCreated?'Necesidad de desarrollo registrada por <b>'+escH(n.fromName||'')+'</b>'
             :'Muestreo adicional realizado por <b>'+escH(n.fromName||'')+'</b> — falta fraccionar y cerrar')
           +'</div>'
           +'<div style="font-size:10px;color:var(--text3);margin-bottom:5px">'+new Date(n.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div>'
           +'<div style="display:flex;gap:4px;flex-wrap:wrap">'
-          +'<button class="btn sm" onclick="showNotifPanel=false;currentView=\'sugerencias\';render()" style="font-size:10px">Ver en Ingresos</button>'
+          +(isMatch?'<button class="btn sm suc" onclick="showNotifPanel=false;stdSecValidateMatch('+n.taskId+',\''+n.needId+'\')" style="font-size:10px">✓ Validar p/ desarrollo</button>'
+            +'<button class="btn sm dan" onclick="showNotifPanel=false;stdSecIgnoreMatch('+n.taskId+',\''+n.needId+'\')" style="font-size:10px">✗ Falso match</button>':'')
+          +'<button class="btn sm" onclick="showNotifPanel=false;currentView=\'tasks\';window.tasksTab=\'stdsec\';render()" style="font-size:10px">Ver ⭐ Estándares</button>'
           +'<button class="btn sm" onclick="markStdSecNotifSeen(\''+n.id+'\')" style="font-size:10px">✓ Visto</button>'
           +'</div>'
           +'</div>';
@@ -15306,6 +15372,8 @@ function saveTask(){
     if(!_ssT)return;
     var _ssN=stdSecNeedsForTask(_ssT).filter(function(n){return n.status==='pendiente';});
     if(_ssN.length){setTimeout(function(){try{showToast('⭐ '+_ssT.producto+' tiene desarrollo de estándar secundario pendiente: prever muestreo adicional y ensayos de calificación.','warn');}catch(e){}},150);}
+    // Notificar al supervisor los matches nuevos de esta tarea (dedup en la necesidad)
+    stdSecNeedsForTask(_ssT).forEach(function(n){_stdSecNotifyMatches(n);});
   })();
   saveLS('counters');
   render();
