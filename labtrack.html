@@ -903,7 +903,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082005; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082006; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -4978,12 +4978,6 @@ function getBiweekDates(off){
 // —p. ej. día 14 y 15— pueden verse consecutivos), y « / » saltan la ventana
 // completa (2 o 5 semanas) en las vistas de 14 y 35 días.
 function getCalDates(view, off){
-  if(view==='7c'){
-    // Semana centrada en hoy (analistas: coordinación del equipo, sin navegación)
-    var b7=new Date(today()+'T12:00:00');
-    b7.setDate(b7.getDate()-3);
-    return Array.from({length:7},function(_,i){var x=new Date(b7);x.setDate(b7.getDate()+i);return x.toISOString().slice(0,10);});
-  }
   if(view==='3d'){
     var base=new Date(today()+'T12:00:00');
     base.setDate(base.getDate()+off*3-1); // centrada en hoy: ayer · hoy · mañana
@@ -9068,16 +9062,14 @@ function renderCalWeek(sup){
   const _winWeeks=calView==='biweek'?2:calView==='5w'?5:1;
   const _stepLbl=calView==='3d'?['← Anterior','Siguiente →']:_winWeeks>1?['← Semana','Semana →']:['← Anterior','Siguiente →'];
   const _stepTitle=calView==='3d'?'3 días':'una semana';
-  return `${calView==='7c'?`<div class="filter-row" style="margin-bottom:12px">
-    <span style="font-size:13px;font-weight:600;font-family:var(--mono)">${fmtD(wd[0])} – ${fmtD(wd[wd.length-1])}</span>
-  </div>`:`<div class="filter-row" style="margin-bottom:12px">
+  return `<div class="filter-row" style="margin-bottom:12px">
     ${_winWeeks>1?`<button class="btn" onclick="weekOffset-=${_winWeeks};render()" title="Retroceder la ventana completa (${_winWeeks} semanas)">«</button>`:''}
     <button class="btn" onclick="weekOffset--;render()" title="Retroceder ${_stepTitle}">${_stepLbl[0]}</button>
     <span style="font-size:13px;font-weight:600;font-family:var(--mono);min-width:120px;text-align:center">${fmtD(wd[0])} – ${fmtD(wd[wd.length-1])}</span>
     <button class="btn" onclick="weekOffset++;render()" title="Avanzar ${_stepTitle}">${_stepLbl[1]}</button>
     ${_winWeeks>1?`<button class="btn" onclick="weekOffset+=${_winWeeks};render()" title="Avanzar la ventana completa (${_winWeeks} semanas)">»</button>`:''}
     <button class="btn sm" style="margin-left:6px" onclick="weekOffset=0;render()">Hoy</button>
-  </div>`}
+  </div>
   <div class="week-grid" style="overflow-x:auto">
     <div style="min-width:${_gridMinW}px">
       <div class="whead" style="${cols}"><div>Usuario</div>${dayLbls.map((d,i)=>_collapsed[wd[i]]
@@ -9486,13 +9478,14 @@ function renderWeek(){
   const sup=currentUser.role==='supervisor'||currentUser.role==='reviewer'||currentUser.role==='auditor';
   if(calView==='month')calView='5w'; // migración del modo anterior
   if(!sup){
-    // Analistas: cronograma del equipo (analistas+revisores) de UNA semana centrada
-    // en hoy, solo lectura y sin navegación — reemplaza a "Mi cronograma".
-    calView='7c';weekOffset=0;
+    // Analistas: calendario del equipo (analistas+revisores) en vista fija de 14 días,
+    // solo lectura, con navegación por semana o por ventana completa — reemplaza a
+    // "Mi cronograma" y permite coordinar la planificación entre analistas.
+    calView='biweek';
     const _curWA=parseInt(localStorage.getItem('lt9-calColW'))||88;
     const _cwBtnA=(w,label,title)=>`<button class="btn sm" onclick="localStorage.setItem('lt9-calColW','${w}');render()" style="padding:4px 8px;${_curWA===w?'background:var(--surface);font-weight:600;box-shadow:var(--shadow-sm)':''}" title="${title}">${label}</button>`;
     const barA=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-      <div style="font-size:12px;color:var(--text2)">📅 Semana del equipo centrada en hoy — para coordinar entre analistas (solo lectura)</div>
+      <div style="font-size:12px;color:var(--text2)">📅 Calendario del equipo (14 días) — para coordinar entre analistas (solo lectura)</div>
       <div style="display:flex;gap:2px;background:var(--bg2);border-radius:var(--radius);padding:3px;margin-left:auto" title="Ancho mínimo de las columnas de día">
         ${_cwBtnA(64,'A−','Columnas compactas')}${_cwBtnA(88,'A','Columnas normales')}${_cwBtnA(120,'A+','Columnas amplias')}
       </div>
