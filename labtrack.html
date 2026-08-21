@@ -903,7 +903,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082001; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082002; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -6476,9 +6476,10 @@ function markStdSecNotifSeen(notifId){
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow stdsec seen:',e);});
 }
-// Descartar un match puntual (falso positivo) sin tocar la necesidad: se guarda en la tarea
+// Descartar un match puntual (falso positivo) sin tocar la necesidad: se guarda en la tarea.
+// SOLO el supervisor: descartar apaga el aviso para ese ingreso y nadie más debe poder silenciarlo.
 function stdSecIgnoreMatch(taskId,needId){
-  if(isAuditorRole()){alert('Modo auditor: solo lectura.');return;}
+  if(!isSupRole()){alert('Solo el Supervisor puede descartar un aviso de estándar secundario.');return;}
   var t=tasks.find(function(x){return x.id===taskId;});if(!t)return;
   if(!confirm('¿Descartar el aviso de estándar secundario para "'+t.producto+' — '+t.lote+'"?\n\nSolo afecta este ingreso; la necesidad sigue activa para otros.'))return;
   if(!t.stdSecIgnore)t.stdSecIgnore=[];
@@ -6518,7 +6519,7 @@ function renderStdSecSection(isSup){
         +(matches.length
           ?'<div style="margin-top:6px;font-size:11px"><span style="font-weight:600;color:var(--text2)">Ingresos que matchean:</span> '
             +matches.map(function(t){return '<span style="display:inline-block;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:1px 6px;margin:2px 2px 0 0">'+escH(t.producto)+' — '+escH(t.lote)+' <span style="color:var(--text3)">('+statusLabel(t.status)+')</span>'
-              +(!isAuditorRole()?' <span onclick="stdSecIgnoreMatch('+t.id+',\''+n.id+'\')" title="Descartar este aviso (falso positivo)" style="cursor:pointer;color:var(--text3)">✕</span>':'')+'</span>';}).join('')
+              +(isSupRole()?' <span onclick="stdSecIgnoreMatch('+t.id+',\''+n.id+'\')" title="Descartar este aviso (falso positivo) — solo supervisor" style="cursor:pointer;color:var(--text3)">✕</span>':'')+'</span>';}).join('')
             +'</div>'
           :(pend?'<div style="margin-top:6px;font-size:11px;color:var(--text3)">Sin ingresos activos de esta MP por ahora — el aviso saltará al ingresarla.</div>':''))
         +((isSup&&isSupRole())||(!isSup&&(isSupRole()||n.createdBy===currentUser.id&&pend))
