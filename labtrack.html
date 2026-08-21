@@ -903,7 +903,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082006; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082007; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -3024,13 +3024,12 @@ function isWorkdayFor(analystId, dateStr){
     const analysts=extra.analysts||[];
     if(analysts==='all'||analysts.includes(analystId)) return true;
   }
-  // Check per-analyst workday config (stored as analystSchedules[id].workdays)
-  if(stored&&stored.workdays){
-    const day=new Date(dateStr+'T12:00:00').getDay();
-    // workdays is an object like {1:true,2:true,...} same as global
-    if(stored.workdays[day]===true) return true;
-    if(stored.workdays[day]===false) return false;
-  }
+  // Los patrones semanales per-analista legados (analystSchedules[id].workdays) ya NO
+  // se consultan: se configuraban con la UI de horarios eliminada (horarios en papel) y
+  // sin esa UI un sábado marcado laborable quedaba imposible de deshacer — mantenía el
+  // fin de semana expandido en el calendario para siempre. Rige el patrón global
+  // (lun–vie) + días extra/off puntuales. Las excepciones POR FECHA de arriba se
+  // conservan (histórico aprobado, no afectan fechas futuras).
   const day=new Date(dateStr+'T12:00:00').getDay();
   return workdayConfig.weekdays[day]===true;
 }
@@ -9046,11 +9045,13 @@ function renderCalWeek(sup){
   const _collapsed={};
   wd.forEach(d=>{
     if(rows.some(u=>isWorkdayFor(u.id,d)))return;
+    // Una ausencia sola NO expande un día no laborable: la licencia que abarca el fin
+    // de semana mantenía las columnas de sábado/domingo anchas sin información útil.
+    // Solo expande el contenido planificado real (análisis, gestión, tareas, muestreos).
     var hasContent=rows.some(u=>
       activeTasks().some(t=>(t.assignments||[]).some(x=>x.analyst===u.id&&x.date===d&&!x._removed)||(t.samplerAssignments||[]).some(sa=>sa.sampler===u.id&&sa.done&&sa.realArrivalDate===d))
       ||freeTasks.some(ft=>ft.analystId===u.id&&ft.date===d&&ft.status!=='rejected'&&ft.status!=='declined')
-      ||(_calCache[d]||[]).some(o=>(o.analysts||[]).includes(u.id))
-      ||!!getAbsenceOnDate(u.id,d));
+      ||(_calCache[d]||[]).some(o=>(o.analysts||[]).includes(u.id)));
     if(!hasContent)_collapsed[d]=true;
   });
   const cols='grid-template-columns:88px '+wd.map(d=>_collapsed[d]?'26px':'minmax(0,1fr)').join(' ');
