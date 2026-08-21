@@ -903,7 +903,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082004; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082005; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -6480,6 +6480,7 @@ function stdSecClose(id){
   n.status='cerrado';n.closedBy=currentUser.id;n.closedTs=Date.now();n._ts=Date.now();
   resolveAllCopies({type:'stdsec_created',needId:id},'closed');
   resolveAllCopies({type:'stdsec_sampled',needId:id},'closed');
+  resolveAllCopies({type:'stdsec_match',needId:id},'closed');
   auditLog('RESOLVE','STDSEC',id,{producto:n.producto,description:'Estándar secundario cerrado (fraccionado): '+n.producto},'');
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow stdsec close:',e);});
@@ -6492,6 +6493,7 @@ function stdSecDelete(id){
   n._removed=true;n._removedTs=Date.now();n._ts=Date.now();
   resolveAllCopies({type:'stdsec_created',needId:id},'deleted');
   resolveAllCopies({type:'stdsec_sampled',needId:id},'deleted');
+  resolveAllCopies({type:'stdsec_match',needId:id},'deleted');
   auditLog('DELETE','STDSEC',id,{producto:n.producto,description:'Necesidad de estándar secundario eliminada: '+n.producto},'');
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow stdsec del:',e);});
@@ -14111,6 +14113,19 @@ function autoResolveNotifs(){
       case 'schedule_rejected':
         stale = n.status==='read'||(n.readBy||[]).includes(n.forUserId||'');
         break;
+      // Estándares secundarios: si la necesidad ya no está abierta (eliminada, cerrada
+      // o inexistente) la notificación no tiene acción posible → se resuelve sola.
+      // Además, un match cuya tarea desapareció, fue validada o descartada queda stale.
+      case 'stdsec_created':
+      case 'stdsec_sampled':
+      case 'stdsec_match': {
+        var _ssnN=n.needId?stdSecNeeds.find(function(x){return x.id===n.needId;}):null;
+        stale = !_ssnN||_ssnN._removed||_ssnN.status==='cerrado';
+        if(!stale&&n.type==='stdsec_match'){
+          stale = !task||!!task.stdSecDev||(task.stdSecIgnore||[]).indexOf(n.needId)>=0;
+        }
+        break;
+      }
     }
     if(stale) n.status='resolved';
   });
