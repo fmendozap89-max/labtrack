@@ -903,7 +903,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082002; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082003; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -6388,6 +6388,22 @@ function stdSecBadge(t){
     +'" style="background:'+(pend?'#fef3c7':'#ede9fe')+';color:'+(pend?'#92400e':'#5b21b6')
     +';border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap;cursor:help">⭐ STD'+(pend?'':' ✓')+'</span>';
 }
+// Recuadro informativo para el detalle del producto (modal): visible para todos los
+// roles mientras haya una necesidad abierta que matchee esta MP.
+function _stdSecInfoBox(t){
+  var ns=stdSecNeedsForTask(t);
+  if(!ns.length)return'';
+  return ns.map(function(n){
+    var pend=n.status==='pendiente';
+    return '<div style="background:'+(pend?'#fef3c7':'#ede9fe')+';border:1px solid '+(pend?'#f59e0b':'#8b5cf6')+';border-radius:var(--radius);padding:8px 12px;margin-bottom:12px;font-size:12px;color:'+(pend?'#92400e':'#5b21b6')+'">'
+      +'<b>⭐ Desarrollo de estándar secundario'+(pend?' pendiente':'')+'</b>'
+      +(pend
+        ?'<div style="font-size:11px;margin-top:2px">Muestrear cantidad adicional y prever los ensayos de calificación como estándar (se pueden sumar al análisis de aprobación en curso).</div>'
+        :'<div style="font-size:11px;margin-top:2px">Cantidad adicional ya muestreada por '+escH(n.sampledByName||'')+(n.sampledTs?' el '+new Date(n.sampledTs).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}):'')+' — falta fraccionar y cerrar (supervisor, en Ingresos).</div>')
+      +(n.notes?'<div style="font-size:11px;margin-top:2px;opacity:.85">📝 '+escH(n.notes)+'</div>':'')
+      +'</div>';
+  }).join('');
+}
 function openStdSecModal(){
   if(isAuditorRole()){alert('Modo auditor: solo lectura. No es posible ejecutar acciones que modifican datos.');return;}
   showStdSecModal=true;render();
@@ -8127,7 +8143,7 @@ function tRowSupLote(t){
       +assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" title="'+escH(u.name)+'" style="width:20px;height:20px;font-size:8px">'+escH(u.avInit)+'</div>':''}).join('')
       +'</div>';
   // C3 Tipo
-  row+='<div style="display:flex;align-items:center">'+sampleTypeBadge(t.tipo)+'</div>';
+  row+='<div style="display:flex;align-items:center">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+'</div>';
   // C4 Ingreso
   row+='<div style="font-family:var(--mono);font-size:11px;color:var(--text2)">'+(t.created?fmtDDMMYY(t.created):'—')+'</div>';
   // C4 Aprob. límite
@@ -8188,7 +8204,7 @@ function tRowSupAnalista(t){
         +(u?'<span style="font-size:11px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(u.name.split(' ')[0])+'</span>':'')
         +'</div>';
     // C3 Tipo (first row only)
-    row+='<div style="display:flex;align-items:center">'+(isFirst?sampleTypeBadge(t.tipo):'')+'</div>';
+    row+='<div style="display:flex;align-items:center">'+(isFirst?sampleTypeBadge(t.tipo)+stdSecBadge(t):'')+'</div>';
     // C4 Ingreso (first row only)
     row+='<div style="font-family:var(--mono);font-size:11px;color:var(--text2)">'+(isFirst&&t.created?fmtDDMMYY(t.created):'')+'</div>';
     // C4 Fecha programada + límite
@@ -8298,7 +8314,7 @@ function tRowAna(t,maOverride){
   var _ilrActive=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id&&!r._deleted;});
   return'<div>'
     +'<div class="trow" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr'+(showOverdueWarn?';border-left:3px solid var(--amber)':'')+'">'
-    +'<div><div class="cell-trunc">'+escH(t.producto)+'</div><div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+'<span>'+escH(t.lote)+'</span></div></div>'
+    +'<div><div class="cell-trunc">'+escH(t.producto)+'</div><div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+'<span>'+escH(t.lote)+'</span></div></div>'
     +'<div style="font-family:var(--mono);font-size:12px">'+fmtD(md)+(replanLabel?'<br>'+replanLabel:'')+'</div>'
     +'<div>'+hoursCol+'</div>'
     +'<div>'
@@ -8462,7 +8478,7 @@ function tRowAnaHist(t,ma){
   var _ilrA=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id&&!r._deleted;});
   return'<div class="trow" onclick="openEdit('+t.id+')" style="grid-template-columns:1.8fr .8fr .55fr .9fr;cursor:pointer">'
     +'<div><div class="cell-trunc" style="font-weight:600">'+escH(t.producto)+'</div>'
-    +'<div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+'<span class="u-mono11">'+escH(t.lote)+'</span></div></div>'
+    +'<div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+'<span class="u-mono11">'+escH(t.lote)+'</span></div></div>'
     +'<div style="font-family:var(--mono);font-size:12px">'+fmtD(md)+'</div>'
     +'<div>'+(maRealH?'<span style="font-size:11px;font-weight:700;font-family:var(--mono);color:var(--green)">'+maRealH.toFixed(1)+'h</span>':'<span class="u-xs3">—</span>')+'</div>'
     +'<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">'
@@ -11458,6 +11474,7 @@ function renderTaskModal(){
     return'<div class="modal-overlay"><div class="modal">'
       +'<h3 style="margin-bottom:4px">'+escH(t.producto)+'</h3>'
       +'<div style="font-size:12px;color:var(--text3);font-family:var(--mono);margin-bottom:16px">'+escH(t.lote)+'</div>'
+      +_stdSecInfoBox(t)
       +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px;margin-bottom:16px;font-size:12px">'
       +'<div><span class="u-fg3">Tipo </span>'+sampleTypeBadge(t.tipo)+'</div>'
       +'<div><span class="u-fg3">Estado </span><span class="pill '+t.status+'" style="font-size:10px">'+statusLabel(t.status)+'</span></div>'
@@ -11572,6 +11589,7 @@ function renderTaskModal(){
   return'<div class="modal-overlay"><div class="modal">'
     +'<h3>'+(isEdit?'Editar análisis de lote':(newTaskPrefill.suggId?'Confirmar ingreso sugerido':'Nuevo análisis de lote'))+'</h3>'
     +_reqBanner+_ilBanner+_suggBanner
+    +(isEdit?_stdSecInfoBox(t):'')
     +'<div class="form-grid">'
     +'<div class="frow"><label>Tipo de muestra'+(t.tipo==='IL'?'':' <span style="color:var(--red)">*</span>')+'</label>'+(t.tipo==='IL'?'<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 11px;border:1px solid #1d4ed8;border-radius:20px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8">🔗 IL · Inter-laboratorio</span><input type="hidden" id="f-tipo" value="IL">':renderTipoPillsHtml(t.tipo||''))+'</div>'
     +'<div class="frow"><label>Producto</label><input type="text" id="f-prod" value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg"></div>'
