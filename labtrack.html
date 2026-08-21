@@ -381,6 +381,13 @@ let tasks=[];
 let freeTasks=[]; // tareas libres sin producto: {id,analystId,description,hours,date,category,notes,status,confirmedBy,confirmedTs,_ts}
 let nextFreeTaskId=1;
 let productSuggestions=[]; // sugerencias de ingreso por no-supervisores: {id,producto,lote,priority,due,notes,suggestedBy,suggestedByName,suggestedTs,status,_ts}
+// Necesidades de desarrollo de estándar secundario (aplica a MP activas). El matching
+// contra ingresos es por nombre normalizado EN RENDER (no al crear): una necesidad
+// registrada después de crear la tarea MP también avisa. Estados: pendiente (muestrear
+// cantidad adicional) → muestreado (extra tomado, falta fraccionar) → cerrado (manual, supervisor).
+// {id:'ssn...',producto,notes,due,createdBy,createdByName,ts,status,sampledBy,sampledByName,sampledTs,sampledTaskId,closedBy,closedTs,_ts,_removed,_removedTs}
+let stdSecNeeds=[];
+let showStdSecModal=false;
 let nextSuggId=1;
 let showSuggModal=false;
 let newTaskPrefill={}; // {suggId,producto,lote,due,priority,notes} — prefill when creating from suggestion
@@ -476,10 +483,8 @@ let dashFilter='';
 
 function setMgmtMonthAnalyst(id){mgmtMonthAnalyst=id||null;render();}
 let mySchedView='week';
-let cronogramaView='week'; // 'week'|'month' // 'week'|'month' for analyst schedule // selected analyst in month view // 'list'|'calendar'
 let mgmtCalView='week';
 let schedView='week'; // 'week'|'month' for schedule tab
-let schedSelectedAnalyst=null;
 let mgmtCategories=[
   {id:'revision',label:'Revisión',color:'#e8eff8',text:'#1a4f8a'},
   {id:'toc',label:'TOC',color:'#e4f2ea',text:'#1e5c35'},
@@ -493,11 +498,7 @@ let analystSchedules={};
 // Schedule change requests: [{id, analystId, type:'schedule', proposed, reason, status, ts}]
 let scheduleRequests=[];
 let nextSchedReqId=1;
-let showSchedReqModal=false;
 let multiAssigns=[]; // [{_key,analyst,date}] — permite mismo analista varias veces
-let showSchedModal=false;
-let schedModalAnalyst=null;
-let schedModalDate=null;
 // Editable absence types: deep copy so supervisor can rename
 let absenceTypesDef={
   holiday:{label:'Feriado',color:'#faecd3',text:'#7a4e0a'},
@@ -544,14 +545,14 @@ function _auditorNotice(){
 var _AUD_SAFE_FNS=new Set([
   // navegación / render / detalle
   'setView','render','openEdit','_srch','logout','openMobUserMenu','closeModal',
-  'showTaskHistoryModal','showDayActivitiesModal','_showILRDetails','gistSyncFromRemote',
+  'showTaskHistoryModal','_showILRDetails','gistSyncFromRemote',
   // filtros / tabs / preferencias de vista
   'setMTab','setTaskSort','setFS','setFA','toggleCalRole','_toggleTipo','_toggleIngresosType',
   'toggleArchView','setMgmtMonthAnalyst','printCalendar',
   // exportaciones y copias (solo lectura)
   'copyInformeTable','exportInformeXLSX','exportXLSX','copyTableToClipboard','exportTipoXLSX',
   'copyPendientes','exportPendientesXLSX','copyRevision','exportRevisionXLSX','copyAprobados',
-  'doExportAprobados','copyHistorial','exportAuditCSV','exportNotificacionesXLSX','copyMgmtList',
+  'doExportAprobados','copyHistorial','exportAuditCSV','copyMgmtList',
   'exportMgmtListXLSX','copyFreeTasks','exportFreeTasksXLSX','exportAusenciasXLSX',
   // tokens neutrales que aparecen dentro de handlers legítimos
   'stopPropagation','preventDefault','if','confirm','alert','prompt',
@@ -617,7 +618,7 @@ function getSnapshot(){
     labName:_labName,
     v:7,
     tasks,nextId,nextUid,nextNotifId,nextAbsId,nextMgmtId,
-    freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,customTipos,
+    freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,stdSecNeeds,customTipos,
     customTipos_ts:(customTipos_ts||0),
     users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{}),...(u._ts?{_ts:u._ts}:{}),...(u._mustChangePwd?{_mustChangePwd:true}:{})})),
     passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
@@ -711,6 +712,15 @@ function applySnapshot(json){
       if(s.status==='pending')return true; // sin resolver: nunca purgar por edad
       if(_pendSuggIds[s.id])return true;   // referenciada por notif activa
       return Math.max(s._ts||0,s.suggestedTs||0)>_suggCut;
+    });
+    stdSecNeeds=d.stdSecNeeds||[];
+    // Retención: necesidades de estándar secundario cerradas o eliminadas (tombstone)
+    // con más de 60 días. Las abiertas (pendiente/muestreado) nunca se purgan por edad.
+    // Poda determinística → converge en todos los clientes.
+    var _ssnCut=Date.now()-60*24*60*60*1000;
+    stdSecNeeds=stdSecNeeds.filter(function(n){
+      if(!n._removed&&n.status!=='cerrado')return true;
+      return Math.max(n._ts||0,n.closedTs||0,n._removedTs||0)>_ssnCut;
     });
     nextId=d.nextId||11;
     nextUid=d.nextUid||100;
@@ -893,7 +903,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026072601; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082001; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -1348,9 +1358,9 @@ async function _executeSaveLocked() {
         merged.savedAt = Date.now();
         const _prevUser = currentUser;
         // Cualquier modal renderizado abierto: capturar lo tecleado para restaurarlo tras el render
-        var _anyRenderedModal=showModal||showFreeTaskModal||showMgmtModal||showSchedModal||showReplanModal
+        var _anyRenderedModal=showModal||showFreeTaskModal||showMgmtModal||showReplanModal
           ||showExtraModal||showMgmtOccModal||showTimeLogModal||showReceiveModal||showSamplingModal
-          ||showSuggModal||showImportModal||showChangePwd||showSchedReqModal;
+          ||showSuggModal||showImportModal||showChangePwd||showStdSecModal;
         var _syncFormState=_anyRenderedModal?_captureModalFormState():null;
         var _syncModalTaskId=editingTask;
         applySnapshot(JSON.stringify(merged));
@@ -1774,9 +1784,9 @@ async function gistSyncFromRemote() {
     gistStatus = 'error'; renderSpBadge(); return;
   }
   // Si hay un modal abierto, diferir el sync para no interrumpir una edición en curso
-  const _anyModal=showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
+  const _anyModal=showModal||showReplanModal||showChangePwd||showImportModal
     ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
-    ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
+    ||showReceiveModal||showSamplingModal||showSuggModal||showStdSecModal;
   if(_anyModal){_syncDeferred=true;gistStatus='ok';renderSpBadge();return;}
   _syncDeferred=false;
   gistStatus = 'syncing'; renderSpBadge();
@@ -2123,7 +2133,7 @@ function loadSpConfig() {
 // clave (y eventualmente el gist) del lab equivocado.
 function _clearStateForLabSwitch(){
   tasks=[];nextId=1;nextUid=1;nextNotifId=1;nextAbsId=1;nextMgmtId=1;
-  freeTasks=[];nextFreeTaskId=1;productSuggestions=[];nextSuggId=1;
+  freeTasks=[];nextFreeTaskId=1;productSuggestions=[];nextSuggId=1;stdSecNeeds=[];
   USERS=[];passwords={};passwords_ts={};rebuildDerived();
   replanNotifs=[];absences={};absences_ts={};
   workdayConfig={weekdays:{1:true,2:true,3:true,4:true,5:true,0:false,6:false},extra:[],off:[],guideUrl:''};
@@ -2346,7 +2356,7 @@ function firstViewForRole(user){
   switch(user.role){
     case 'supervisor': return 'dashboard';
     case 'auditor':    return 'dashboard';
-    case 'reviewer':   return 'tasks';
+    case 'reviewer':   return 'dashboard';
     case 'analyst':    return 'dashboard';
     case 'staff':      return 'dashboard';
     case 'sampler':    return 'dashboard';
@@ -2356,10 +2366,10 @@ function firstViewForRole(user){
 function isViewAllowed(view, user){
   if(!user||!view)return false;
   var role=user.role;
+  // Módulos eliminados (horarios en papel): vistas guardadas viejas caen al dashboard
+  if(['cronograma','myschedule','notificaciones'].includes(view))return false;
   // Views restricted to supervisor only
-  // 'notificaciones' (módulo "Solicitudes" de cambios de horario) es exclusivo del supervisor:
-  // el revisor no gestiona solicitudes de horario del equipo (req. permisos revisor).
-  var supOnly=['admin','audittrail','historial','informes','rrhh','aprobados','notificaciones'];
+  var supOnly=['admin','audittrail','historial','informes','rrhh','aprobados'];
   if(supOnly.includes(view)&&role!=='supervisor'&&role!=='auditor')return false;
   // Views restricted to supervisor + reviewer (+ auditor solo lectura)
   var supRevOnly=['especiales','revision'];
@@ -3051,44 +3061,6 @@ function removeWorkdayOverride(dateStr){
   auditLog('DELETE','WORKDAY_CONFIG',dateStr,{description:'Excepción de calendario eliminada: '+dateStr},'');
   saveLS();render();
 }
-function getAnalystScheduleDefault(analystId){
-  const stored=analystSchedules[analystId];
-  if(stored&&stored.default)return stored.default;
-  if(stored&&stored.startTime)return stored; // legacy
-  return {startTime:'08:00',endTime:'16:00',breakMinutes:60};
-}
-function getAnalystScheduleForDate(analystId, dateStr){
-  const stored=analystSchedules[analystId];
-  if(stored&&stored.overrides&&stored.overrides[dateStr]){
-    const ov=stored.overrides[dateStr];
-    if(ov.status==='approved'||ov.status==='assigned')return ov;
-  }
-  return getAnalystScheduleDefault(analystId);
-}
-function calcHours(s){
-  const [sh,sm]=(s.startTime||'08:00').split(':').map(Number);
-  const [eh,em]=(s.endTime||'16:00').split(':').map(Number);
-  let total=(eh*60+em)-(sh*60+sm);
-  if(total<=0) total+=24*60; // overnight shift crosses midnight
-  return Math.max(0,(total-(s.breakMinutes||60))/60);
-}
-function setAnalystDefault(analystId,sched){
-  if(!analystSchedules[analystId])analystSchedules[analystId]={overrides:{}};
-  else if(!analystSchedules[analystId].overrides)analystSchedules[analystId].overrides={};
-  analystSchedules[analystId].default=sched;
-  saveLS();render();
-}
-function setAnalystDayOverride(analystId,dateStr,sched){
-  if(!analystSchedules[analystId])analystSchedules[analystId]={default:{startTime:'08:00',endTime:'16:00',breakMinutes:60},overrides:{}};
-  else if(!analystSchedules[analystId].overrides)analystSchedules[analystId].overrides={};
-  analystSchedules[analystId].overrides[dateStr]=sched;
-  saveLS();render();
-}
-function removeAnalystDayOverride(analystId,dateStr){
-  if(analystSchedules[analystId]?.overrides)
-    delete analystSchedules[analystId].overrides[dateStr];
-  saveLS();render();
-}
 function isAbsent(analystId,dateStr){
   return getAnalystAbsences(analystId).some(a=>a.startDate<=dateStr&&a.endDate>=dateStr);
 }
@@ -3206,390 +3178,28 @@ function checkAbsenceConflicts(){
 }
 
 // ── RRHH VIEW ──
-let rrhhTab='schedules'; // 'absences' | 'conflicts'
+let rrhhTab='absences'; // 'absences' | 'abstypes' | 'workdays' | 'conflicts'
 let rrhhAnalyst=null;
 let absFormOpen=false;
 
 function renderRrhh(){
   if(!canViewSup()) return '<div class="empty">Acceso restringido</div>';
+  // Horarios y solicitudes de cambio de horario: se registran en papel — fuera de la app.
+  // Quedan ausencias (suman a la gestión y al calendario del equipo) y días laborables.
+  if(rrhhTab==='schedules'||rrhhTab==='solicitudes')rrhhTab='absences';
   const conflicts=checkAbsenceConflicts();
   return`
   <div class="tab-bar" style="flex-wrap:wrap">
-    <div class="tab${rrhhTab==='schedules'?' active':''}" onclick="rrhhTab='schedules';render()">Horarios</div>
-    <div class="tab${rrhhTab==='workdays'?' active':''}" onclick="rrhhTab='workdays';render()">Días laborables</div>
     <div class="tab${rrhhTab==='absences'?' active':''}" onclick="rrhhTab='absences';render()">Ausencias</div>
     <div class="tab${rrhhTab==='abstypes'?' active':''}" onclick="rrhhTab='abstypes';render()">Tipos de ausencia</div>
+    <div class="tab${rrhhTab==='workdays'?' active':''}" onclick="rrhhTab='workdays';render()">Días laborables</div>
     <div class="tab${rrhhTab==='conflicts'?' active':''}" onclick="rrhhTab='conflicts';render()" style="position:relative">
       Conflictos${conflicts.length>0?`<span style="position:absolute;top:-3px;right:-4px;background:var(--red);color:#fff;border-radius:50%;width:14px;height:14px;font-size:8px;display:flex;align-items:center;justify-content:center;font-weight:700">${conflicts.length}</span>`:''}
     </div>
-    <div class="tab${rrhhTab==='solicitudes'?' active':''}" onclick="rrhhTab='solicitudes';render()" style="position:relative" title="Solicitudes de cambio de horario del equipo">
-      Solicitudes${(()=>{const p=scheduleRequests.filter(r=>r.status==='pending').length;return p>0?`<span style="position:absolute;top:-3px;right:-4px;background:var(--red);color:#fff;border-radius:50%;width:14px;height:14px;font-size:8px;display:flex;align-items:center;justify-content:center;font-weight:700">${p}</span>`:'';})()}
-    </div>
   </div>
-  ${rrhhTab==='schedules'?renderSchedulesTab():rrhhTab==='workdays'?renderWorkdaysTab():rrhhTab==='absences'?renderAbsencesTab():rrhhTab==='abstypes'?renderAbsTypesTab():rrhhTab==='solicitudes'?renderNotificaciones():renderConflictsTab(conflicts)}`;
+  ${rrhhTab==='workdays'?renderWorkdaysTab():rrhhTab==='abstypes'?renderAbsTypesTab():rrhhTab==='conflicts'?renderConflictsTab(conflicts):renderAbsencesTab()}`;
 }
 
-const SCHED_TYPES=[
-  {id:'change',label:'Cambio de horario',color:'#e8eff8'},
-  {id:'overtime',label:'Horas extra',color:'#e4f2ea'},
-  {id:'reduced',label:'Jornada reducida',color:'#faecd3'},
-  {id:'shift',label:'Guardia / Turno',color:'#e8e3f8'},
-];
-function renderSchedModal(){
-  const isSup=currentUser.role==='supervisor';
-  const a=getU(schedModalAnalyst);
-  const isDay=!!schedModalDate;
-  const def=getAnalystScheduleDefault(schedModalAnalyst);
-  const existing=isDay?getAnalystScheduleForDate(schedModalAnalyst,schedModalDate):null;
-  const hasOverride=isDay&&analystSchedules[schedModalAnalyst]?.overrides?.[schedModalDate];
-  const s=existing||def;
-  const typeOpts=SCHED_TYPES.map(t=>`<option value="${t.id}"${(s.type||'change')===t.id?' selected':''}>${t.label}</option>`).join('');
-  const pendingReq=isDay?scheduleRequests.find(r=>r.analystId===schedModalAnalyst&&r.dateStr===schedModalDate&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime'):null;
-  return`<div class="modal-overlay"><div class="modal" style="width:420px">
-    <h3>${isSup?(isDay?'Horario del día':'Editar horario predeterminado'):(isDay?'Solicitar cambio de horario':'Solicitar cambio de horario predeterminado')}</h3>
-    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg);border-radius:var(--radius);margin-bottom:14px">
-      <div class="av av-lg ${a.av}">${escH(a.avInit)}</div>
-      <div><div style="font-weight:600">${escH(a.name)}</div>
-        <div class="u-sm3">${isDay?`Día: <b>${fmtDF(schedModalDate)}</b>`:'Horario predeterminado'}</div>
-      </div>
-      ${isDay?`<div style="margin-left:auto;text-align:right">
-        <div class="u-xs3">Predeterminado</div>
-        <div style="font-family:var(--mono);font-size:12px">${def.startTime}–${def.endTime}</div>
-      </div>`:''}
-    </div>
-    ${pendingReq?`<div style="background:var(--amber-bg);border-radius:var(--radius);padding:8px 12px;margin-bottom:12px;font-size:12px;color:var(--amber-text)">
-      ⏳ Solicitud pendiente: ${pendingReq.proposed.startTime}–${pendingReq.proposed.endTime} · ${escH(pendingReq.reason)}
-      ${isSup?`<div style="display:flex;gap:6px;margin-top:6px">
-        <button class="btn sm suc" style="flex:1" onclick="approveSchedule(${pendingReq.id})">✓ Aprobar</button>
-        <button class="btn sm dan" style="flex:1" onclick="rejectSchedule(${pendingReq.id})">✕ Rechazar</button>
-      </div>`:''}
-    </div>`:''}
-    ${isDay?`<div class="frow"><label>Tipo de excepción</label><select id="sm-type">${typeOpts}</select></div>`:''}
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
-      <div class="frow"><label>Hora inicio</label>${timePicker('sm-start',s.startTime||'08:00')}</div>
-      <div class="frow"><label>Hora fin</label>${timePicker('sm-end',s.endTime||'16:00')}</div>
-      <div class="frow"><label>Descanso (min)</label><input type="number" id="sm-brk" value="${s.breakMinutes||60}" min="0" step="15"></div>
-    </div>
-    <div style="background:var(--bg);border-radius:var(--radius);padding:8px 12px;margin-bottom:12px;font-size:12px;text-align:center">
-      Jornada: <b id="sm-hours-preview">${calcHours(s).toFixed(1)}h</b>${(()=>{const sh=(s.startTime||'08:00').split(':').map(Number);const eh=(s.endTime||'16:00').split(':').map(Number);return (eh[0]*60+eh[1])<(sh[0]*60+sh[1])?'<span style="font-size:10px;color:var(--amber-text);margin-left:6px">↻ Turno nocturno (cruza medianoche)</span>':''})()}
-    </div>
-    ${!isDay&&isSup?`<div class="frow"><label>Días laborales</label><div style="display:flex;gap:6px;flex-wrap:wrap">${[1,2,3,4,5,6,0].map(d=>{  const lbls=['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];  const stored2=analystSchedules[schedModalAnalyst];  const wd=stored2&&stored2.workdays?stored2.workdays:workdayConfig.weekdays;  const on=wd[d]===true;  return`<label style="display:flex;align-items:center;gap:3px;font-size:12px;cursor:pointer;padding:3px 6px;border:1px solid var(--border);border-radius:var(--radius);background:${on?'var(--blue-bg)':'var(--surface)'}"><input type="checkbox" id="sm-wd-${d}" ${on?'checked':''} onchange="(function(){var el=document.getElementById('sm-wd-${d}');el.closest('label').style.background=el.checked?'var(--blue-bg)':'var(--surface)';el.closest('label').style.color=el.checked?'var(--blue)':'';})()">${lbls[d]}</label>`;}).join('')}</div></div>`:''}
-    <div class="frow"><label>${isSup?'Nota (opcional)':'Motivo (requerido)'}</label>
-      <input type="text" id="sm-note" value="${escH(s.note||s.reason||'')}" placeholder="${isDay?'Ej: Turno especial, horas extra por urgencia...':'Ej: Cambio de horario permanente'}">
-    </div>
-    <div class="modal-btns">
-      ${isSup&&isDay?`<button class="btn" onclick="openOvertimeForSup('${schedModalAnalyst}','${schedModalDate}')">+ Horas extra</button>`:''}      ${isSup&&isDay&&hasOverride?`<button class="btn dan" onclick="removeAnalystDayOverride('${schedModalAnalyst}','${schedModalDate}');showSchedModal=false;render()">Quitar excepción</button>`:''}
-      <button class="btn" onclick="showSchedModal=false;render()">Cancelar</button>
-      <button class="btn pri" onclick="saveSchedModal()">${isSup?'Guardar':'Enviar solicitud'}</button>
-    </div>
-  </div></div>`;
-}
-// ── Time normalization: round to nearest 15 min ──
-
-function saveSchedModal(){
-  const isSup=currentUser.role==='supervisor';
-  const start=getTimeVal('sm-start')||'08:00';
-  const end=getTimeVal('sm-end')||'16:00';
-  const brk=parseInt(document.getElementById('sm-brk')?.value)||60;
-  const note=document.getElementById('sm-note')?.value.trim()||'';
-  const type=document.getElementById('sm-type')?.value||'change';
-  const proposed={startTime:start,endTime:end,breakMinutes:brk,type,note};
-  if(isSup){
-    if(schedModalDate){
-      setAnalystDayOverride(schedModalAnalyst,schedModalDate,{...proposed,status:'assigned'});
-    } else {
-      setAnalystDefault(schedModalAnalyst,proposed);
-      // Save per-analyst workdays if checkboxes are present
-      var wdResult={};
-      var hasWd=false;
-      [0,1,2,3,4,5,6].forEach(function(d){
-        var cb=document.getElementById('sm-wd-'+d);
-        if(cb){wdResult[d]=cb.checked;hasWd=true;}
-      });
-      if(hasWd){
-        if(!analystSchedules[schedModalAnalyst])analystSchedules[schedModalAnalyst]={overrides:{}};
-        analystSchedules[schedModalAnalyst].workdays=wdResult;
-      }
-    }
-    showSchedModal=false;saveLS();render();
-    saveNow().catch(function(e){console.error('saveNow schedSup:',e);});
-  } else {
-    if(!note&&!isSup){alert('Indicá el motivo del cambio.');return;}
-    scheduleRequests.push({
-      id:nextSchedReqId++,analystId:schedModalAnalyst,
-      dateStr:schedModalDate||null,status:'pending',
-      proposed,reason:note,ts:Date.now(),requestedBy:currentUser.id
-    });
-    showSchedModal=false;saveLS();render();
-    saveNow().catch(function(e){console.error('saveNow schedReq:',e);});
-    // No alert needed — bell will show it
-  }
-}
-function renderSchedulesTab(){
-  try{
-    const isSup=canViewSup(); // auditor: horarios de TODO el equipo (solo lectura)
-    const allRows=isSup
-      ?USERS.filter(function(u){return['analyst','reviewer','staff','sampler'].includes(u.role);}).sort(function(a,b){return a.name.localeCompare(b.name,'es');})
-      :[USERS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
-    const rows=isSup&&rrhhRoleFilter!=='all'?allRows.filter(function(u){return u.role===rrhhRoleFilter;}):allRows;
-    if(!allRows||allRows.length===0)return'<div class="empty">No hay analistas configurados.</div>';
-    const pendTotal=scheduleRequests.filter(r=>r.status==='pending').length;
-    var _wA=(!schedView||schedView==='week');
-    var _mA=(schedView==='month');
-    var viewToggle='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">'
-      +'<div style="display:flex;gap:4px;background:var(--bg2);border-radius:var(--radius);padding:3px">'
-      +'<button class="btn sm" onclick="schedView=\'week\';render()" style="'+(_wA?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">Semana</button>'
-      +'<button class="btn sm" onclick="schedView=\'month\';render()" style="'+(_mA?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">Mes</button>'
-      +'</div>'
-      +(isSup?renderRrhhRoleFilter().replace('margin-bottom:8px','margin-bottom:0'):'')
-      +'</div>';
-    var _sv=schedView||'week';
-    return viewToggle+(_sv==='week'?renderSchedulesWeek(isSup,rows,pendTotal):renderSchedulesMonth(isSup,rows));
-  }catch(e){
-    console.error('renderSchedulesTab error:',e);
-    return'<div style="background:var(--red-bg);border:1px solid var(--red);border-radius:var(--radius);padding:14px;color:var(--red-text);font-size:13px">'
-      +'<b>Error al cargar Horarios:</b><br><code style="font-size:11px">'+escH(e&&e.message||String(e))+'</code>'
-      +'</div>';
-  }
-}
-
-// Per-assignment hours helper — returns real hours logged
-var getAssignHours=function(task,analystId,dateStr){
-  var assigns=(task.assignments||[]).filter(function(a){return !a._removed&&a.analyst===analystId&&(!dateStr||a.date===dateStr);});
-  return assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
-};
-function renderSchedulesWeek(isSup,rows,pendTotal){
-  const wd=getWeekDates(weekOffset);
-  const todayStr=today();
-
-  // Pre-compute mgmt occurrences for the week (perf)
-  const _dayMgmtCache={};
-  wd.forEach(d=>{_dayMgmtCache[d]=mgmtTasks.flatMap(mt=>expandMgmt(mt,d,d));});
-  function buildDayInfo(analystId,d){
-    const def=getAnalystScheduleDefault(analystId);
-    const ov=analystSchedules[analystId]?.overrides?.[d];
-    const hasOv=ov&&(ov.status==='approved'||ov.status==='assigned');
-    const s=hasOv?ov:def;
-    const h=calcHours(s);
-    const absent=getAbsenceOnDate(analystId,d);
-    const isWork=isWorkdayFor(analystId,d);
-    const pendReq=scheduleRequests.find(r=>r.analystId===analystId&&r.dateStr===d&&r.status==='pending');
-    const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===analystId&&x.date===d&&!x._removed));
-    const mgmtOccs=(_dayMgmtCache[d]||[]).filter(o=>(o.analysts||[]).includes(analystId));
-    const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,analystId,d),0);
-    const extraH=Math.max(0,workH-h);
-    return{s,h,hasOv,ov,absent,isWork,pendReq,myTasks,mgmtOccs,workH,extraH};
-  }
-
-  return`
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
-    <button class="btn" onclick="weekOffset--;render()">← Anterior</button>
-    <span style="font-size:14px;font-weight:600;font-family:var(--mono)">${fmtD(wd[0])} – ${fmtD(wd[6])}</span>
-    <button class="btn" onclick="weekOffset++;render()">Siguiente →</button>
-    <button class="btn sm" onclick="weekOffset=0;render()">Hoy</button>
-    ${isSup&&pendTotal>0?`<span style="margin-left:auto;font-size:11px;background:var(--amber-bg);color:var(--amber-text);padding:4px 12px;border-radius:20px;font-weight:600;cursor:pointer" onclick="showNotifPanel=true;render()">⏳ ${pendTotal} solicitud${pendTotal>1?'es':''} pendiente${pendTotal>1?'s':''}</span>`:''}
-  </div>
-
-  ${rows.map(a=>{
-    const def=getAnalystScheduleDefault(a.id);
-    const defH=calcHours(def);
-    const pendA=scheduleRequests.filter(r=>r.analystId===a.id&&r.status==='pending').length;
-    const cols=wd.map(d=>{
-      const {s,h,hasOv,ov,absent,isWork,pendReq,myTasks,mgmtOccs,workH,extraH}=buildDayInfo(a.id,d);
-      const absTyp=absent?getABSTypes()[absent.type]||{color:'#fdeee4',text:'#8a3c10',label:'Ausente'}:null;
-      const schedTyp=hasOv?SCHED_TYPES.find(t=>t.id===ov.type)||null:null;
-      const dt2=new Date(d+'T12:00:00');
-      const isToday=d===todayStr;
-      const isWeekend=dt2.getDay()===0||dt2.getDay()===6;
-      const dayN=['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][dt2.getDay()];
-      let cellBg=absent?absTyp.color+'55':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'88':'#e8eff8')||'#e8eff8':'var(--surface)';
-      if(!absent&&!hasOv&&isToday)cellBg='var(--blue-bg)';
-      if(!absent&&!hasOv&&!isWork)cellBg='var(--bg2)';
-      const clickFn=isSup?`openDaySchedule('${a.id}','${d}')`:currentUser.id===a.id?`requestScheduleChange('${a.id}','${d}')`:null;
-      return`<div style="border-right:1px solid var(--border);padding:8px 10px;background:${cellBg};min-height:150px;cursor:${clickFn?'pointer':'default'}" onclick="${clickFn||''}">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px">
-          <div>
-            <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:${isToday?'var(--blue)':isWeekend?'var(--amber)':'var(--text3)'}">${dayN}</div>
-            <div style="font-size:20px;font-weight:800;font-family:var(--mono);line-height:1;color:${isToday?'var(--blue)':'var(--text)'}">${dt2.getDate()}</div>
-          </div>
-          <div style="text-align:right">
-            ${absent?`<span style="font-size:8px;font-weight:700;padding:1px 5px;border-radius:5px;background:${absTyp.color};color:${absTyp.text};display:block;margin-bottom:2px">${absTyp.label}</span>`:''}
-            ${!absent&&!isWork?`<span style="font-size:8px;color:var(--text3)">No lab.</span>`:''}
-            ${hasOv&&!absent?`<span style="font-size:8px;font-weight:700;padding:1px 5px;border-radius:5px;background:${schedTyp?.color||'#e8eff8'};color:${schedTyp?.text||'#1a4f8a'};display:block">${schedTyp?.label||'Excep.'}</span>`:''}
-          </div>
-        </div>
-        ${!absent&&isWork?`
-        <div style="background:rgba(255,255,255,.7);border-radius:5px;padding:5px 7px;margin-bottom:5px">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
-            <span style="font-size:8px;color:var(--text3);font-weight:600">HORARIO</span>
-            <span style="font-size:11px;font-weight:700;font-family:var(--mono);color:${hasOv?'var(--blue)':'var(--text)'}">${h.toFixed(1)}h</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <div class="u-tac"><div style="font-size:8px;color:var(--green)">Entrada</div><div style="font-family:var(--mono);font-weight:700;font-size:12px">${s.startTime}</div></div>
-            <div style="font-size:9px;color:var(--text3)">→</div>
-            <div class="u-tac"><div style="font-size:8px;color:var(--red)">Salida</div><div style="font-family:var(--mono);font-weight:700;font-size:12px">${s.endTime}</div></div>
-          </div>
-          ${extraH>0?`<div style="font-size:8px;font-weight:700;color:var(--red);text-align:center;margin-top:2px">+${extraH.toFixed(1)}h extra</div>`:''}
-        </div>
-        ${workH>0?`<div style="background:rgba(0,0,0,.07);border-radius:2px;height:4px;overflow:hidden;margin-bottom:4px"><div style="height:100%;border-radius:2px;background:${workH>h?'var(--red)':workH>=h*.8?'var(--amber)':'var(--blue)'};width:${Math.min(workH/h*100,100).toFixed(0)}%"></div></div>`:''}
-        ${myTasks.slice(0,2).map(t=>`<div style="font-size:9px;padding:1px 4px;border-radius:2px;background:#d4ede0;border-left:2px solid #1e5c35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:#1e5c35;margin-bottom:1px">${escH(t.producto.split(' ')[0])}</div>`).join('')}
-        ${mgmtOccs.slice(0,1).map(o=>{const c=getMgmtCat(o.category);return`<div style="font-size:9px;padding:1px 4px;border-radius:2px;background:${c.color};border-left:2px solid ${c.text};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:${c.text};margin-bottom:1px">${escH(c.label)}</div>`;}).join('')}
-        `:''}
-        ${!isWork&&!absent?`<div style="font-size:10px;color:var(--text3);text-align:center;padding:8px 0">—</div>`:''}
-        ${absent?`<div style="font-size:9px;color:${absTyp.text};text-align:center;padding:8px 0;font-weight:500">${absent.note||absTyp.label}</div>`:''}
-        ${pendReq?`<div style="position:absolute;bottom:4px;right:4px;background:var(--amber-bg);border-radius:4px;padding:1px 4px;font-size:8px;font-weight:700;color:var(--amber-text)">⏳</div>`:''}
-      </div>`;
-    });
-    return`<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);margin-bottom:12px;overflow:hidden">
-      <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bg2);border-bottom:1px solid var(--border)">
-        <div class="av av-lg ${a.av}">${escH(a.avInit)}</div>
-        <div>
-          <div style="font-weight:600;font-size:14px">${escH(a.name)}</div>
-          <div class="u-sm2">Base: <b class="u-mono">${def.startTime}–${def.endTime}</b> · <b>${defH.toFixed(1)}h</b> · ${def.breakMinutes||60}min descanso</div>
-        </div>
-        <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
-          ${pendA>0?`<span style="font-size:10px;background:var(--amber-bg);color:var(--amber-text);padding:2px 8px;border-radius:10px;font-weight:600">⏳ ${pendA}</span>`:''}
-          ${isSup?`<button class="btn sm pri" onclick="event.stopPropagation();setAnalystScheduleDirect('${a.id}')">✎ Editar base</button>`:''}
-        </div>
-      </div>
-      <div style="position:relative;overflow-x:auto">
-        <div style="display:grid;grid-template-columns:repeat(7,minmax(110px,1fr));min-width:770px">
-          ${cols.join('')}
-        </div>
-      </div>
-    </div>`;
-  }).join('')}
-
-  ${(()=>{
-    const pending=scheduleRequests.filter(r=>r.status==='pending');
-    if(!isSup||!pending.length)return'';
-    const _sq=(_schedSearch||'').toLowerCase().trim();
-    const filtered=_sq?pending.filter(r=>{const u=getU(r.analystId);return u.name.toLowerCase().includes(_sq)||(r.reason||'').toLowerCase().includes(_sq)||(r.dateStr||'').includes(_sq);}):pending;
-    return`<div class="sec" style="color:var(--amber)">Solicitudes pendientes</div>
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-    <input id="srch-sched" type="text" placeholder="Buscar por analista, motivo o fecha…" value="${escH(_schedSearch||'')}" oninput="_srch('_schedSearch',this.value,'srch-sched')" style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">
-    ${_sq?`<button class="btn sm" onclick="_schedSearch='';render()">✕ Limpiar</button>`:''}
-  </div>
-  ${filtered.length===0?`<div class="empty">Sin resultados para "${escH(_sq)}"</div>`:`<div class="tbl">
-    <div class="thead" style="grid-template-columns:1.2fr .9fr 1.3fr 1.4fr .7fr .7fr"><div>Analista</div><div>Día</div><div>Horario</div><div>Motivo</div><div>Jornada</div><div></div></div>
-    ${filtered.sort((a,b)=>b.ts-a.ts).map(req=>{
-      const u=getU(req.analystId);const h=calcHours(req.proposed);
-      return`<div class="trow" style="grid-template-columns:1.2fr .9fr 1.3fr 1.4fr .7fr .7fr">
-        <div style="display:flex;align-items:center;gap:6px"><div class="av ${u.av}">${escH(u.avInit)}</div>${escH(u.name.split(' ')[0])}</div>
-        <div style="font-family:var(--mono);font-size:12px">${req.dateStr?fmtDF(req.dateStr):'Base'}</div>
-        <div style="font-family:var(--mono);font-size:12px">${req.proposed.startTime}–${req.proposed.endTime}</div>
-        <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(req.reason||'')}</div>
-        <div style="font-family:var(--mono);font-size:12px;font-weight:600">${h.toFixed(1)}h</div>
-        <div style="display:flex;gap:4px"><button class="btn sm suc" onclick="approveSchedule(${req.id})">✓</button><button class="btn sm dan" onclick="rejectSchedule(${req.id})">✕</button></div>
-      </div>`;
-    }).join('')}
-  </div>`}`;
-  })()}`;
-}
-
-function renderSchedulesMonth(isSup,rows){
-  const {year,month,firstDay,daysInMonth,total,label}=getMonthDates(monthOffset);
-  const todayStr=today();
-  const DAY_HDR=['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
-  // Build selected analyst (month view uses single analyst)
-  const selA=schedSelectedAnalyst||(rows[0]?.id||null);
-  if(!selA)return'<div class="empty">Sin analistas</div>';
-  const analyst=rows.find(a=>a.id===selA)||rows[0];
-  if(!analyst)return'<div class="empty">Sin analistas</div>';
-  const def=getAnalystScheduleDefault(analyst.id);
-  const defH=calcHours(def);
-  // Build calendar cells
-  let cells=[];
-  for(let i=0;i<total;i++){
-    const dn=i-firstDay+1;
-    cells.push(dn<1||dn>daysInMonth?null:year+'-'+String(month+1).padStart(2,'0')+'-'+String(dn).padStart(2,'0'));
-  }
-  const weeks=[];for(let i=0;i<cells.length;i+=7)weeks.push(cells.slice(i,i+7));
-
-  return`
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
-    <button class="btn" onclick="monthOffset--;render()">← Anterior</button>
-    <span style="font-size:14px;font-weight:600">${label}</span>
-    <button class="btn" onclick="monthOffset++;render()">Siguiente →</button>
-    <button class="btn sm" onclick="monthOffset=0;render()">Hoy</button>
-  </div>
-
-  <div style="display:flex;gap:8px;margin-bottom:14px;align-items:flex-start;flex-wrap:wrap">
-    <div style="display:flex;flex-direction:column;gap:5px;width:160px;flex-shrink:0">
-      ${rows.map(a=>`<div onclick="schedSelectedAnalyst='${a.id}';render()" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--radius);cursor:pointer;background:${selA===a.id?'var(--blue-bg)':'var(--surface)'};border:${selA===a.id?'2px solid var(--blue)':'1px solid var(--border)'};transition:all .1s">
-        <div class="av ${a.av}">${escH(a.avInit)}</div>
-        <div>
-          <div style="font-size:12px;font-weight:${selA===a.id?'600':'400'};color:${selA===a.id?'var(--blue)':'var(--text)'}">${escH(a.name.split(' ')[0])}</div>
-          <div style="font-size:10px;color:var(--text3);font-family:var(--mono)">${getAnalystScheduleDefault(a.id).startTime}–${getAnalystScheduleDefault(a.id).endTime}</div>
-        </div>
-      </div>`).join('')}
-    </div>
-
-    <div style="flex:1;min-width:0">
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:10px;display:flex;align-items:center;gap:10px">
-        <div class="av av-lg ${analyst.av}">${escH(analyst.avInit)}</div>
-        <div>
-          <div style="font-weight:600;font-size:14px">${escH(analyst.name)}</div>
-          <div class="u-sm2">Base: <b class="u-mono">${def.startTime}–${def.endTime}</b> · <b>${defH.toFixed(1)}h</b></div>
-        </div>
-        ${isSup?`<button class="btn sm pri" style="margin-left:auto" onclick="setAnalystScheduleDirect('${analyst.id}')">✎ Editar base</button>`:''}
-      </div>
-
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">
-        <div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));background:var(--bg2);border-bottom:1px solid var(--border)">
-          ${DAY_HDR.map(d=>`<div style="padding:6px 4px;font-size:11px;font-weight:600;color:var(--text2);text-align:center;border-right:1px solid var(--border)">${d}</div>`).join('')}
-        </div>
-        ${weeks.map(week=>`<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));border-bottom:1px solid var(--border)">
-          ${week.map(d=>{
-            if(!d)return`<div style="background:var(--bg2);border-right:1px solid var(--border);min-height:80px"></div>`;
-            const ov=analystSchedules[analyst.id]?.overrides?.[d];
-            const hasOv=ov&&(ov.status==='approved'||ov.status==='assigned');
-            const s=hasOv?ov:def;
-            const h=calcHours(s);
-            const absent=getAbsenceOnDate(analyst.id,d);
-            const isWork=isWorkdayFor(analyst.id,d);
-            const pendReq=scheduleRequests.find(r=>r.analystId===analyst.id&&r.dateStr===d&&r.status==='pending');
-            const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===analyst.id&&x.date===d&&!x._removed));
-            const mgmtOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,d,d)).filter(o=>(o.analysts||[]).includes(analyst.id));
-            const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,analyst.id,d),0);
-            const approvedOT=scheduleRequests.find(r=>r.analystId===analyst.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime');
-            const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
-            const absTyp=absent?getABSTypes()[absent.type]||{color:'#fdeee4',text:'#8a3c10',label:'Aus.'}:null;
-            const schedTyp=hasOv?SCHED_TYPES.find(t=>t.id===ov.type)||null:null;
-            const isToday=d===todayStr;
-            const dt2=new Date(d+'T12:00:00');
-            const isWeekend=dt2.getDay()===0||dt2.getDay()===6;
-            let bg=absent?absTyp.color+'55':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'77':'#e8eff8')||'#e8eff8':isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
-            const clickFn=isSup?`openDaySchedule('${analyst.id}','${d}')`:currentUser.id===analyst.id?`requestScheduleChange('${analyst.id}','${d}')`:null;
-            return`<div style="border-right:1px solid var(--border);min-height:80px;padding:5px 6px;background:${bg};cursor:${clickFn?'pointer':'default'}" onclick="${clickFn||''}">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px">
-                <div style="font-size:${isToday?'14':'13'}px;font-weight:${isToday?'800':'500'};font-family:var(--mono);color:${isToday?'var(--blue)':isWeekend?'var(--amber)':'var(--text)'}">${d.slice(8)}</div>
-                ${pendReq?`<span style="font-size:8px;background:var(--amber-bg);color:var(--amber-text);padding:1px 3px;border-radius:3px;font-weight:700">⏳</span>`:''}
-              </div>
-              ${!absent&&isWork?`
-              <div style="font-size:9px;font-family:var(--mono);font-weight:700;color:${hasOv?'var(--blue)':'var(--text2)'};">${s.startTime}<span class="u-fg3">–</span>${s.endTime}</div>
-              <div style="font-size:9px;color:${hasOv?'var(--blue)':'var(--text3)'};font-family:var(--mono)">${h.toFixed(1)}h${approvedOT?` <span style="color:var(--green);font-weight:700">+${approvedOT.proposed.extraHours}h★</span>`:''}${workH>totalAvail?` <span style="color:var(--red)">+${(workH-totalAvail).toFixed(1)}h</span>`:''}</div>
-              ${hasOv&&!absent?`<div style="font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;background:${schedTyp?.color||'#e8eff8'};color:${schedTyp?.text||'#1a4f8a'};margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${schedTyp?.label||'Excep.'}</div>`:''}
-              ${workH>0?`<div style="background:rgba(0,0,0,.08);border-radius:2px;height:3px;overflow:hidden;margin-top:3px"><div style="height:100%;background:${workH>totalAvail?'var(--red)':workH>=totalAvail*.8?'var(--amber)':'var(--blue)'};width:${Math.min(workH/h*100,100).toFixed(0)}%"></div></div>`:''}
-              ${myTasks.slice(0,2).map(t=>`<div style="font-size:8px;margin-top:2px;padding:1px 3px;border-radius:2px;background:#d4ede0;color:#1e5c35;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto.split(' ')[0])}</div>`).join('')}
-              ${mgmtOccs.slice(0,1).map(o=>{const c=getMgmtCat(o.category);return`<div style="font-size:8px;margin-top:2px;padding:1px 3px;border-radius:2px;background:${c.color};color:${c.text};font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(c.label)}</div>`;}).join('')}
-              `:''}
-              ${absent?`<div style="font-size:9px;font-weight:600;color:${absTyp.text};margin-top:2px">${absTyp.label}</div>`:''}
-              ${!isWork&&!absent?`<div style="font-size:9px;color:var(--text3);text-align:center;padding-top:10px">—</div>`:''}
-            </div>`;
-          }).join('')}
-        </div>`).join('')}
-      </div>
-
-      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text2)">
-        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#e8eff8;border:1px solid #1a4f8a;border-radius:2px;display:inline-block"></span>Cambio horario</span>
-        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#d4ede0;border:1px solid #1e5c35;border-radius:2px;display:inline-block"></span>Horas extra</span>
-        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:var(--bg2);border:1px solid var(--border);border-radius:2px;display:inline-block"></span>No laborable</span>
-        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:var(--blue-bg);border:2px solid var(--blue);border-radius:2px;display:inline-block"></span>Hoy</span>
-      </div>
-    </div>
-  </div>`;
-}
 
 let selectedAbsPalette=0;
 const ABS_COLOR_PALETTES=[
@@ -4105,13 +3715,8 @@ function getNotifBadge(){
   var replanC=replanNotifs.filter(function(n){
     return n.type==='replan'&&n.status==='pending'&&unread(n)&&(isSup||(n.analystId===uid));
   }).length;
-  // Schedule requests (usan flags separados, sin cambios)
-  var schedPC=isSup
-    ?scheduleRequests.filter(function(r){return r.status==='pending'&&!r._seenBySup;}).length
-    :0;
-  var schedAC=!isSup
-    ?scheduleRequests.filter(function(r){return r.analystId===uid&&r.status==='approved'&&!r._seenByAnalyst;}).length
-    :0;
+  // Horarios: registro en papel — sin solicitudes de horario en la app
+  var schedPC=0, schedAC=0;
   // Confirm pending (supervisor) — computed from tasks, no readBy
   var confC=0;
   if(isSup){
@@ -4170,7 +3775,7 @@ function getNotifBadge(){
         if(!a.date)return;
         var dL=Math.round((_oTMs-new Date(a.date+'T12:00:00').getTime())/86400000);
         var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0)||!!a._completedBySup;
-        if(dL>=3&&!done)overdueC++;
+        if(dL>=4&&!done)overdueC++;
       });
     });
   }
@@ -4181,7 +3786,7 @@ function getNotifBadge(){
       (mt.completions||[]).forEach(function(c){if(c.status==='pending-confirm')mgmtC++;});
     });
     mgmtC+=replanNotifs.filter(function(n){return n.type==='mgmt_not_done'&&n.status==='pending'&&n.forUserId===uid;}).length;
-    mgmtC+=mgmtOverdueScan().length; // gestión atrasada ≥3 días (únicas + recurrentes)
+    mgmtC+=mgmtOverdueScan().length; // gestión atrasada ≥4 días (únicas + recurrentes)
   }
   var ilrC=(isSup||isRev)?replanNotifs.filter(function(n){return n.type==='interlab_request'&&n.status==='pending';}).length:0;
   var ilrDocsC=(isSup||isRev)?replanNotifs.filter(function(n){return n.type==='ilr_docs_sent'&&n.status==='pending'&&!(n.readBy||[]).includes(uid);}).length:0;
@@ -4238,7 +3843,7 @@ function expandMgmt(mt, fromDate, toDate){
   return occ;
 }
 
-// Gestión atrasada ≥3 días (espejo de "Análisis atrasados" del supervisor).
+// Gestión atrasada ≥4 días (espejo de "Análisis atrasados" del supervisor).
 // Escaneo directo del estado — no depende de notificaciones ni genera escrituras.
 // Tareas únicas: status 'pending' (asignada sin realizar). Recurrentes: ocurrencias
 // de los últimos 30 días sin registro del analista (los 'not-done' tienen su propio aviso).
@@ -4248,9 +3853,9 @@ function mgmtOverdueScan(){
   freeTasks.forEach(function(ft){
     if(ft.status!=='pending'||!ft.date)return;
     var dL=Math.round((_tMs-new Date(ft.date+'T12:00:00').getTime())/86400000);
-    if(dL>=3)out.push({kind:'ft',ft:ft,daysLate:dL});
+    if(dL>=4)out.push({kind:'ft',ft:ft,daysLate:dL});
   });
-  mgmtTasks.flatMap(function(mt){return expandMgmt(mt,_relDate(-30),_relDate(-3));}).forEach(function(o){
+  mgmtTasks.flatMap(function(mt){return expandMgmt(mt,_relDate(-30),_relDate(-4));}).forEach(function(o){
     var pendA=(o.analysts||[]).filter(function(aid){
       return !(o.completions||[]).some(function(c){return c.date===o.occDate&&c.analystId===aid;});
     });
@@ -4753,533 +4358,6 @@ function renderMgmtMonth(isSup){
 }
 
 
-function renderCronograma(){
-  // Mark approved schedule requests as seen
-  scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='approved'&&!r._seenByAnalyst)
-    .forEach(r=>{r._seenByAnalyst=true;});
-
-  const a=getU(currentUser.id);
-  const def=getAnalystScheduleDefault(currentUser.id);
-  const defH=calcHours(def);
-  const pendReqs=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending');
-  const histReqs=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status!=='pending').slice(-8).reverse();
-
-  // ── Header: personal info + base schedule ──
-  let html='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">'
-    +'<div class="av av-xl '+a.av+'">'+escH(a.avInit)+'</div>'
-    +'<div>'
-    +'<div style="font-weight:600;font-size:15px">'+escH(a.name)+'</div>'
-    +'<div style="font-size:12px;color:var(--text2)">Horario base: <b class="u-mono">'+def.startTime+'\u2013'+def.endTime+'</b> \u00b7 <b style="color:var(--blue)">'+defH.toFixed(1)+'h</b> \u00b7 Descanso '+(def.breakMinutes||60)+'min</div>'
-    +'</div>'
-    +(pendReqs.length?'<div style="margin-left:auto;background:var(--amber-bg);border-radius:var(--radius);padding:5px 12px;font-size:12px;color:var(--amber-text);font-weight:600">\u23f3 '+pendReqs.length+' solicitud'+(pendReqs.length>1?'es':'')+'</div>':'')
-    +'</div>';
-
-  // ── View toggle ──
-  html+='<div style="display:flex;gap:4px;background:var(--bg2);border-radius:var(--radius);padding:3px;width:fit-content;margin-bottom:14px">'
-    +'<button class="btn sm" onclick="cronogramaView=\'week\';render()" style="'+(cronogramaView==='week'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">Semana</button>'
-    +'<button class="btn sm" onclick="cronogramaView=\'month\';render()" style="'+(cronogramaView==='month'?'background:var(--surface);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)':'border:none;background:transparent')+'">Mes</button>'
-    +'</div>';
-
-  html+=cronogramaView==='week'?renderCronogramaWeek(a,def):renderCronogramaMonth(a,def);
-
-  // ── Requests history ──
-  if(pendReqs.length||histReqs.length){
-    html+='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-top:16px">'
-      +'<div style="padding:10px 14px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:12px;font-weight:600">Solicitudes de cambio de horario</div>';
-    [...pendReqs,...histReqs].forEach(function(r){
-      var h2=calcHours(r.proposed);
-      var stBg={pending:'var(--amber-bg)',approved:'var(--green-bg)',rejected:'var(--red-bg)'}[r.status];
-      var stC={pending:'var(--amber-text)',approved:'var(--green-text)',rejected:'var(--red-text)'}[r.status];
-      var stL={pending:'Pendiente',approved:'Aprobada',rejected:'Rechazada'}[r.status];
-      var typeL=SCHED_TYPES.find(function(t){return t.id===r.proposed.type;})?.label||'Cambio';
-      var dt=new Date(r.ts);
-      html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
-        +'<div style="min-width:90px;font-family:var(--mono);font-size:12px;font-weight:600">'+(r.dateStr?fmtDF(r.dateStr):'Base')+'</div>'
-        +'<div style="flex:1;min-width:0">'
-        +'<div class="u-12b">'+(r.proposed.type==='overtime'?'Horas extra: '+r.proposed.extraHours+'h':r.proposed.startTime+'\u2013'+r.proposed.endTime+' \u00b7 '+h2.toFixed(1)+'h')+'</div>'
-        +'<div class="u-sm2">'+escH(r.reason||'')+'</div>'
-        +'<div class="u-xs3">'+typeL+'</div>'
-        +'</div>'
-        +'<div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">'
-        +'<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:'+stBg+';color:'+stC+'">'+stL+'</span>'
-        +'<span class="u-xs3">'+dt.getDate()+'/'+(dt.getMonth()+1)+' '+String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0')+'</span>'
-        +'</div></div>';
-    });
-    html+='</div>';
-  }
-  return html;
-}
-
-function renderCronogramaWeek(a, def){
-  const wd=getWeekDates(weekOffset);
-  const todayStr=today();
-  const mgmtCache={};
-  wd.forEach(function(d){mgmtCache[d]=mgmtTasks.flatMap(function(mt){return expandMgmt(mt,d,d);});});
-
-  let nav='<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-wrap:wrap">'
-    +'<button class="btn sm" onclick="weekOffset--;render()">\u2190</button>'
-    +'<span style="font-size:13px;font-weight:600;font-family:var(--mono);flex:1;text-align:center">'+fmtD(wd[0])+' \u2013 '+fmtD(wd[6])+'</span>'
-    +'<button class="btn sm" onclick="weekOffset++;render()">\u2192</button>'
-    +'<button class="btn sm" onclick="weekOffset=0;render()">Hoy</button>'
-    +'</div>';
-
-  let grid='<div style="overflow-x:auto;-webkit-overflow-scrolling:touch">'
-    +'<div style="display:grid;grid-template-columns:repeat(7,130px);gap:6px;width:max-content;padding-bottom:4px">';
-  wd.forEach(function(d){
-    const ov=analystSchedules[currentUser.id]?.overrides?.[d];
-    const hasOv=ov&&(ov.status==='approved'||ov.status==='assigned');
-    const s=hasOv?ov:def;
-    const h=calcHours(s);
-    const absent=getAbsenceOnDate(currentUser.id,d);
-    const isWork=isWorkdayFor(currentUser.id,d);
-    const pendSched=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime';});
-    const pendOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime';});
-    const approvedOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime';});
-    const myTasks=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===d&&!x._removed;});});
-    const mgmtOccs=(mgmtCache[d]||[]).filter(function(o){return(o.analysts||[]).includes(currentUser.id);});
-    const workH=myTasks.reduce(function(acc,t){return acc+getAssignHours(t,currentUser.id,d);},0);
-    const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
-    const absTyp=absent?getABSTypes()[absent.type]||{color:'#fdeee4',text:'#8a3c10',label:'Ausente'}:null;
-    const schedTyp=hasOv?SCHED_TYPES.find(function(t){return t.id===ov.type;})||null:null;
-    const dt2=new Date(d+'T12:00:00');
-    const isToday=d===todayStr;
-    const isWE=dt2.getDay()===0||dt2.getDay()===6;
-    const dayN=['Dom','Lun','Mar','M\u00edd','Jue','Vie','S\u00e1b'][dt2.getDay()];
-    const bg=absent?absTyp.color+'66':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'88':'##e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
-
-    grid+='<div style="border-radius:var(--radius-lg);border:'+(isToday?'2px solid var(--blue)':'1px solid var(--border)')+';background:'+bg+';overflow:hidden">';
-    // Day header
-    grid+='<div style="padding:5px 7px 4px;border-bottom:1px solid rgba(0,0,0,.06);background:rgba(0,0,0,.03)">';
-    grid+='<div style="display:flex;justify-content:space-between;align-items:flex-start">';
-    grid+='<div><div style="font-size:9px;font-weight:700;text-transform:uppercase;color:'+(isToday?'var(--blue)':isWE?'var(--amber)':'var(--text3)')+'">'+dayN+'</div>'
-      +'<div style="font-size:clamp(14px,3vw,20px);font-weight:800;font-family:var(--mono);line-height:1.1;color:'+(isToday?'var(--blue)':'var(--text)')+'">'+dt2.getDate()+'</div></div>';
-    if(absent) grid+='<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px;background:'+absTyp.color+';color:'+absTyp.text+'">'+absTyp.label+'</span>';
-    else if(!isWork) grid+='<span style="font-size:9px;color:var(--text3)">No lab.</span>';
-    else if(hasOv) grid+='<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px;background:'+(schedTyp?.color||'#e8eff8')+';color:'+(schedTyp?.text||'#1a4f8a')+'">'+(schedTyp?.label||'Excep.')+'</span>';
-    grid+='</div></div>';
-    // Body
-    grid+='<div style="padding:6px 7px">'; 
-    if(!absent&&isWork){
-      // Schedule
-      grid+='<div style="background:rgba(255,255,255,.65);border-radius:6px;padding:5px 8px;margin-bottom:7px">'
-        +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">'
-        +'<span style="font-size:9px;font-weight:600;color:var(--text3);text-transform:uppercase">Horario</span>'
-        +'<span style="font-size:12px;font-weight:700;font-family:var(--mono);color:'+(hasOv?'var(--blue)':'var(--text)')+'">'+h.toFixed(1)+'h'+(approvedOT?'<span style="color:var(--green);font-size:10px"> +'+approvedOT.proposed.extraHours+'h\u2605</span>':'')+'</span>'
-        +'</div>'
-        +'<div style="display:flex;justify-content:space-between;align-items:center">'
-        +'<div class="u-tac"><div style="font-size:8px;color:var(--green)">Entrada</div><div style="font-family:var(--mono);font-weight:700;font-size:14px">'+s.startTime+'</div></div>'
-        +'<div style="width:20px;height:1px;background:var(--border2)"></div>'
-        +'<div class="u-tac"><div style="font-size:8px;color:var(--red)">Salida</div><div style="font-family:var(--mono);font-weight:700;font-size:14px">'+s.endTime+'</div></div>'
-        +'</div>'
-        +'<div style="font-size:8px;color:var(--text3);text-align:center;margin-top:2px">Descanso '+(s.breakMinutes||60)+'min</div>'
-        +(hasOv&&ov.note?'<div style="font-size:9px;color:var(--blue);margin-top:3px">'+(ov.status==='assigned'?'\ud83d\udccb Asignado':'\u2713 Aprobado')+': '+escH(ov.note.slice(0,25))+'</div>':'')
-        +'</div>';
-      // Load bar
-      if(workH>0){
-        const pct=Math.min(workH/totalAvail*100,100);
-        grid+='<div style="margin-bottom:7px">'
-          +'<div style="display:flex;justify-content:space-between;font-size:9px;margin-bottom:2px">'
-          +'<span style="color:var(--text3);font-weight:600;text-transform:uppercase">Carga</span>'
-          +'<span style="font-family:var(--mono);font-weight:700;color:'+(workH>totalAvail?'var(--red)':workH>=totalAvail*.8?'var(--amber)':'var(--green)')+'">'+workH.toFixed(1)+'/'+totalAvail.toFixed(1)+'h</span>'
-          +'</div>'
-          +'<div style="background:rgba(0,0,0,.08);border-radius:3px;height:6px;overflow:hidden">'
-          +'<div style="height:100%;border-radius:3px;background:'+(workH>totalAvail?'var(--red)':workH>=totalAvail*.8?'var(--amber)':'var(--blue)')+';width:'+pct.toFixed(0)+'%"></div></div>'
-          +(workH>totalAvail?'<div style="font-size:9px;font-weight:700;color:var(--red);margin-top:2px">\u26a0 +'+(workH-totalAvail).toFixed(1)+'h extra</div>':'')
-          +'</div>';
-      }
-      // Analysis tasks \u2014 se muestran TODAS (la columna crece verticalmente; el ancho fijo y el
-      // truncado del texto mantienen la visualizaci\u00f3n correcta en todos los dispositivos).
-      myTasks.forEach(function(t){
-        const st=t.status;
-        const stColor=st==='done'?'var(--green)':st==='progress'?'var(--blue)':st==='pending-confirm'?'var(--amber)':'var(--text3)';
-        const stIcon=st==='done'?'\u2713':st==='progress'?'\u25b6':st==='pending-confirm'?'\u23f3':'\u25cb';
-        grid+='<div style="padding:3px 6px;border-radius:4px;margin-bottom:3px;background:#d4ede0;border-left:3px solid #1e5c35;cursor:pointer" onclick="openEdit('+t.id+')">'
-          +'<div style="display:flex;justify-content:space-between;align-items:center">'
-          +'<div style="font-size:10px;font-weight:600;color:#1e5c35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto.split(' ')[0])+'</div>'
-          +'<span style="font-size:9px;color:'+stColor+'">'+stIcon+'</span></div>'
-          +'<div style="font-size:9px;color:#1e5c35;opacity:.7;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.lote)+'</div>'
-          +'</div>';
-      });
-      // Mgmt tasks \u2014 tambi\u00e9n se muestran todas
-      mgmtOccs.forEach(function(o){
-        const c=getMgmtCat(o.category);
-        grid+='<div style="padding:3px 6px;border-radius:4px;margin-bottom:3px;background:'+c.color+';border-left:3px solid '+c.text+'">'
-          +'<div style="font-size:10px;font-weight:600;color:'+c.text+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(c.label)+'</div>'
-          +(o.dedicacion?'<div style="font-size:9px;color:'+c.text+';opacity:.7;font-family:var(--mono)">'+o.dedicacion+'h</div>':'')
-          +'</div>';
-      });
-      // Action buttons
-      grid+='<div style="display:flex;gap:4px;margin-top:6px">';
-      grid+=(!pendSched
-        ?'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--blue);border-color:var(--blue)" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+d+'\')">&#x1F4C5; Cambio</button>'
-        :'<div style="flex:1;background:var(--amber-bg);border-radius:5px;padding:3px 4px;font-size:9px;font-weight:700;color:var(--amber-text);text-align:center">\u23f3 Cambio pend.</div>');
-      grid+=(!pendOT
-        ?'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--green);border-color:var(--green)" onclick="requestOvertime(\''+d+'\')">&#x2605; Extra</button>'
-        :'<div style="flex:1;background:var(--amber-bg);border-radius:5px;padding:3px 4px;font-size:9px;font-weight:700;color:var(--amber-text);text-align:center">\u23f3 Extra pend.</div>');
-      grid+='</div>';
-    } else if(absent){
-      grid+='<div style="font-size:10px;color:'+absTyp.text+';text-align:center;padding:10px 0;font-weight:500">'+(absent.note||absTyp.label)+'</div>';
-    } else {
-      grid+='<div style="font-size:10px;color:var(--text3);text-align:center;padding:10px 0">\u2014</div>';
-    }
-    grid+='</div></div>';
-  });
-  grid+='</div></div>';
-  return nav+grid;
-}
-
-function renderCronogramaMonth(a, def){
-  const {year,month,firstDay,daysInMonth,total,label}=getMonthDates(monthOffset);
-  const todayStr=today();
-  const pad=function(n){return String(n).padStart(2,'0');};
-  const fromDate=year+'-'+pad(month+1)+'-01';
-  const toDate=year+'-'+pad(month+1)+'-'+pad(daysInMonth);
-  const mgmtOccsByDay={};
-  mgmtTasks.forEach(function(mt){
-    expandMgmt(mt,fromDate,toDate).forEach(function(o){
-      if(!(o.analysts||[]).includes(currentUser.id))return;
-      if(!mgmtOccsByDay[o.occDate])mgmtOccsByDay[o.occDate]=[];
-      mgmtOccsByDay[o.occDate].push(o);
-    });
-  });
-  const DAY_HDR=['Lun','Mar','M\u00edd','Jue','Vie','S\u00e1b','Dom'];
-  let cells=[];
-  for(let i=0;i<total;i++){const dn=i-firstDay+1;cells.push(dn<1||dn>daysInMonth?null:year+'-'+pad(month+1)+'-'+pad(dn));}
-  const weeks=[];for(let i=0;i<cells.length;i+=7)weeks.push(cells.slice(i,i+7));
-
-  let nav='<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">'
-    +'<button class="btn" onclick="monthOffset--;render()">\u2190 Anterior</button>'
-    +'<span style="font-size:14px;font-weight:600;min-width:160px;text-align:center">'+label+'</span>'
-    +'<button class="btn" onclick="monthOffset++;render()">Siguiente \u2192</button>'
-    +'<button class="btn sm" onclick="monthOffset=0;render()">Hoy</button>'
-    +'</div>';
-
-  let grid='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">'
-    +'<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));background:var(--bg2);border-bottom:1px solid var(--border)">'
-    +DAY_HDR.map(function(d){return'<div style="padding:6px 4px;font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;text-align:center;border-right:1px solid var(--border)">'+d+'</div>';}).join('')
-    +'</div>';
-
-  weeks.forEach(function(week){
-    grid+='<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));border-bottom:1px solid var(--border)">';
-    week.forEach(function(dateStr){
-      if(!dateStr){grid+='<div style="background:var(--bg2);border-right:1px solid var(--border);min-height:100px"></div>';return;}
-      const ov=analystSchedules[currentUser.id]?.overrides?.[dateStr];
-      const hasOv=ov&&(ov.status==='approved'||ov.status==='assigned');
-      const s=hasOv?ov:def;
-      const h=calcHours(s);
-      const absent=getAbsenceOnDate(currentUser.id,dateStr);
-      const isWork=isWorkdayFor(currentUser.id,dateStr);
-      const pendSched=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime';});
-      const pendOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime';});
-      const approvedOT=scheduleRequests.find(function(r){return r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='approved'&&r.proposed.type==='overtime';});
-      const myTasks=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===dateStr&&!x._removed;});});
-      const dayMgmt=mgmtOccsByDay[dateStr]||[];
-      const workH=myTasks.reduce(function(acc,t){return acc+getAssignHours(t,currentUser.id,dateStr);},0);
-      const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
-      const absTyp=absent?getABSTypes()[absent.type]||{color:'#fdeee4',text:'#8a3c10',label:'Aus.'}:null;
-      const schedTyp=hasOv?SCHED_TYPES.find(function(t){return t.id===ov.type;})||null:null;
-      const dt2=new Date(dateStr+'T12:00:00');
-      const isToday=dateStr===todayStr;
-      const isWE=dt2.getDay()===0||dt2.getDay()===6;
-      const bg=absent?absTyp.color+'55':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'77':'##e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
-
-      grid+='<div style="border-right:1px solid var(--border);min-height:100px;padding:4px;background:'+bg+';cursor:pointer" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+dateStr+'\')">';
-      grid+='<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px">'
-        +'<span style="font-size:'+(isToday?'14':'12')+'px;font-weight:'+(isToday?'800':'500')+';color:'+(isToday?'var(--blue)':isWE?'var(--amber)':'var(--text)')+';font-family:var(--mono)">'+dateStr.slice(8)+'</span>'
-        +((pendSched||pendOT)?'<span style="font-size:8px;background:var(--amber-bg);color:var(--amber-text);padding:1px 3px;border-radius:3px;font-weight:700">⏳</span>':'')
-        +'</div>';
-      if(!absent&&isWork){
-        const schedColor=hasOv?'var(--blue)':'var(--text2)';
-        grid+='<div style="font-size:10px;font-family:var(--mono);font-weight:600;color:'+schedColor+'">'+s.startTime+'\u2013'+s.endTime+'</div>';
-        grid+='<div style="font-size:10px;color:'+schedColor+';font-family:var(--mono)">'+h.toFixed(1)+'h'+(approvedOT?'<span style="color:var(--green)"> +'+approvedOT.proposed.extraHours+'h</span>':'')+'</div>';
-        if(hasOv&&schedTyp) grid+='<div style="font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;background:'+(schedTyp.color||'#e8eff8')+';color:'+(schedTyp.text||'#1a4f8a')+';margin-top:2px">'+schedTyp.label+'</div>';
-        if(workH>0){
-          const pct=Math.min(workH/totalAvail*100,100);
-          grid+='<div style="background:rgba(0,0,0,.08);border-radius:2px;height:3px;overflow:hidden;margin:3px 0"><div style="height:100%;background:'+(workH>totalAvail?'var(--red)':workH>=totalAvail*.8?'var(--amber)':'var(--blue)')+';width:'+pct.toFixed(0)+'%"></div></div>';
-        }
-        myTasks.slice(0,2).forEach(function(t){
-          grid+='<div style="font-size:9px;padding:1px 4px;border-radius:2px;margin-bottom:1px;background:#d4ede0;color:#1e5c35;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();openEdit('+t.id+')">'+escH(t.producto.split(' ')[0])+'</div>';
-        });
-        dayMgmt.slice(0,2).forEach(function(o){
-          const c=getMgmtCat(o.category);
-          grid+='<div style="font-size:9px;padding:1px 4px;border-radius:2px;margin-bottom:1px;background:'+c.color+';color:'+c.text+';font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(c.label)+'</div>';
-        });
-        const _shownChips=Math.min(myTasks.length,2)+Math.min(dayMgmt.length,2);
-        const more=(myTasks.length+dayMgmt.length)-_shownChips;
-        if(more>0) grid+='<div onclick="event.stopPropagation();showDayActivitiesModal(\''+dateStr+'\')" style="font-size:8px;color:var(--blue);text-align:center;font-weight:700;cursor:pointer;padding:1px 0;text-decoration:underline">+'+more+' m\u00e1s</div>';
-      } else if(absent){
-        grid+='<div style="font-size:9px;font-weight:600;color:'+absTyp.text+';margin-top:4px">'+absTyp.label+'</div>';
-        if(absent.note) grid+='<div style="font-size:8px;color:'+absTyp.text+';opacity:.7">'+escH(absent.note)+'</div>';
-      } else {
-        grid+='<div style="font-size:9px;color:var(--text3);text-align:center;padding:8px 0">\u2014</div>';
-      }
-      grid+='</div>';
-    });
-    grid+='</div>';
-  });
-  grid+='</div>';
-
-  const legend='<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text2)">'
-    +'<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#d4ede0;border-left:3px solid #1e5c35;border-radius:2px;display:inline-block"></span>An\u00e1lisis</span>'
-    +'<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#e8eff8;border-left:3px solid #1a4f8a;border-radius:2px;display:inline-block"></span>Gesti\u00f3n</span>'
-    +'<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:var(--blue-bg);border:2px solid var(--blue);border-radius:2px;display:inline-block"></span>Hoy</span>'
-    +'<span style="font-size:10px;color:var(--text3);align-self:center">Clic en un d\u00eda para solicitar cambio de horario</span>'
-    +'</div>';
-  return nav+grid+legend;
-}
-// Detalle de un día (vista Mes): lista COMPLETA de actividades sin alterar la grilla.
-function showDayActivitiesModal(dateStr){
-  var myTasks=activeTasks().filter(function(t){return(t.assignments||[]).some(function(x){return x.analyst===currentUser.id&&x.date===dateStr&&!x._removed;});});
-  var dayMgmt=mgmtTasks.flatMap(function(mt){return expandMgmt(mt,dateStr,dateStr);}).filter(function(o){return(o.analysts||[]).includes(currentUser.id);});
-  var rows='';
-  myTasks.forEach(function(t){
-    var st=t.status;
-    var stColor=st==='done'?'var(--green)':st==='progress'?'var(--blue)':st==='pending-confirm'?'var(--amber)':'var(--text3)';
-    var stIcon=st==='done'?'✓':st==='progress'?'▶':st==='pending-confirm'?'⏳':'○';
-    rows+='<div onclick="(function(){var d=this.closest(\'.modal-overlay,div[style*=fixed]\');if(d&&d.parentElement)document.body.removeChild(d.parentElement)}).call(this);openEdit('+t.id+')" '
-      +'style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--radius);margin-bottom:5px;background:#d4ede0;border-left:3px solid #1e5c35;cursor:pointer">'
-      +'<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600;color:#1e5c35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+'</div>'
-      +'<div style="font-size:11px;color:#1e5c35;opacity:.75;font-family:var(--mono)">'+escH(t.lote)+'</div></div>'
-      +'<span style="font-size:11px;color:'+stColor+';flex-shrink:0">'+stIcon+' '+statusLabel(taskDisplayStatus(t))+'</span>'
-      +'</div>';
-  });
-  dayMgmt.forEach(function(o){
-    var c=getMgmtCat(o.category);
-    rows+='<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--radius);margin-bottom:5px;background:'+c.color+';border-left:3px solid '+c.text+'">'
-      +'<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600;color:'+c.text+'">'+escH(c.label)+'</div>'
-      +(o.title?'<div style="font-size:11px;color:'+c.text+';opacity:.75">'+escH(o.title)+'</div>':'')+'</div>'
-      +(o.dedicacion?'<span style="font-size:11px;color:'+c.text+';font-family:var(--mono);flex-shrink:0">'+o.dedicacion+'h</span>':'')
-      +'</div>';
-  });
-  if(!rows)rows='<div style="font-size:12px;color:var(--text3);text-align:center;padding:14px 0">Sin actividades</div>';
-  var total=myTasks.length+dayMgmt.length;
-  var dv=document.createElement('div');
-  dv.innerHTML='<div class="modal-overlay" style="z-index:600">'
-    +'<div class="modal" style="width:min(440px,calc(100vw - 32px))">'
-    +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
-    +'<h4 style="margin:0">Actividades · '+escH(fmtDF(dateStr))+'</h4>'
-    +'<button class="btn sm" onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)">✕</button>'
-    +'</div>'
-    +'<div style="font-size:11px;color:var(--text3);margin-bottom:8px">'+total+' actividad'+(total!==1?'es':'')+'</div>'
-    +rows
-    +'</div></div>';
-  document.body.appendChild(dv);
-}
-
-function renderMySchedWeek(a, def){
-  const wd=getWeekDates(weekOffset);
-  const todayStr=today();
-  const cache={};wd.forEach(d=>{cache[d]=mgmtTasks.flatMap(mt=>expandMgmt(mt,d,d));});
-
-  let nav='<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">'
-    +'<button class="btn" onclick="weekOffset--;render()">&#8592; Anterior</button>'
-    +'<span style="font-size:14px;font-weight:600;font-family:var(--mono)">'+fmtD(wd[0])+' \u2013 '+fmtD(wd[6])+'</span>'
-    +'<button class="btn" onclick="weekOffset++;render()">Siguiente &#8594;</button>'
-    +'<button class="btn sm" onclick="weekOffset=0;render()">Hoy</button>'
-    +'</div>';
-
-  let grid='<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px;margin-bottom:4px">';
-  wd.forEach(d=>{
-    const ov=analystSchedules[currentUser.id]?.overrides?.[d];
-    const hasOv=ov&&(ov.status==='approved'||ov.status==='assigned');
-    const s=hasOv?ov:def;
-    const h=calcHours(s);
-    const absent=getAbsenceOnDate(currentUser.id,d);
-    const isWork=isWorkdayFor(currentUser.id,d);
-    const pendSched=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime');
-    const pendOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime');
-    const approvedOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===d&&r.status==='approved'&&r.proposed.type==='overtime');
-    const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===d&&!x._removed));
-    const mgmtOccs=(cache[d]||[]).filter(o=>(o.analysts||[]).includes(currentUser.id));
-    const workH=myTasks.reduce((acc,t)=>acc+getAssignHours(t,currentUser.id,d),0);
-    const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
-    const extraH=Math.max(0,workH-totalAvail);
-    const absTyp=absent?getABSTypes()[absent.type]||{color:'#fdeee4',text:'#8a3c10',label:'Aus.'}:null;
-    const schedTyp=hasOv?SCHED_TYPES.find(t=>t.id===ov.type)||null:null;
-    const dt2=new Date(d+'T12:00:00');
-    const isToday=d===todayStr;
-    const isWE=dt2.getDay()===0||dt2.getDay()===6;
-    const dayN=['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][dt2.getDay()];
-    let bg=absent?absTyp.color+'66':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'88':'##e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
-
-    grid+='<div style="border-radius:var(--radius-lg);border:'+(isToday?'2px solid var(--blue)':'1px solid var(--border)')+';background:'+bg+';overflow:hidden">';
-    // Day header
-    grid+='<div style="padding:7px 9px 5px;border-bottom:1px solid rgba(0,0,0,.06);background:rgba(0,0,0,.03)">';
-    grid+='<div style="display:flex;justify-content:space-between;align-items:flex-start">';
-    grid+='<div><div style="font-size:9px;font-weight:700;text-transform:uppercase;color:'+(isToday?'var(--blue)':isWE?'var(--amber)':'var(--text3)')+'">'+dayN+'</div>'
-      +'<div style="font-size:clamp(14px,3vw,20px);font-weight:800;font-family:var(--mono);line-height:1.1;color:'+(isToday?'var(--blue)':'var(--text)')+'">'+dt2.getDate()+'</div></div>';
-    if(absent) grid+='<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px;background:'+absTyp.color+';color:'+absTyp.text+'">'+absTyp.label+'</span>';
-    else if(!isWork) grid+='<span style="font-size:9px;color:var(--text3)">No lab.</span>';
-    else if(hasOv) grid+='<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px;background:'+(schedTyp?.color||'#e8eff8')+';color:'+(schedTyp?.text||'#1a4f8a')+'">'+(schedTyp?.label||'Excep.')+'</span>';
-    grid+='</div></div>';
-    // Body
-    grid+='<div style="padding:8px 9px">';
-    if(!absent&&isWork){
-      // Schedule block
-      grid+='<div style="background:rgba(255,255,255,.65);border-radius:6px;padding:5px 8px;margin-bottom:7px">';
-      grid+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">'
-        +'<span style="font-size:9px;font-weight:600;color:var(--text3);text-transform:uppercase">Horario</span>'
-        +'<span style="font-size:12px;font-weight:700;font-family:var(--mono);color:'+(hasOv?'var(--blue)':'var(--text)')+'">'+h.toFixed(1)+'h</span></div>';
-      grid+='<div style="display:flex;justify-content:space-between;align-items:center">'
-        +'<div class="u-tac"><div style="font-size:8px;color:var(--green)">Entrada</div><div style="font-family:var(--mono);font-weight:700;font-size:14px">'+s.startTime+'</div></div>'
-        +'<div style="width:20px;height:1px;background:var(--border2)"></div>'
-        +'<div class="u-tac"><div style="font-size:8px;color:var(--red)">Salida</div><div style="font-family:var(--mono);font-weight:700;font-size:14px">'+s.endTime+'</div></div>'
-        +'</div>';
-      grid+='<div style="font-size:8px;color:var(--text3);text-align:center;margin-top:2px">Descanso '+(s.breakMinutes||60)+'min</div>';
-      if(hasOv&&ov.note) grid+='<div style="font-size:9px;color:var(--blue);margin-top:3px">'+(ov.status==='assigned'?'📋 Asignado':'\u2713 Aprobado')+': '+escH(ov.note.slice(0,30))+'</div>';
-      grid+='</div>';
-      // Overtime badge
-      if(approvedOT) grid+='<div style="background:var(--green-bg);border-radius:4px;padding:3px 7px;font-size:10px;font-weight:600;color:var(--green-text);margin-bottom:6px">\u2b50 +'+approvedOT.proposed.extraHours+'h extra aprobadas</div>';
-      // Load bar
-      if(workH>0){
-        const pct=Math.min(workH/totalAvail*100,100);
-        grid+='<div style="margin-bottom:6px">'
-          +'<div style="display:flex;justify-content:space-between;font-size:9px;margin-bottom:2px">'
-          +'<span style="color:var(--text3);font-weight:600;text-transform:uppercase">Carga</span>'
-          +'<span style="font-family:var(--mono);font-weight:700;color:'+(workH>totalAvail?'var(--red)':workH>=totalAvail*.8?'var(--amber)':'var(--green)')+'">'+workH.toFixed(1)+'/'+totalAvail.toFixed(1)+'h</span></div>'
-          +'<div style="background:rgba(0,0,0,.08);border-radius:3px;height:6px;overflow:hidden">'
-          +'<div style="height:100%;border-radius:3px;background:'+(workH>totalAvail?'var(--red)':workH>=totalAvail*.8?'var(--amber)':'var(--blue)')+';width:'+pct.toFixed(0)+'%"></div></div>'
-          +(extraH>0?'<div style="font-size:9px;font-weight:700;color:var(--red);margin-top:2px">\u26a0 +'+extraH.toFixed(1)+'h sobre jornada</div>':'')
-          +'</div>';
-      }
-      // Tasks
-      grid+=myTasks.slice(0,2).map(t=>'<div style="font-size:9px;padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#d4ede0;border-left:2px solid #1e5c35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:#1e5c35">'+escH(t.producto.split(' ')[0])+'</div>').join('');
-      grid+=mgmtOccs.slice(0,1).map(o=>{const c=getMgmtCat(o.category);return'<div style="font-size:9px;padding:2px 5px;border-radius:3px;margin-bottom:2px;background:'+c.color+';border-left:2px solid '+c.text+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:'+c.text+'">'+escH(c.label)+'</div>';}).join('');
-      // Buttons
-      grid+='<div style="display:flex;gap:4px;margin-top:6px">';
-      grid+=(!pendSched
-        ?'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--blue);border-color:var(--blue)" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+d+'\')">📅 Cambio</button>'
-        :'<div style="flex:1;background:var(--amber-bg);border-radius:5px;padding:3px 4px;font-size:9px;font-weight:700;color:var(--amber-text);text-align:center">⏳ Cambio pend.</div>');
-      grid+=(!pendOT
-        ?'<button class="btn sm" style="flex:1;font-size:10px;padding:3px;color:var(--green);border-color:var(--green)" onclick="requestOvertime(\''+d+'\')">⭐ Horas extra</button>'
-        :'<div style="flex:1;background:var(--amber-bg);border-radius:5px;padding:3px 4px;font-size:9px;font-weight:700;color:var(--amber-text);text-align:center">⏳ Extra pend.</div>');
-      grid+='</div>';
-    } else if(absent){
-      grid+='<div style="font-size:10px;color:'+absTyp.text+';text-align:center;padding:10px 0;font-weight:500">'+(absent.note||absTyp.label)+'</div>';
-    } else {
-      grid+='<div style="font-size:10px;color:var(--text3);text-align:center;padding:10px 0">\u2014</div>';
-    }
-    grid+='</div></div>';
-  });
-  grid+='</div></div>';
-  return nav+grid;
-}
-
-function renderMySchedMonth(a, def){
-  const {year,month,firstDay,daysInMonth,total,label}=getMonthDates(monthOffset);
-  const todayStr=today();
-  const pad=n=>String(n).padStart(2,'0');
-  const DAY_HDR=['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
-  let cells=[];
-  for(let i=0;i<total;i++){const dn=i-firstDay+1;cells.push(dn<1||dn>daysInMonth?null:year+'-'+pad(month+1)+'-'+pad(dn));}
-  const weeks=[];for(let i=0;i<cells.length;i+=7)weeks.push(cells.slice(i,i+7));
-
-  let nav='<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">'
-    +'<button class="btn" onclick="monthOffset--;render()">&#8592; Anterior</button>'
-    +'<span style="font-size:14px;font-weight:600;min-width:160px;text-align:center">'+label+'</span>'
-    +'<button class="btn" onclick="monthOffset++;render()">Siguiente &#8594;</button>'
-    +'<button class="btn sm" onclick="monthOffset=0;render()">Hoy</button>'
-    +'</div>';
-
-  let grid='<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">';
-  grid+='<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));background:var(--bg2);border-bottom:1px solid var(--border)">';
-  DAY_HDR.forEach(d=>{grid+='<div style="padding:6px 4px;font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;text-align:center;border-right:1px solid var(--border)">'+d+'</div>';});
-  grid+='</div>';
-
-  weeks.forEach(week=>{
-    grid+='<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));border-bottom:1px solid var(--border)">';
-    week.forEach(dateStr=>{
-      if(!dateStr){grid+='<div style="background:var(--bg2);border-right:1px solid var(--border);min-height:110px"></div>';return;}
-      const ov=analystSchedules[currentUser.id]?.overrides?.[dateStr];
-      const hasOv=ov&&(ov.status==='approved'||ov.status==='assigned');
-      const s=hasOv?ov:def;
-      const h=calcHours(s);
-      const absent=getAbsenceOnDate(currentUser.id,dateStr);
-      const isWork=isWorkdayFor(currentUser.id,dateStr);
-      const pendSched=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type!=='overtime');
-      const pendOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='pending'&&r.proposed&&r.proposed.type==='overtime');
-      const approvedOT=scheduleRequests.find(r=>r.analystId===currentUser.id&&r.dateStr===dateStr&&r.status==='approved'&&r.proposed.type==='overtime');
-      const myTasks=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===currentUser.id&&x.date===dateStr&&!x._removed));
-      const mgmtOccs=mgmtTasks.flatMap(mt=>expandMgmt(mt,dateStr,dateStr)).filter(o=>(o.analysts||[]).includes(currentUser.id));
-      const workH=myTasks.reduce((a,t)=>a+getAssignHours(t,currentUser.id,dateStr||''),0);
-      const totalAvail=h+(approvedOT?approvedOT.proposed.extraHours||0:0);
-      const absTyp=absent?getABSTypes()[absent.type]||{color:'#fdeee4',text:'#8a3c10',label:'Aus.'}:null;
-      const schedTyp=hasOv?SCHED_TYPES.find(t=>t.id===ov.type)||null:null;
-      const dt2=new Date(dateStr+'T12:00:00');
-      const isToday=dateStr===todayStr;
-      const isWE=dt2.getDay()===0||dt2.getDay()===6;
-      let bg=absent?absTyp.color+'55':hasOv?(schedTyp&&schedTyp.color?schedTyp.color+'77':'##e8eff8'):isToday?'var(--blue-bg)':!isWork?'var(--bg2)':'var(--surface)';
-
-      grid+='<div style="border-right:1px solid var(--border);min-height:110px;padding:4px;background:'+bg+';cursor:pointer" onclick="requestScheduleChange(\''+currentUser.id+'\',\''+dateStr+'\')">';
-      grid+='<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px">';
-      grid+='<span style="font-size:13px;font-weight:'+(isToday?'800':'500')+';color:'+(isToday?'var(--blue)':isWE?'var(--amber)':'var(--text)')+';font-family:var(--mono)">'+dateStr.slice(8)+'</span>';
-      if(pendSched||pendOT) grid+='<span style="font-size:8px;background:var(--amber-bg);color:var(--amber-text);padding:1px 3px;border-radius:3px;font-weight:700">⏳</span>';
-      grid+='</div>';
-      if(!absent&&isWork){
-        grid+='<div style="font-size:10px;font-family:var(--mono);font-weight:600;color:'+(hasOv?'var(--blue)':'var(--text2)')+'">'+s.startTime+'\u2013'+s.endTime+'</div>';
-        grid+='<div style="font-size:10px;color:'+(hasOv?'var(--blue)':'var(--text3)')+';font-family:var(--mono)">'+h.toFixed(1)+'h'+(approvedOT?' <span style="color:var(--green)">+'+approvedOT.proposed.extraHours+'h</span>':'')+'</div>';
-        if(hasOv&&schedTyp) grid+='<div style="font-size:8px;font-weight:600;padding:1px 4px;border-radius:3px;background:'+(schedTyp.color||'#e8eff8')+';color:'+(schedTyp.text||'#1a4f8a')+';margin-top:2px">'+schedTyp.label+'</div>';
-        if(workH>0){
-          const pct=Math.min(workH/totalAvail*100,100);
-          grid+='<div style="background:rgba(0,0,0,.08);border-radius:2px;height:3px;overflow:hidden;margin:3px 0"><div style="height:100%;background:'+(workH>totalAvail?'var(--red)':workH>=totalAvail*.8?'var(--amber)':'var(--blue)')+';width:'+pct.toFixed(0)+'%"></div></div>';
-        }
-        grid+=myTasks.slice(0,2).map(t=>'<div style="font-size:9px;padding:1px 4px;border-radius:2px;margin-bottom:1px;background:#d4ede0;color:#1e5c35;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto.split(' ')[0])+'</div>').join('');
-        grid+=mgmtOccs.slice(0,1).map(o=>{const c=getMgmtCat(o.category);return'<div style="font-size:9px;padding:1px 4px;border-radius:2px;margin-bottom:1px;background:'+c.color+';color:'+c.text+';font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(c.label)+'</div>';}).join('');
-      } else if(absent){
-        grid+='<div style="font-size:9px;font-weight:600;color:'+absTyp.text+';margin-top:4px">'+absTyp.label+'</div>';
-      } else {
-        grid+='<div style="font-size:9px;color:var(--text3);text-align:center;padding:8px 0">\u2014</div>';
-      }
-      grid+='</div>';
-    });
-    grid+='</div>';
-  });
-  grid+='</div>';
-
-  const legend='<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text2)">'
-    +'<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:var(--blue-bg);border:2px solid var(--blue);border-radius:2px;display:inline-block"></span>Hoy</span>'
-    +'<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#e8eff8;border-left:3px solid #1a4f8a;border-radius:2px;display:inline-block"></span>Excepci\u00f3n horario</span>'
-    +'<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:var(--bg2);border:1px solid var(--border);border-radius:2px;display:inline-block"></span>No laborable</span>'
-    +'<span style="font-size:10px;color:var(--text3);align-self:center">Clic en cualquier d\u00eda para solicitar cambio</span>'
-    +'</div>';
-  return nav+grid+legend;
-}
-
-function requestOvertime(dateStr){
-  var otDiv=document.createElement('div');
-  otDiv.innerHTML='<div class="modal-overlay" style="z-index:500">'
-    +'<div class="modal" style="width:min(360px,calc(100vw - 32px))">'
-    +'<h3>Solicitar hora extra</h3>'
-    +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">Fecha: '+dateStr+'</p>'
-    +'<div class="frow"><label>Horas extra *</label>'
-    +'<input type="number" id="ot-hrs" min="0.5" max="24" step="0.5" value="2" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></div>'
-    +'<div class="frow" style="margin-top:10px"><label>Motivo *</label>'
-    +'<textarea id="ot-reason" rows="3" style="width:100%;resize:vertical;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></textarea></div>'
-    +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
-    +'<button onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
-    +'<button onclick="window._doOvertime(\''+dateStr+'\')" class="btn pri">Solicitar</button>'
-    +'</div></div></div>';
-  document.body.appendChild(otDiv);
-  window._doOvertime=function(ds){
-    var hVal=parseFloat((document.getElementById('ot-hrs')||{}).value||0);
-    var reasonVal=((document.getElementById('ot-reason')||{}).value||'').trim();
-    if(isNaN(hVal)||hVal<=0){alert('Ingres\u00e1 un n\u00famero de horas v\u00e1lido.');return;}
-    if(!reasonVal){alert('El motivo es requerido.');return;}
-    document.body.removeChild(otDiv);
-    scheduleRequests.push({
-      id:nextSchedReqId++,
-      analystId:currentUser.id,
-      dateStr:ds,
-      status:'pending',
-      proposed:{type:'overtime',extraHours:hVal,startTime:'',endTime:'',breakMinutes:0},
-      reason:reasonVal,
-      ts:Date.now(),
-      requestedBy:currentUser.id
-    });
-    saveLS();render();
-    saveNow().catch(function(e){console.error('saveNow overtime:',e);});
-  };
-}
 function getMgmtCat(catId){
   return mgmtCategories.find(c=>c.id===catId)||mgmtCategories.find(c=>c.label===catId)||
     {id:catId,label:catId||'Gestión',color:'#e8eff8',text:'#1a4f8a'};
@@ -5701,6 +4779,8 @@ function renderMgmtOccModal(){
     // Acceso directo al registro de horas: Semana/Mes/Calendario llegan a este modal
     // y antes no ofrecían ningún camino para registrar la realización
     +(!isSkipped?'<button class="btn suc" onclick="closeMgmtOccModal();openMgmtComplModal('+mt.id+',\''+mgmtOccDate+'\')">✓ Registrar horas</button>':'')
+    // El calendario abre el DÍA; desde acá se puede saltar a la serie completa
+    +(isSupRole()?'<button class="btn" onclick="closeMgmtOccModal();openMgmtModal('+mt.id+')" title="Editar la definición recurrente (frecuencia, período, asignados base)">✎ Editar serie</button>':'')
     +(exc?'<button class="btn" onclick="removeMgmtExc()">Restaurar original</button>':'')
     +'<button class="btn dan" onclick="skipMgmtOcc()">'+(isSkipped?'Ya omitido':'Omitir este día')+'</button>'
     +'<button class="btn" onclick="closeMgmtOccModal()">Cancelar</button>'
@@ -5896,6 +4976,12 @@ function getBiweekDates(off){
 // —p. ej. día 14 y 15— pueden verse consecutivos), y « / » saltan la ventana
 // completa (2 o 5 semanas) en las vistas de 14 y 35 días.
 function getCalDates(view, off){
+  if(view==='7c'){
+    // Semana centrada en hoy (analistas: coordinación del equipo, sin navegación)
+    var b7=new Date(today()+'T12:00:00');
+    b7.setDate(b7.getDate()-3);
+    return Array.from({length:7},function(_,i){var x=new Date(b7);x.setDate(b7.getDate()+i);return x.toISOString().slice(0,10);});
+  }
   if(view==='3d'){
     var base=new Date(today()+'T12:00:00');
     base.setDate(base.getDate()+off*3-1); // centrada en hoy: ayer · hoy · mañana
@@ -6038,7 +5124,7 @@ function renderAprobados(){
     var anaAv=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':'';}).join('');
     var realH=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
     var approverName=_approverName(t);
-    var tipoCell='<div>'+sampleTypeBadge(t.tipo)+'</div>';
+    var tipoCell='<div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+'</div>';
     var _cmts=[];
     if(t.reviewComment)_cmts.push('Revisión: '+t.reviewComment);
     if(t.approvalComment)_cmts.push('Aprobación: '+t.approvalComment);
@@ -6187,7 +5273,7 @@ function renderEstabilidades(){
           var _iPCE=_maE&&_maE._pendingConfirm&&!_maE._supervisorConfirmed;
           var _iSE=!!(_maE&&_maE._started);
           var _diffE=_maE&&_maE.date?Math.round((new Date(_maE.date+'T12:00:00')-_tdDE)/(1000*60*60*24)):0;
-          var _inWE=(_diffE>=-3&&_diffE<=1);
+          var _inWE=(_diffE>=-4&&_diffE<=1);
           var _tActE=['pending','scheduled','progress','pending-confirm','observed'].indexOf(t.status)>=0;
           var _pRE=replanNotifs.find(function(n){return n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';});
           if(!_iDE&&!_iPCE&&!_iSE&&_inWE&&_tActE)actBtns+='<button class="btn sm pri" onclick="event.stopPropagation();markProg('+t.id+_dpE+')">▶ Iniciar</button>';
@@ -6296,7 +5382,7 @@ function renderLimpVal(){
           var _iPCL=_maL&&_maL._pendingConfirm&&!_maL._supervisorConfirmed;
           var _iSL=!!(_maL&&_maL._started);
           var _diffL=_maL&&_maL.date?Math.round((new Date(_maL.date+'T12:00:00')-_tdDL)/(1000*60*60*24)):0;
-          var _inWL=(_diffL>=-3&&_diffL<=1);
+          var _inWL=(_diffL>=-4&&_diffL<=1);
           var _tActL=['pending','scheduled','progress','pending-confirm','observed'].indexOf(t.status)>=0;
           var _pRL=replanNotifs.find(function(n){return n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';});
           if(!_iDL&&!_iPCL&&!_iSL&&_inWL&&_tActL)actBtns+='<button class="btn sm pri" onclick="event.stopPropagation();markProg('+t.id+_dpL+')">▶ Iniciar</button>';
@@ -6391,9 +5477,9 @@ function render(){
   }
   // Si había un sync diferido y ya no hay modales abiertos, ejecutarlo ahora
   if(_syncDeferred){
-    const _anyModal=showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
+    const _anyModal=showModal||showReplanModal||showChangePwd||showImportModal
       ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
-      ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
+      ||showReceiveModal||showSamplingModal||showSuggModal||showStdSecModal;
     if(!_anyModal){
       _syncDeferred=false;
       setTimeout(function(){gistSyncFromRemote().catch(function(e){console.error('deferred sync:',e);});},200);
@@ -6417,7 +5503,7 @@ function render(){
     }
     document.body.style.overflowY='';
     const shell=renderShell();
-    const modal=showImportModal?renderImportModal():showModal?renderTaskModal():showChangePwd?renderChangePwdModal():showReplanModal?renderReplanModal():showExtraModal?renderExtraWorkdayModal():showMgmtModal?renderMgmtModal():showSchedModal?renderSchedModal():showMgmtOccModal?renderMgmtOccModal():showTimeLogModal?renderTimeLogModal():showReceiveModal?renderReceiveModal():showSamplingModal?renderSamplingModal():showSuggModal?renderSuggestionModal():'';
+    const modal=showImportModal?renderImportModal():showModal?renderTaskModal():showChangePwd?renderChangePwdModal():showReplanModal?renderReplanModal():showExtraModal?renderExtraWorkdayModal():showMgmtModal?renderMgmtModal():showMgmtOccModal?renderMgmtOccModal():showTimeLogModal?renderTimeLogModal():showReceiveModal?renderReceiveModal():showSamplingModal?renderSamplingModal():showSuggModal?renderSuggestionModal():showStdSecModal?renderStdSecModal():'';
     const notif=renderNotifPanel();
     const spModal=showSpConfig?renderSpConfigModal():'';
   const ftModal=showFreeTaskModal?renderFreeTaskModal():'';
@@ -7028,6 +6114,9 @@ function renderSugerencias(){
       +(window.suggSearch?'<button class="btn sm" onclick="window.suggSearch=\'\';render()">✕ Limpiar</button>':'')
       +'</div>';
 
+    // Estándares secundarios (necesidades de desarrollo + matching con ingresos)
+    html+=renderStdSecSection(true);
+
     // Pendientes
     html+='<div style="margin-bottom:24px">';
     html+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'
@@ -7122,6 +6211,9 @@ function renderSugerencias(){
     html+='<div style="margin-bottom:20px;font-size:12px;color:var(--text3)">Sin sugerencias pendientes de respuesta.</div>';
   }
 
+  // Sección: Estándares secundarios (todos los roles de escritura pueden registrar)
+  html+='<div style="border-top:1px solid var(--border);padding-top:20px">'+renderStdSecSection(false)+'</div>';
+
   // Sección: Productos pendientes de ingreso (abajo)
   html+='<div style="border-top:1px solid var(--border);padding-top:20px">';
   if(_aIngresar.length>0){
@@ -7180,6 +6272,7 @@ function renderSugerencias(){
         +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
         +'<span class="pill '+(isOk?'muestra-ok':'a-ingresar')+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
         +(t.tipo?'<span style="font-size:10px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:var(--text2)">'+escH(t.tipo)+'</span>':'')
+        +stdSecBadge(t)
         +(t.priority&&t.priority!=='Normal'?'<span class="pill '+t.priority.toLowerCase()+'" style="font-size:10px">'+t.priority+'</span>':'')
         +'</div>'
         +'<div style="font-weight:600;font-size:13px">'+escH(t.producto)+'</div>'
@@ -7256,6 +6349,194 @@ function submitSuggestion(){
 function confirmSuggestion(id){
   // confirmSuggestion: redirige al flujo de revisión con modal pre-llenado
   openNewTaskFromSuggestion(id);
+}
+
+// ── DESARROLLO DE ESTÁNDAR SECUNDARIO (MP activas) ──
+// Normalización para matching de nombres libres: minúsculas, sin acentos, sin
+// puntuación. LAXO a propósito: un falso positivo se descarta con un clic; un
+// falso negativo (aviso que no salta) es el peor caso.
+function _normProd(s){
+  return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+}
+// Necesidad ↔ tarea MP: match si un nombre contiene al otro, o si todas las
+// palabras del más corto están en el más largo ("Dipirona" ↔ "Dipirona MP").
+function stdSecMatchesTask(need,t){
+  if(!t||t._deleted||t.tipo!=='MP')return false;
+  // Aplica hasta "Completado p/ revisar": mientras el análisis de aprobación esté
+  // abierto se pueden sumar los ensayos extra de calificación como estándar.
+  if(['done','reviewed','approved'].includes(t.status))return false;
+  if((t.stdSecIgnore||[]).indexOf(need.id)>=0)return false; // descartado manualmente
+  var a=_normProd(need.producto),b=_normProd(t.producto);
+  if(!a||!b)return false;
+  if(b.indexOf(a)>=0||a.indexOf(b)>=0)return true;
+  var wa=a.split(' '),wb=b.split(' ');
+  var shorter=wa.length<=wb.length?wa:wb,longer=wa.length<=wb.length?wb:wa;
+  return shorter.every(function(w){return longer.indexOf(w)>=0;});
+}
+function openStdSecNeeds(){return stdSecNeeds.filter(function(n){return !n._removed&&n.status!=='cerrado';});}
+function stdSecNeedsForTask(t){return openStdSecNeeds().filter(function(n){return stdSecMatchesTask(n,t);});}
+function stdSecTasksForNeed(need){return activeTasks().filter(function(t){return stdSecMatchesTask(need,t);});}
+// Badge ⭐ para tarjetas/listados: ámbar = falta muestrear extra; violeta = ya muestreado
+function stdSecBadge(t){
+  var ns=stdSecNeedsForTask(t);
+  if(!ns.length)return'';
+  var pend=ns.some(function(n){return n.status==='pendiente';});
+  return '<span title="'+(pend
+    ?'Requiere desarrollo de estándar secundario: muestrear cantidad adicional y prever ensayos de calificación'
+    :'Estándar secundario: cantidad adicional ya muestreada — pendiente fraccionar/cerrar')
+    +'" style="background:'+(pend?'#fef3c7':'#ede9fe')+';color:'+(pend?'#92400e':'#5b21b6')
+    +';border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap;cursor:help">⭐ STD'+(pend?'':' ✓')+'</span>';
+}
+function openStdSecModal(){
+  if(isAuditorRole()){alert('Modo auditor: solo lectura. No es posible ejecutar acciones que modifican datos.');return;}
+  showStdSecModal=true;render();
+}
+function renderStdSecModal(){
+  return '<div class="modal-overlay">'
+    +'<div class="modal" style="width:440px">'
+    +'<div class="modal-hdr"><b>⭐ Registrar necesidad de estándar secundario</b>'
+    +'<button onclick="showStdSecModal=false;render()" style="border:none;background:none;font-size:18px;cursor:pointer">✕</button></div>'
+    +'<div class="modal-body">'
+    +'<p style="font-size:12px;color:var(--text3);margin:0 0 14px">Cuando ingrese esta materia prima activa, el aviso indicará muestrear cantidad adicional para análisis complementarios y fraccionamiento como estándar secundario.</p>'
+    +'<div class="frow"><label>Materia prima *</label><input id="ssn-producto" type="text" placeholder="Nombre de la MP (como figura en los ingresos)"></div>'
+    +'<div class="frow"><label>Fecha límite deseada</label><input id="ssn-due" type="date" title="Ej.: vencimiento del estándar actual"></div>'
+    +'<div class="frow"><label>Motivo / Notas</label><textarea id="ssn-notes" style="min-height:60px" placeholder="Ej.: estándar actual vence 10/2026, queda ~200 mg…"></textarea></div>'
+    +'</div>'
+    +'<div class="modal-ftr">'
+    +'<button class="btn" onclick="showStdSecModal=false;render()">Cancelar</button>'
+    +'<button class="btn pri" onclick="submitStdSecNeed()">⭐ Registrar</button>'
+    +'</div>'
+    +'</div></div>';
+}
+function submitStdSecNeed(){
+  if(isAuditorRole()){alert('Modo auditor: solo lectura.');return;}
+  var prod=((document.getElementById('ssn-producto')||{}).value||'').trim();
+  if(!prod){alert('Indicá el nombre de la materia prima.');return;}
+  var need={
+    id:'ssn'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
+    producto:prod,
+    due:((document.getElementById('ssn-due')||{}).value||''),
+    notes:((document.getElementById('ssn-notes')||{}).value||'').trim(),
+    createdBy:currentUser.id,createdByName:currentUser.name,
+    ts:Date.now(),status:'pendiente',_ts:Date.now()
+  };
+  stdSecNeeds.push(need);
+  // Notificar al supervisor (salvo que la registre él mismo)
+  if(!isSupRole()){
+    var _sup=USERS.find(function(u){return u.role==='supervisor';});
+    replanNotifs.push({id:newNotifId(),type:'stdsec_created',needId:need.id,
+      producto:prod,fromUserId:currentUser.id,fromName:currentUser.name,
+      forUserId:_sup?_sup.id:'',status:'pending',ts:Date.now(),_ts:Date.now()});
+  }
+  auditLog('CREATE','STDSEC',need.id,{producto:prod,due:need.due||undefined,
+    description:'Necesidad de estándar secundario registrada: '+prod},'');
+  showStdSecModal=false;
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow stdsec:',e);});
+  // Si ya hay ingresos activos que matchean, avisar de inmediato (el análisis en
+  // curso puede absorber los ensayos extra de calificación).
+  var _m=stdSecTasksForNeed(need);
+  if(_m.length){
+    setTimeout(function(){alert('⭐ Hay '+_m.length+' ingreso'+(_m.length>1?'s':'')+' activo'+(_m.length>1?'s':'')+' de esta MP:\n\n'
+      +_m.map(function(t){return '· '+t.producto+' — '+t.lote+' ('+statusLabel(t.status)+')';}).join('\n')
+      +'\n\nSi el análisis está en curso, se pueden incluir los ensayos extra de calificación como estándar.');},100);
+  }
+}
+// Cierre (estándar fraccionado y en uso) — solo supervisor, acción manual deliberada:
+// el muestreo extra NO cierra la necesidad, solo la pasa a "muestreado".
+function stdSecClose(id){
+  if(!isSupRole()){alert('Solo el supervisor puede cerrar la necesidad (estándar fraccionado y en uso).');return;}
+  var n=stdSecNeeds.find(function(x){return x.id===id;});if(!n)return;
+  if(!confirm('¿Cerrar la necesidad de estándar secundario de "'+n.producto+'"?\n\nCerrar significa que el estándar ya fue fraccionado y está disponible para uso.'))return;
+  n.status='cerrado';n.closedBy=currentUser.id;n.closedTs=Date.now();n._ts=Date.now();
+  resolveAllCopies({type:'stdsec_created',needId:id},'closed');
+  resolveAllCopies({type:'stdsec_sampled',needId:id},'closed');
+  auditLog('RESOLVE','STDSEC',id,{producto:n.producto,description:'Estándar secundario cerrado (fraccionado): '+n.producto},'');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow stdsec close:',e);});
+}
+function stdSecDelete(id){
+  var n=stdSecNeeds.find(function(x){return x.id===id;});if(!n)return;
+  // Supervisor borra cualquiera; el creador solo la propia mientras esté pendiente
+  if(!isSupRole()&&!(n.createdBy===currentUser.id&&n.status==='pendiente')){alert('Solo el supervisor puede eliminar esta necesidad.');return;}
+  if(!confirm('¿Eliminar la necesidad de estándar secundario de "'+n.producto+'"? Los avisos dejarán de mostrarse.'))return;
+  n._removed=true;n._removedTs=Date.now();n._ts=Date.now();
+  resolveAllCopies({type:'stdsec_created',needId:id},'deleted');
+  resolveAllCopies({type:'stdsec_sampled',needId:id},'deleted');
+  auditLog('DELETE','STDSEC',id,{producto:n.producto,description:'Necesidad de estándar secundario eliminada: '+n.producto},'');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow stdsec del:',e);});
+}
+// Marcar vista una notificación stdsec (no toca la necesidad, solo la campana)
+function markStdSecNotifSeen(notifId){
+  if(isAuditorRole())return;
+  var n=replanNotifs.find(function(x){return x.id===notifId;});if(!n)return;
+  n.status='resolved';n.resolvedHow='seen';n.resolvedBy=currentUser.id;n._ts=Date.now();
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow stdsec seen:',e);});
+}
+// Descartar un match puntual (falso positivo) sin tocar la necesidad: se guarda en la tarea
+function stdSecIgnoreMatch(taskId,needId){
+  if(isAuditorRole()){alert('Modo auditor: solo lectura.');return;}
+  var t=tasks.find(function(x){return x.id===taskId;});if(!t)return;
+  if(!confirm('¿Descartar el aviso de estándar secundario para "'+t.producto+' — '+t.lote+'"?\n\nSolo afecta este ingreso; la necesidad sigue activa para otros.'))return;
+  if(!t.stdSecIgnore)t.stdSecIgnore=[];
+  if(t.stdSecIgnore.indexOf(needId)<0)t.stdSecIgnore.push(needId);
+  t._ts=Date.now();
+  auditLog('EDIT','TASK',taskId,{field:'stdSecIgnore',newVal:needId,description:'Aviso de estándar secundario descartado para '+t.producto+' '+t.lote},'');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow stdsec ign:',e);});
+}
+// Sección compartida del módulo Ingresos (supervisor y no-supervisor)
+function renderStdSecSection(isSup){
+  var open=openStdSecNeeds().sort(function(a,b){return (a.status==='pendiente'?0:1)-(b.status==='pendiente'?0:1)||(b.ts||0)-(a.ts||0);});
+  var closed=stdSecNeeds.filter(function(n){return !n._removed&&n.status==='cerrado';}).sort(function(a,b){return(b.closedTs||0)-(a.closedTs||0);}).slice(0,10);
+  var html='<div style="margin-bottom:24px">'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">'
+    +'<div style="font-size:14px;font-weight:700;color:#92400e">⭐ Estándares secundarios</div>'
+    +(open.length?'<span style="background:#d97706;color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700">'+open.length+'</span>':'')
+    +(!isAuditorRole()?'<button class="btn sm" onclick="openStdSecModal()" style="margin-left:auto">+ Registrar necesidad</button>':'')
+    +'</div>';
+  if(!open.length){
+    html+='<div style="font-size:12px;color:var(--text3)">Sin necesidades de desarrollo activas.</div>';
+  }else{
+    html+=open.map(function(n){
+      var pend=n.status==='pendiente';
+      var matches=stdSecTasksForNeed(n);
+      var overdue=pend&&n.due&&n.due<today();
+      return '<div style="background:var(--surface);border:1px solid '+(pend?'#f59e0b':'var(--border)')+';border-left:4px solid '+(pend?'#f59e0b':'#8b5cf6')+';border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:8px">'
+        +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">'
+        +'<b style="font-size:13px">'+escH(n.producto)+'</b>'
+        +'<span style="background:'+(pend?'#fef3c7':'#ede9fe')+';color:'+(pend?'#92400e':'#5b21b6')+';border-radius:4px;padding:1px 8px;font-size:10px;font-weight:700">'+(pend?'⏳ Pendiente de muestreo':'🧪 Muestreado — falta fraccionar')+'</span>'
+        +(n.due?'<span style="font-size:11px;color:'+(overdue?'var(--red)':'var(--text2)')+'">Límite: <b class="u-mono">'+fmtDDMMYY(n.due)+'</b>'+(overdue?' ⚠':'')+'</span>':'')
+        +'</div>'
+        +(n.notes?'<div style="font-size:11px;color:var(--text2);background:var(--bg);border-radius:4px;padding:5px 8px;margin-bottom:6px">'+escH(n.notes)+'</div>':'')
+        +'<div class="u-xs3">Registrado por '+escH(n.createdByName||'')+' · '+new Date(n.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'})
+        +(n.sampledTs?' · Muestreado por '+escH(n.sampledByName||'')+' el '+new Date(n.sampledTs).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}):'')
+        +'</div>'
+        +(matches.length
+          ?'<div style="margin-top:6px;font-size:11px"><span style="font-weight:600;color:var(--text2)">Ingresos que matchean:</span> '
+            +matches.map(function(t){return '<span style="display:inline-block;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:1px 6px;margin:2px 2px 0 0">'+escH(t.producto)+' — '+escH(t.lote)+' <span style="color:var(--text3)">('+statusLabel(t.status)+')</span>'
+              +(!isAuditorRole()?' <span onclick="stdSecIgnoreMatch('+t.id+',\''+n.id+'\')" title="Descartar este aviso (falso positivo)" style="cursor:pointer;color:var(--text3)">✕</span>':'')+'</span>';}).join('')
+            +'</div>'
+          :(pend?'<div style="margin-top:6px;font-size:11px;color:var(--text3)">Sin ingresos activos de esta MP por ahora — el aviso saltará al ingresarla.</div>':''))
+        +((isSup&&isSupRole())||(!isSup&&(isSupRole()||n.createdBy===currentUser.id&&pend))
+          ?'<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'
+            +(isSupRole()&&n.status==='muestreado'?'<button class="btn sm suc" onclick="stdSecClose(\''+n.id+'\')" style="font-size:11px">✓ Cerrar (fraccionado y en uso)</button>':'')
+            +(isSupRole()&&pend?'<button class="btn sm" onclick="stdSecClose(\''+n.id+'\')" style="font-size:11px" title="Cerrar sin registrar muestreo (p. ej. resuelto por otra vía)">✓ Cerrar</button>':'')
+            +'<button class="btn sm dan" onclick="stdSecDelete(\''+n.id+'\')" style="font-size:11px">🗑 Eliminar</button>'
+            +'</div>':'')
+        +'</div>';
+    }).join('');
+  }
+  if(isSup&&closed.length){
+    html+='<details style="margin-top:8px"><summary style="font-size:11px;color:var(--text3);cursor:pointer">Cerradas recientes ('+closed.length+')</summary>'
+      +closed.map(function(n){return '<div style="font-size:11px;color:var(--text2);padding:4px 0;border-bottom:1px solid var(--border)">✓ <b>'+escH(n.producto)+'</b> · cerrado '+new Date(n.closedTs||n._ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'})+' por '+escH((getU(n.closedBy)||{}).name||'')+'</div>';}).join('')
+      +'</details>';
+  }
+  html+='</div>';
+  return html;
 }
 
 function rejectSuggestion(id){
@@ -7599,6 +6880,14 @@ function mergeSnapshot(local, remote) {
     (L.productSuggestions||[]).forEach(function(s){var rs=psMap[s.id];if(!rs||(s._ts||0)>(rs._ts||0))psMap[s.id]=s;});
     merged.productSuggestions=Object.values(psMap);
 
+    // ── stdSecNeeds: merge by id, keep newer ──
+    // Tombstones (_removed) se conservan: impiden que un dispositivo desactualizado
+    // resucite una necesidad eliminada. Poda por edad en applySnapshot (determinística).
+    var ssnMap={};
+    (R.stdSecNeeds||[]).forEach(function(n){ssnMap[n.id]=n;});
+    (L.stdSecNeeds||[]).forEach(function(n){var rn=ssnMap[n.id];if(!rn||(n._ts||0)>(rn._ts||0))ssnMap[n.id]=n;});
+    merged.stdSecNeeds=Object.values(ssnMap);
+
     // ── Candado de versión: monotónico, gana el mayor ──
     merged.minAppBuild    = Math.max(L.minAppBuild||0,    R.minAppBuild||0);
 
@@ -7797,130 +7086,6 @@ function quickActivateDay(dateStr, analystId) {
   render();
 }
 
-function renderNotificaciones(){
-  if(!canViewSup()) return '<div class="empty">Acceso restringido</div>';
-  var isSup=canViewSup();
-  if(typeof window.notifSearch==='undefined') window.notifSearch='';
-  var _nq=(window.notifSearch||'').toLowerCase().trim();
-  var allReqs=[...scheduleRequests].sort(function(a,b){return b.ts-a.ts;});
-  if(_nq){allReqs=allReqs.filter(function(r){var u=getU(r.analystId);return (u.name||'').toLowerCase().includes(_nq)||(r.reason||'').toLowerCase().includes(_nq)||(r.dateStr||'').includes(_nq);});}
-  var pending=allReqs.filter(function(r){return r.status==='pending';});
-  var history=allReqs.filter(function(r){return r.status!=='pending';});
-
-  function typeLabel(t){
-    return t==='change'?'Cambio de horario':t==='overtime'?'Horas extra':t==='reduced'?'Horario reducido':t==='shift'?'Guardia / Turno':t||'Solicitud';
-  }
-  function statusStr(s){
-    return s==='approved'?'Aprobado':s==='rejected'?'Rechazado':'Pendiente';
-  }
-  function buildDetail(p){
-    if(!p)return'—';
-    var d=typeLabel(p.type);
-    if(p.startTime&&p.endTime)d+=': '+p.startTime+'–'+p.endTime;
-    if(p.extraHours)d+=' (+'+p.extraHours+'h extra)';
-    if(p.breakMinutes!==undefined)d+=', pausa '+p.breakMinutes+'min';
-    return d;
-  }
-
-  // Copiar al portapapeles como TSV para Excel
-  function copyTsv(){
-    var HDR='Analista	Fecha de solicitud	Fecha asig.	Detalle / Motivo	Comentario analista	Estado	Aprobado por';
-    var rows=allReqs.map(function(r){
-      var u=getU(r.analystId);
-      var reviewer=r.reviewedBy?getU(r.reviewedBy):null;
-      var ts=new Date(r.ts);
-      return [
-        u.name,
-        ts.toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'})+' '+ts.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'}),
-        r.dateStr?fmtDF(r.dateStr):'—',
-        buildDetail(r.proposed),
-        r.reason||'',
-        statusStr(r.status),
-        reviewer?reviewer.name:'—'
-      ].map(escapeTsv).join('\t');
-    });
-    var text=HDR+'\n'+rows.join('\n');
-    navigator.clipboard.writeText(text).catch(function(){
-      var ta=document.createElement('textarea');ta.value=text;
-      document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
-    });
-    var btn=document.getElementById('btn-copy-sol');
-    if(btn){btn.textContent='✓ Copiado';setTimeout(function(){btn.textContent='📋 Copiar';},2000);}
-  }
-  // Guardar referencia global para el onclick
-  window._ltCopyTsv=copyTsv;
-
-  // Tabla HTML
-  var COLS='display:grid;grid-template-columns:120px 100px 80px 140px 1fr 90px 110px'+(isSup?' 100px':'');
-  function thead(){
-    return'<div style="'+COLS+';gap:6px;padding:7px 12px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">'
-      +'<div>Analista</div><div>Fecha sol.</div><div>Fecha asig.</div><div>Detalle / Motivo</div>'
-      +'<div>Comentario analista</div><div>Estado</div><div>Aprobado por</div>'
-      +(isSup?'<div>Acciones</div>':'')
-      +'</div>';
-  }
-  function trow(r, showActions){
-    var u=getU(r.analystId);
-    var reviewer=r.reviewedBy?getU(r.reviewedBy):null;
-    var ts=new Date(r.ts);
-    var sc=r.status==='approved'?'var(--green)':r.status==='rejected'?'var(--red)':'var(--amber)';
-    return'<div style="'+COLS+';gap:6px;padding:9px 12px;border-bottom:1px solid var(--border);font-size:12px;align-items:start">'
-      // Analista
-      +'<div style="display:flex;align-items:center;gap:5px"><div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px;flex-shrink:0">'+escH(u.avInit)+'</div><span style="font-weight:600;font-size:11px">'+escH(u.name)+'</span></div>'
-      // Fecha solicitud
-      +'<div style="font-family:var(--mono);font-size:10px">'+ts.toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'})+'<br><span class="u-fg3">'+ts.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})+'</span></div>'
-      // Fecha asig
-      +'<div class="u-mono11">'+(r.dateStr?fmtDF(r.dateStr):'<span class="u-fg3">—</span>')+'</div>'
-      // Detalle
-      +'<div class="u-sm2">'+escH(buildDetail(r.proposed))+'</div>'
-      // Comentario / motivo analista
-      +'<div class="u-sm2">'+(r.reason?escH(r.reason):'<span class="u-fg3">—</span>')+'</div>'
-      // Estado
-      +'<div><span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;background:'+sc+'22;color:'+sc+'">'+statusStr(r.status)+'</span></div>'
-      // Aprobado por
-      +'<div class="u-sm3">'+(reviewer?escH(reviewer.name):'—')+'</div>'
-      // Acciones
-      +(isSup
-        ?'<div style="display:flex;gap:3px;flex-wrap:wrap">'
-          +(showActions
-            ?'<button class="btn sm suc" onclick="approveSchedule('+r.id+')" style="font-size:10px">✓ Aprobar</button>'
-             +'<button class="btn sm dan" onclick="rejectSchedule('+r.id+')" style="font-size:10px">✗ Rechazar</button>'
-             +'<button class="btn sm" onclick="editScheduleRequest('+r.id+')" style="font-size:10px">✎ Editar</button>'
-            :'')
-          +(r.status==='approved'
-            ?'<button class="btn sm" onclick="declineApproval('+r.id+')" style="font-size:10px;color:var(--red)">↩ Declinar apr.</button>'
-            :'')
-          +'</div>'
-        :'')
-      +'</div>';
-  }
-
-  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">'
-    +'<div class="sec" style="margin-bottom:0">Solicitudes de cambio de horario ('+allReqs.length+')</div>'
-    +'<div style="display:flex;gap:5px">'
-    +'<button id="btn-copy-sol" class="btn sm" onclick="window._ltCopyTsv&&window._ltCopyTsv()">📋 Copiar</button>'
-    +'<button class="btn sm" onclick="exportNotificacionesXLSX()">↓ Excel</button>'
-    +'</div>'
-    +'</div>'
-    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">'
-    +'<input id="srch-notif" type="text" placeholder="Buscar por analista, motivo o fecha…" value="'+escH(window.notifSearch||'')+'"'
-    +' oninput="_srch(\'notifSearch\',this.value,\'srch-notif\')"'
-    +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
-    +(_nq?'<button class="btn sm" onclick="window.notifSearch=\'\';render()">✕ Limpiar</button>':'')
-    +'</div>';
-
-  html+='<div style="font-size:12px;font-weight:600;color:var(--amber);margin-bottom:8px">Pendientes ('+pending.length+')</div>';
-  if(pending.length===0){
-    html+='<div class="empty" style="margin-bottom:16px">Sin solicitudes pendientes ✓</div>';
-  }else{
-    html+='<div class="tbl" style="margin-bottom:20px;overflow-x:auto">'+thead()+pending.map(function(r){return trow(r,true);}).join('')+'</div>';
-  }
-  if(history.length>0){
-    html+='<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">Historial ('+history.length+')</div>';
-    html+='<div class="tbl" style="overflow-x:auto">'+thead()+history.map(function(r){return trow(r,false);}).join('')+'</div>';
-  }
-  return html;
-}
 
 // ══════════════════════════════════════════════════════════════════════
 // AUDIT TRAIL — Complete, attributable, tamper-evident change log
@@ -8203,9 +7368,9 @@ function _markActivity() {
   }
 }
 function _anyModalOpen() {
-  return showModal||showSchedModal||showReplanModal||showChangePwd||showImportModal
+  return showModal||showReplanModal||showChangePwd||showImportModal
     ||showExtraModal||showMgmtModal||showMgmtOccModal||showTimeLogModal
-    ||showReceiveModal||showSamplingModal||showSuggModal||showSchedReqModal;
+    ||showReceiveModal||showSamplingModal||showSuggModal||showStdSecModal;
 }
 // Recarga por inactividad: marca para que el próximo arranque NO reinicie el reloj de ocio.
 // Además restaura los filtros: los en-memoria mueren con la recarga y los persistidos
@@ -8385,7 +7550,7 @@ function renderShell(){
   const myT=sup?activeTasks():activeTasks().filter(t=>isMyTask(t));
   const lateC=myT.filter(t=>t._dueStatus==='late').length;
   const pendC=myT.filter(t=>t.status==='pending').length;
-  // Tareas con acción pendiente del analista actual (dentro de ventana de 3 días)
+  // Tareas con acción pendiente del analista actual (dentro de ventana de 4 días)
   const actionC=(()=>{
     if(sup)return 0;
     const _myId=currentUser.id,_todStr=today(),_todDate=new Date(_todStr+'T12:00:00');
@@ -8399,7 +7564,7 @@ function renderShell(){
         if(done)return false;
         if(ma._pendingConfirm&&!ma._supervisorConfirmed)return false;
         var diff=Math.round((new Date((ma.date||_todStr)+'T12:00:00')-_todDate)/(1000*60*60*24));
-        return diff>=-3&&diff<=1;
+        return diff>=-4&&diff<=1;
       });
     }).length;
   })();
@@ -8413,7 +7578,7 @@ function renderShell(){
     {id:'mgmt',label:'Gestión',icon:'🗂'},
     {id:'week',label:'Calendario',icon:'📅'},
     {id:'informes',label:'Informes',icon:'📊'},
-    {id:'rrhh',label:'Personal',icon:'👥',badge:(()=>{const c=checkAbsenceConflicts().length;const p=scheduleRequests.filter(r=>r.status==='pending').length;const t=c+p;return t>0?t:'';})(),bc:'d'},
+    {id:'rrhh',label:'Personal',icon:'👥',badge:(()=>{const c=checkAbsenceConflicts().length;return c>0?c:'';})(),bc:'d'},
     {id:'solicitudesIL',label:'Sol. Inter-lab',icon:'🔗',badge:(()=>{var c=(window._incomingILRCount||0);return c>0?c:'';})(),bc:'w'},
     {id:'admin',label:'Administración',icon:'⚙'},
   ]:isReviewer?[
@@ -8421,7 +7586,6 @@ function renderShell(){
     {id:'revision',label:'Revisión',icon:'✅',badge:reviewPendC>0?reviewPendC:'',bc:'w'},
     {id:'tasks',label:'Análisis',icon:'🔬',badge:(function(){var n=activeTasks().length;return n>0?n:'';})(),bc:'w'},
     {id:'week',label:'Calendario equipo',icon:'📅'},
-    {id:'cronograma',label:'Mi cronograma',icon:'🗓',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
     {id:'especiales',label:'Especiales',icon:'🧪'},
     {id:'mgmt',label:'Gestión',icon:'🗂'},
     {id:'solicitudesIL',label:'Sol. Inter-lab',icon:'🔗',badge:(()=>{var c=(window._incomingILRCount||0);return c>0?c:'';})(),bc:'w'},
@@ -8429,23 +7593,23 @@ function renderShell(){
     {id:'dashboard',label:'Mi día',icon:'🏠'},
     {id:'mgmt',label:'Gestión',icon:'🗂'},
     {id:'sugerencias',label:'Ingresos',icon:'💡',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;const myS=activeTasks().filter(t=>(t.status==='a-ingresar'||t.status==='muestra-ok')&&(t.samplerAssignments||[]).some(s=>s.sampler===currentUser.id&&!s.done)).length;return(sr+myS)>0?(sr+myS):'';})(),bc:'w'},
-    {id:'cronograma',label:'Mi cronograma',icon:'🗓',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ]:isStaffRole()?[
     {id:'dashboard',label:'Mi día',icon:'🏠'},
     {id:'mgmt',label:'Gestión',icon:'🗂'},
     {id:'sugerencias',label:'Ingresos',icon:'💡',badge:(()=>{const sr=replanNotifs.filter(n=>n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending').length;return sr>0?sr:'';})(),bc:'w'},
-    {id:'cronograma',label:'Mi cronograma',icon:'🗓',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending');return p.length>0?p.length:'';})(),bc:'w'},
   ]:[
     {id:'dashboard',label:'Mi día',icon:'🏠',badge:actionC>0?actionC:'',bc:'d'},
     {id:'tasks',label:'Mis análisis',icon:'🔬'},
+    // Calendario del equipo (solo lectura, semana centrada en hoy): reemplaza a
+    // "Mi cronograma" — permite a los analistas coordinar entre sí la semana.
+    {id:'week',label:'Calendario equipo',icon:'📅'},
     {id:'mgmt',label:'Gestión',icon:'🗂'},
-    {id:'cronograma',label:'Mi cronograma',icon:'🗓',badge:(()=>{const p=scheduleRequests.filter(r=>r.analystId===currentUser.id&&r.status==='pending').length;return p>0?p:'';})(),bc:'w'},
   ];
   // El supervisor llega al Historial por la campana; el auditor no tiene panel de
   // notificaciones de supervisor, así que lo lleva en el nav.
   if(isAuditorRole())navs.push({id:'historial',label:'Historial',icon:'🕘'});
-  const titles={dashboard:sup?'Panel general':'Mi día',tasks:(sup||isReviewerRole())?'Análisis / Lotes':'Mis análisis',pendientes:'Ensayos pendientes',review:'Revisión de análisis',revision:'Revisión y Aprobación',sugerencias:'Ingresos',informes:'Informes de gestión',notificaciones:'Solicitudes de horario',audittrail:'Audit Trail',week:sup||isReviewer?'Calendario del equipo':'Mi calendario',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',cronograma:'Mi cronograma',admin:'Administración',historial:'Historial de notificaciones',sampler:'A ingresar — Muestreo',freeTasks:'Mis tareas únicas',estabilidades:'Estabilidades',limpval:'Limpiezas & Validaciones',solicitudesIL:'Solicitudes inter-laboratorio'};
-  const content=({dashboard:renderDashboard,aprobados:renderAprobados,tasks:renderTasksModule,pending:renderPendientesList,pendientes:renderPendientesList,week:renderWeek,rrhh:renderRrhh,mgmt:renderMgmtModule,cronograma:renderCronograma,myschedule:renderCronograma,review:renderRevision,revision:renderRevision,sugerencias:renderSugerencias,informes:renderInformes,notificaciones:renderNotificaciones,historial:renderHistorialNotif,admin:renderAdminModule,audittrail:renderAuditTrail,sampler:renderSamplerView,freeTasks:renderStaffFreeTasks,especiales:renderEspeciales,estabilidades:renderEstabilidades,limpval:renderLimpVal,solicitudesIL:renderSolicitudes}[currentView]||renderDashboard)();
+  const titles={dashboard:sup?'Panel general':'Mi día',tasks:(sup||isReviewerRole())?'Análisis / Lotes':'Mis análisis',pendientes:'Ensayos pendientes',review:'Revisión de análisis',revision:'Revisión y Aprobación',sugerencias:'Ingresos',informes:'Informes de gestión',audittrail:'Audit Trail',week:'Calendario del equipo',pending:'Pendientes y vencidos',analysts:'Equipo analistas',rrhh:'Gestión de analistas',mgmt:'Actividades de gestión',admin:'Administración',historial:'Historial de notificaciones',sampler:'A ingresar — Muestreo',freeTasks:'Mis tareas únicas',estabilidades:'Estabilidades',limpval:'Limpiezas & Validaciones',solicitudesIL:'Solicitudes inter-laboratorio'};
+  const content=({dashboard:renderDashboard,aprobados:renderAprobados,tasks:renderTasksModule,pending:renderPendientesList,pendientes:renderPendientesList,week:renderWeek,rrhh:renderRrhh,mgmt:renderMgmtModule,review:renderRevision,revision:renderRevision,sugerencias:renderSugerencias,informes:renderInformes,historial:renderHistorialNotif,admin:renderAdminModule,audittrail:renderAuditTrail,sampler:renderSamplerView,freeTasks:renderStaffFreeTasks,especiales:renderEspeciales,estabilidades:renderEstabilidades,limpval:renderLimpVal,solicitudesIL:renderSolicitudes}[currentView]||renderDashboard)();
   return`<div class="shell">
     <div class="sidebar">
       <div class="sb-header">
@@ -8653,6 +7817,7 @@ function renderDashboard(){
       return'<div class="sampler-card">'
         +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
         +'<span class="pill '+(isOk?'muestra-ok':'a-ingresar')+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
+        +stdSecBadge(t)
         +'<b style="font-size:13px">'+escH(t.producto)+'</b>'
         +'<span style="font-family:var(--mono);font-size:11px;color:var(--text3)">'+escH(t.lote)+'</span>'
         +(t.expectedArrival?'<span class="u-sm3">Esperado: <b>'+fmtDDMMYY(t.expectedArrival)+'</b></span>':'')
@@ -8878,6 +8043,7 @@ function renderDashboard(){
       +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;flex-wrap:wrap">'
       +'<span class="pill '+(isOk?'muestra-ok':'a-ingresar')+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
       +sampleTypeBadge(t.tipo)
+      +stdSecBadge(t)
       +'</div>'
       +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+' <span style="font-family:var(--mono);font-size:11px;color:var(--text3);font-weight:400">'+escH(t.lote)+'</span></div>'
       +'<div style="font-size:11px;color:var(--text2);margin-top:1px">'
@@ -9097,8 +8263,8 @@ function tRowAna(t,maOverride){
   var assignedDate=new Date((md||todayStr)+'T12:00:00');
   // diffDays: signed — negative=past, positive=future
   var diffDays=Math.round((assignedDate-todayDate)/(1000*60*60*24));
-  // Ventana de acción: 3 días atrás hasta 1 día adelante (aplica siempre, incluso si la tarea está vencida)
-  var inActionWindow=(diffDays>=-3&&diffDays<=1);
+  // Ventana de acción: 4 días atrás hasta 1 día adelante (aplica siempre, incluso si la tarea está vencida)
+  var inActionWindow=(diffDays>=-4&&diffDays<=1);
   // Per-assignment state (independent per date)
   var iThisAssignDone=ma&&((ma.realHours>0)||(ma.sessions&&ma.sessions.length>0)||!!ma._completedBySup);
   var iThisAssignPendConf=ma&&ma._pendingConfirm&&!ma._supervisorConfirmed;
@@ -9348,10 +8514,15 @@ function renderTasksModule(){
     ?productSuggestions.filter(function(s){return s.status==='pending';}).length
     :replanNotifs.filter(function(n){return n.type==='product_suggestion_response'&&n.forUserId===currentUser.id&&n.status==='pending';}).length;
   function _tt(id,label,title){return '<div class="tab'+(window.tasksTab===id?' active':'')+'" onclick="window.tasksTab=\''+id+'\';render()" title="'+title+'">'+label+'</div>';}
+  // El revisor ve el listado completo (igual que el supervisor): la solapa se llama
+  // "Análisis", no "Mis análisis", para no sugerir que solo son los suyos.
+  var _verTodos=_isSup||isReviewerRole();
+  var _tabAnalisis=_tt('analisis',_verTodos?'🔬 Análisis':'🔬 Mis análisis',_verTodos?'Listado completo de análisis y lotes':'Todos los análisis asignados a vos, incluidos los históricos');
+  var _tabIngresos=_tt('ingresos','💡 Ingresos'+(_ingCnt?' ('+_ingCnt+')':''),_isSup?'Sugerencias de ingreso enviadas por el equipo':'Sugerir ingreso de productos y ver respuestas del supervisor');
   var tb='<div class="tab-bar">'
     +(!_isSup?_tt('pendientes','⏰ Pendientes'+(_pendCnt?' ('+_pendCnt+')':''),'Productos pendientes, programados y en análisis — incluye solicitar asignación de productos omitidos'):'')
-    +_tt('analisis',_isSup?'🔬 Análisis':'🔬 Mis análisis',_isSup?'Listado completo de análisis y lotes':'Todos los análisis asignados a vos, incluidos los históricos')
-    +_tt('ingresos','💡 Ingresos'+(_ingCnt?' ('+_ingCnt+')':''),_isSup?'Sugerencias de ingreso enviadas por el equipo':'Sugerir ingreso de productos y ver respuestas del supervisor')
+    // Fuera del supervisor, Ingresos va antes del listado de análisis.
+    +(_isSup?_tabAnalisis+_tabIngresos:_tabIngresos+_tabAnalisis)
     +'</div>';
   var body=(window.tasksTab==='pendientes'&&!_isSup)?renderPendientesList()
     :window.tasksTab==='ingresos'?renderSugerencias()
@@ -9410,7 +8581,7 @@ function renderPendientesList(){
     var obsHtml=t.observations&&t.observations.length?'<span title="'+escH(t.observations[t.observations.length-1].comment||'')+'" style="cursor:help;font-size:11px;color:var(--amber-text);margin-left:3px">⚑</span>':'';
     return'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:7px;display:flex;align-items:center;gap:10px">'
       +'<div style="flex:1;min-width:0">'
-      +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+obsHtml+'</div>'
+      +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+obsHtml+(stdSecBadge(t)?' '+stdSecBadge(t):'')+'</div>'
       +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3);margin-top:1px">'+escH(t.lote)
         +(firstDate?' · Planif: '+fmtDDMMYY(firstDate):'')
         +(t.due?' · Límite: '+dueBadge(t):'')
@@ -9470,7 +8641,7 @@ function renderPendientesResults(filtered,pc){
     var obsHtml=t.observations&&t.observations.length?'<span title="'+escH(t.observations[t.observations.length-1].comment||'')+'" style="cursor:help;font-size:11px;color:var(--amber-text);margin-left:3px">⚑</span>':'';
     return'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:7px;display:flex;align-items:center;gap:10px">'
       +'<div style="flex:1;min-width:0">'
-      +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+obsHtml+'</div>'
+      +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+obsHtml+(stdSecBadge(t)?' '+stdSecBadge(t):'')+'</div>'
       +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3);margin-top:1px">'+escH(t.lote)
         +(firstDate?' · Planif: '+fmtDDMMYY(firstDate):'')
         +(t.due?' · Límite: '+dueBadge(t):'')
@@ -9778,7 +8949,9 @@ function renderMgmtRoleFilter(){
   return _renderRoleFilterChips(mgmtRoleFilter,"mgmtRoleFilter='__ID__';render()");
 }
 function getCalRows(sup){
-  var base=sup?CAL_USERS:[CAL_USERS.find(function(a){return a.id===currentUser.id;})].filter(Boolean);
+  // No-supervisor/revisor (analistas): vista de coordinación — todos los
+  // analistas y revisores del equipo (sin muestreadores/personal), solo lectura.
+  var base=sup?CAL_USERS:CAL_USERS.filter(function(a){return a.role==='analyst'||a.role==='reviewer';});
   if(!sup||calRoleSel.length===0)return base;
   return base.filter(function(a){return calRoleSel.indexOf(a.role)>=0;});
 }
@@ -9814,14 +8987,16 @@ function renderCalWeek(sup){
   const _winWeeks=calView==='biweek'?2:calView==='5w'?5:1;
   const _stepLbl=calView==='3d'?['← Anterior','Siguiente →']:_winWeeks>1?['← Semana','Semana →']:['← Anterior','Siguiente →'];
   const _stepTitle=calView==='3d'?'3 días':'una semana';
-  return `<div class="filter-row" style="margin-bottom:12px">
+  return `${calView==='7c'?`<div class="filter-row" style="margin-bottom:12px">
+    <span style="font-size:13px;font-weight:600;font-family:var(--mono)">${fmtD(wd[0])} – ${fmtD(wd[wd.length-1])}</span>
+  </div>`:`<div class="filter-row" style="margin-bottom:12px">
     ${_winWeeks>1?`<button class="btn" onclick="weekOffset-=${_winWeeks};render()" title="Retroceder la ventana completa (${_winWeeks} semanas)">«</button>`:''}
     <button class="btn" onclick="weekOffset--;render()" title="Retroceder ${_stepTitle}">${_stepLbl[0]}</button>
     <span style="font-size:13px;font-weight:600;font-family:var(--mono);min-width:120px;text-align:center">${fmtD(wd[0])} – ${fmtD(wd[wd.length-1])}</span>
     <button class="btn" onclick="weekOffset++;render()" title="Avanzar ${_stepTitle}">${_stepLbl[1]}</button>
     ${_winWeeks>1?`<button class="btn" onclick="weekOffset+=${_winWeeks};render()" title="Avanzar la ventana completa (${_winWeeks} semanas)">»</button>`:''}
     <button class="btn sm" style="margin-left:6px" onclick="weekOffset=0;render()">Hoy</button>
-  </div>
+  </div>`}
   <div class="week-grid" style="overflow-x:auto">
     <div style="min-width:${_gridMinW}px">
       <div class="whead" style="${cols}"><div>Usuario</div>${dayLbls.map((d,i)=>_collapsed[wd[i]]
@@ -9829,7 +9004,7 @@ function renderCalWeek(sup){
         :`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
       ${rows.map(a=>`<div class="wrow" style="${cols}">
         <div class="wcell-name"><div class="av ${a.av}" style="flex-shrink:0">${escH(a.avInit)}</div>${escH(a.name.split(' ')[0])}</div>
-        ${wd.map(d=>{if(_collapsed[d])return`<div class="wcell" style="background:var(--bg2);padding:0" title="No laborable"></div>`;const dt=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d&&!x._removed));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=activeTasks().filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;const dmg=(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id));const absOnly=ab&&dt.length===0&&dft.length===0&&dst.length===0&&dmg.length===0;const _wk=isWorkdayFor(a.id,d);const _rowAssign=canAssign&&(a.role==='analyst'||a.role==='reviewer');return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} ${_rowAssign&&_wk?`onclick="calCellClick(event,'${a.id}','${d}')" title="Clic en el espacio vacío para asignar un producto pendiente"`:''} style="background:${ab?typ.color:d===todayStr?'rgba(26,79,138,.04)':''};${absOnly?'justify-content:center;align-items:center;':''}${_rowAssign&&_wk?'cursor:pointer;':''}">${_rowAssign&&_wk&&!ab&&dt.length===0?`<div style="font-size:10px;color:var(--blue);opacity:.55;text-align:center;padding:2px 0;pointer-events:none">＋ asignar</div>`:''}${_rowAssign&&!_wk&&!ab?`<div style="font-size:9px;color:var(--text3);opacity:.6;text-align:center;padding:1px 0;pointer-events:none">No lab.</div>`:''}${ab?(absOnly?`<div style="font-size:10px;font-weight:700;color:${typ.text};text-align:center;letter-spacing:.02em"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`:`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.text}1a;text-align:center"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`):''}${dt.map(t=>{const _canDrag=sup&&d>=_yesterdayStr&&t.status==='scheduled';return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ '+'':''}${t._interLab?`<div style="font-size:8px;color:#1d4ed8;font-weight:700;margin-bottom:1px">🔗 ${escH(t._interLab.fromLabName||'Inter-lab')}</div>`:''}${_inline?`<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="font-weight:600">${escH(t.producto)}</span> <span style="font-size:9px;opacity:.75;font-family:var(--mono)">${escH(t.lote)}</span></div>`:`<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div>`}</div>`;}).join('')}${dmg.map(o=>`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation();${sup?'openMgmtModal('+o.id+')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
+        ${wd.map(d=>{if(_collapsed[d])return`<div class="wcell" style="background:var(--bg2);padding:0" title="No laborable"></div>`;const dt=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d&&!x._removed));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=activeTasks().filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const ab=getAbsenceOnDate(a.id,d);const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;const dmg=(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id));const absOnly=ab&&dt.length===0&&dft.length===0&&dst.length===0&&dmg.length===0;const _wk=isWorkdayFor(a.id,d);const _rowAssign=canAssign&&(a.role==='analyst'||a.role==='reviewer');return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} ${_rowAssign&&_wk?`onclick="calCellClick(event,'${a.id}','${d}')" title="Clic en el espacio vacío para asignar un producto pendiente"`:''} style="background:${ab?typ.color:d===todayStr?'rgba(26,79,138,.04)':''};${absOnly?'justify-content:center;align-items:center;':''}${_rowAssign&&_wk?'cursor:pointer;':''}">${_rowAssign&&_wk&&!ab&&dt.length===0?`<div style="font-size:10px;color:var(--blue);opacity:.55;text-align:center;padding:2px 0;pointer-events:none">＋ asignar</div>`:''}${_rowAssign&&!_wk&&!ab?`<div style="font-size:9px;color:var(--text3);opacity:.6;text-align:center;padding:1px 0;pointer-events:none">No lab.</div>`:''}${ab?(absOnly?`<div style="font-size:10px;font-weight:700;color:${typ.text};text-align:center;letter-spacing:.02em"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`:`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.text}1a;text-align:center"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`):''}${dt.map(t=>{const _asg=(t.assignments||[]).find(x=>x.analyst===a.id&&x.date===d&&!x._removed);const _asgDone=_asg&&((_asg.realHours>0)||(_asg.sessions&&_asg.sessions.length>0)||!!_asg._completedBySup);const _canDrag=sup&&d>=_yesterdayStr&&!_asgDone&&['a-ingresar','muestra-ok','pending','scheduled','progress','observed'].includes(t.status);return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ '+'':''}${t._interLab?`<div style="font-size:8px;color:#1d4ed8;font-weight:700;margin-bottom:1px">🔗 ${escH(t._interLab.fromLabName||'Inter-lab')}</div>`:''}${_inline?`<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="font-weight:600">${escH(t.producto)}</span> <span style="font-size:9px;opacity:.75;font-family:var(--mono)">${escH(t.lote)}</span></div>`:`<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div>`}</div>`;}).join('')}${dmg.map(o=>{const _mgDone=(o.completions||[]).some(c=>c.date===o.occDate&&c.analystId===a.id);const _mgDrag=sup&&!_mgDone&&d>=_yesterdayStr;return`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:${_mgDrag?'grab':'pointer'}" ${_mgDrag?`draggable="true" ondragstart="mgmtDragStart(event,${o.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} onclick="event.stopPropagation();${sup?'openMgmtOccModal('+o.id+',\''+d+'\')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}${sup?' — clic: gestionar este día · arrastrar: reasignar a otro usuario':''}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`;}).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
       </div>`).join('')}
     </div>
   </div>
@@ -9883,7 +9058,9 @@ function openQuickAssign(analystId, dateStr){
   window._qaRender=function(){
     var q=((document.getElementById('qa-search')||{}).value||'').toLowerCase().trim();
     var list=activeTasks().filter(function(t){
-      if(['done','reviewed','approved','a-ingresar','muestra-ok'].indexOf(t.status)>=0)return false;
+      // Incluye a-ingresar/muestra-ok: se puede planificar el análisis antes del
+      // ingreso de la muestra (el estado no cambia hasta que ingresa).
+      if(['done','reviewed','approved'].indexOf(t.status)>=0)return false;
       if((t.assignments||[]).some(function(x){return x.analyst===analystId&&x.date===dateStr&&!x._removed;}))return false;
       if(q)return (t.producto||'').toLowerCase().indexOf(q)>=0||(t.lote||'').toLowerCase().indexOf(q)>=0||(t.tipo||'').toLowerCase().indexOf(q)>=0;
       return true;
@@ -9895,6 +9072,7 @@ function openQuickAssign(analystId, dateStr){
       return '<div style="display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:var(--radius);margin-bottom:5px;background:var(--bg);border-left:3px solid '+(ac>0?'var(--blue)':'var(--amber)')+'">'
         +'<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+'</div>'
         +'<div style="font-size:10px;color:var(--text3);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.lote)+(t.due?' · vence '+fmtDDMMYY(t.due):'')+(ac>0?' · ya asignado ('+ac+')':'')+'</div></div>'
+        +((t.status==='a-ingresar'||t.status==='muestra-ok')?'<span class="pill '+(t.status==='muestra-ok'?'muestra-ok':'a-ingresar')+'" style="font-size:9px;flex-shrink:0" title="La muestra aún no ingresó — la planificación queda a la espera del ingreso">'+statusLabel(t.status)+'</span>':'')
         +sampleTypeBadge(t.tipo)
         +'<button class="btn sm pri" style="flex-shrink:0" onclick="window._qaAssign('+t.id+')">+ Asignar</button>'
         +'</div>';
@@ -10118,9 +9296,18 @@ function calDragStart(ev,taskId,analystId,date){
   // No stopPropagation — permite que el evento burbujee normalmente
 }
 function calDragEnd(ev){ev.target.style.opacity='';_calDrag={taskId:null,analystId:null,date:null};}
+// Arrastre de una OCURRENCIA de actividad de gestión: reasigna el día a otro usuario
+// (mismo día, distinta fila). El movimiento de fecha se hace editando la serie.
+function mgmtDragStart(ev,mgmtId,analystId,date){
+  _calDrag={taskId:null,mgmtId:mgmtId,analystId:analystId,date:date};
+  ev.dataTransfer.effectAllowed='move';
+  try{ev.dataTransfer.setData('text/plain',JSON.stringify({kind:'mgmt',mgmtId:mgmtId,analystId:analystId,date:date}));}
+  catch(e){ev.dataTransfer.setData('text/plain','mgmt:'+mgmtId);}
+  if(ev.currentTarget&&ev.currentTarget.style)ev.currentTarget.style.opacity='0.5';
+}
 function calDragOver(ev,analystId,date){
   // Solo aceptar si hay algo siendo arrastrado
-  if(!_calDrag.taskId)return;
+  if(!_calDrag.taskId&&!_calDrag.mgmtId)return;
   ev.preventDefault();
   ev.dataTransfer.dropEffect='move';
   ev.currentTarget.style.outline='2px dashed var(--blue)';
@@ -10136,9 +9323,10 @@ function calDrop(ev,newAnalystId,newDate){
   ev.currentTarget.style.background='';
   // Usar el payload autoritativo de ESTE arrastre; el global solo es respaldo
   var d=null;
-  try{var p=JSON.parse(ev.dataTransfer.getData('text/plain')||'null');if(p&&p.taskId!=null)d=p;}catch(e){d=null;}
+  try{var p=JSON.parse(ev.dataTransfer.getData('text/plain')||'null');if(p&&(p.taskId!=null||p.mgmtId!=null))d=p;}catch(e){d=null;}
   if(!d)d=_calDrag;
   _calDrag={taskId:null,analystId:null,date:null};
+  if(d&&d.mgmtId!=null){_mgmtOccDrop(d,newAnalystId,newDate);return;}
   if(!d||d.taskId==null)return;
   if(d.analystId===newAnalystId&&d.date===newDate)return; // misma celda
   var t=tasks.find(function(x){return x.id===d.taskId;});
@@ -10181,9 +9369,56 @@ function calDrop(ev,newAnalystId,newDate){
   saveLS();render();
   saveNow().catch(function(e){console.error('calDrop save:',e);});
 }
+// Drop de una ocurrencia de gestión: excepción del día con el analista reemplazado.
+// Solo mismo día (mover la fecha de una serie recurrente se hace editando la serie).
+function _mgmtOccDrop(d,newAnalystId,newDate){
+  if(!isSupRole())return;
+  if(d.analystId===newAnalystId&&d.date===newDate)return; // misma celda
+  if(newDate!==d.date){alert('Las actividades de gestión se reasignan entre usuarios del MISMO día (arrastrá en vertical).\n\nPara cambiar la fecha de la serie, abrí la actividad y editá su definición.');return;}
+  var mt=mgmtTasks.find(function(m){return m.id===d.mgmtId;});
+  if(!mt)return;
+  var destU=getU(newAnalystId);
+  if(!destU||CAL_USERS.every(function(u){return u.id!==newAnalystId;})){alert('Usuario destino no válido.');return;}
+  // El día ya realizado por el usuario de origen no se reasigna
+  if((mt.completions||[]).some(function(c){return c.date===d.date&&c.analystId===d.analystId;})){
+    alert('Ese usuario ya registró la realización de esta actividad ese día: no se puede reasignar.');return;
+  }
+  if(!mt.exceptions)mt.exceptions=[];
+  var exc=mt.exceptions.find(function(e){return e.date===d.date;});
+  var eff=(exc?exc.analysts:(mt.analysts||[])).slice();
+  if(eff.indexOf(d.analystId)<0){alert('La asignación de origen ya no existe (¿otro dispositivo la modificó?).');return;}
+  eff=eff.filter(function(id){return id!==d.analystId;});
+  if(eff.indexOf(newAnalystId)<0)eff.push(newAnalystId);
+  var _srcU=getU(d.analystId);
+  var _note='Reasignado por arrastre: '+((_srcU&&_srcU.name)||d.analystId)+' → '+destU.name;
+  if(exc){exc.analysts=eff;exc.note=_note;}
+  else mt.exceptions.push({date:d.date,analysts:eff,note:_note});
+  mt._ts=Date.now();
+  auditLog('EDIT','MGMT',mt.id,{
+    field:'exceptions',date:d.date,
+    description:'Ocurrencia de gestión reasignada ('+getMgmtCat(mt.category).label+' '+fmtDF(d.date)+'): '+((_srcU&&_srcU.name)||d.analystId)+' → '+destU.name
+  },'Arrastrado en calendario semanal');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('mgmtOccDrop save:',e);});
+}
 function renderWeek(){
   const sup=currentUser.role==='supervisor'||currentUser.role==='reviewer'||currentUser.role==='auditor';
   if(calView==='month')calView='5w'; // migración del modo anterior
+  if(!sup){
+    // Analistas: cronograma del equipo (analistas+revisores) de UNA semana centrada
+    // en hoy, solo lectura y sin navegación — reemplaza a "Mi cronograma".
+    calView='7c';weekOffset=0;
+    const _curWA=parseInt(localStorage.getItem('lt9-calColW'))||88;
+    const _cwBtnA=(w,label,title)=>`<button class="btn sm" onclick="localStorage.setItem('lt9-calColW','${w}');render()" style="padding:4px 8px;${_curWA===w?'background:var(--surface);font-weight:600;box-shadow:var(--shadow-sm)':''}" title="${title}">${label}</button>`;
+    const barA=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <div style="font-size:12px;color:var(--text2)">📅 Semana del equipo centrada en hoy — para coordinar entre analistas (solo lectura)</div>
+      <div style="display:flex;gap:2px;background:var(--bg2);border-radius:var(--radius);padding:3px;margin-left:auto" title="Ancho mínimo de las columnas de día">
+        ${_cwBtnA(64,'A−','Columnas compactas')}${_cwBtnA(88,'A','Columnas normales')}${_cwBtnA(120,'A+','Columnas amplias')}
+      </div>
+      <button class="btn sm" onclick="printCalendar()">🖨 Imprimir / PDF</button>
+    </div>`;
+    return barA+renderCalWeek(false);
+  }
   // Build top bar: ventana de días + role filter inline
   const rfHtml=(sup)?renderCalRoleFilter():'';
   const _cvBtn=(id,label,title)=>`<button class="btn sm" onclick="calView='${id}';weekOffset=0;render()" style="${calView===id?'background:var(--surface);font-weight:600;box-shadow:var(--shadow-sm)':''}" title="${title}">${label}</button>`;
@@ -11528,7 +10763,7 @@ function renderAdmin(){
     +'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">'
     +'<div>'
     +'<div style="font-weight:700;margin-bottom:2px;color:var(--red)">&#128465; Reinicio de datos operativos</div>'
-    +'<div style="font-size:12px;color:var(--text2)">Elimina an&#225;lisis, solicitudes de horario y actividades de gesti&#243;n. Conserva usuarios y horarios laborales.</div>'
+    +'<div style="font-size:12px;color:var(--text2)">Elimina an&#225;lisis y actividades de gesti&#243;n. Conserva usuarios y d&#237;as laborables.</div>'
     +'</div>'
     +'<button class="btn sm dan" onclick="doSystemReset()" style="white-space:nowrap">&#9888; Reiniciar datos</button>'
     +'</div></div>';
@@ -11966,7 +11201,7 @@ function doLabReset(labId){
       rebuildDerived();
       tasks=[];nextId=1;
       freeTasks=[];nextFreeTaskId=1;
-      productSuggestions=[];nextSuggId=1;
+      productSuggestions=[];nextSuggId=1;stdSecNeeds=[];
       replanNotifs=[];nextNotifId=1;
       scheduleRequests=[];nextSchedReqId=1;
       mgmtTasks=[];nextMgmtId=1;
@@ -12004,13 +11239,12 @@ function doSystemReset(){
     +'<p style="font-size:13px;margin:0 0 8px;font-weight:600">Se eliminarán PERMANENTEMENTE:</p>'
     +'<ul style="font-size:12px;color:var(--text2);margin:0 0 12px;padding-left:18px;line-height:1.8">'
     +'<li>Todos los análisis y lotes</li>'
-    +'<li>Solicitudes de cambio de horario</li>'
     +'<li>Actividades de gestión</li>'
     +'</ul>'
     +'<p style="font-size:13px;margin:0 0 16px;font-weight:600;color:var(--green)">Se conservarán:</p>'
     +'<ul style="font-size:12px;color:var(--text2);margin:0 0 18px;padding-left:18px;line-height:1.8">'
     +'<li>Usuarios y contraseñas</li>'
-    +'<li>Horarios laborales configurados</li>'
+    +'<li>Días laborables configurados</li>'
     +'</ul>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end">'
     +'<button id="rst-cancel" style="padding:9px 18px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px">Cancelar</button>'
@@ -12033,7 +11267,7 @@ function doSystemReset(){
       var _nextUid=nextUid;
       tasks=[];nextId=1;
       freeTasks=[];nextFreeTaskId=1;
-      productSuggestions=[];nextSuggId=1;
+      productSuggestions=[];nextSuggId=1;stdSecNeeds=[];
       replanNotifs=[];nextNotifId=1;
       scheduleRequests=[];nextSchedReqId=1;
       mgmtTasks=[];nextMgmtId=1;
@@ -12048,7 +11282,7 @@ function doSystemReset(){
       rebuildDerived();
       auditLog('DELETE','USER','SYSTEM',{description:'Reinicio operativo del sistema'},''+reason);
       saveLS();render();
-      setTimeout(function(){alert('Reinicio completado. Usuarios y horarios conservados.');},200);
+      setTimeout(function(){alert('Reinicio completado. Usuarios y días laborables conservados.');},200);
     });
   };
 }
@@ -13188,34 +12422,6 @@ function exportAusenciasXLSX(){
   });
 }
 
-// Solicitudes - Excel con 2 hojas
-function exportNotificacionesXLSX(){
-  if(!isSupRole()&&!isReviewerRole()&&!isAuditorRole()){showToast('Solo supervisores, revisores y auditores pueden exportar.','warn');return;}
-  _lazyXLSX(function(){
-    var typeMap={};(SCHED_TYPES||[]).forEach(function(t){typeMap[t.id]=t.label;});
-    var reqData=[...scheduleRequests].sort(function(a,b){return b.ts-a.ts;}).map(function(r){
-      var u=getU(r.analystId);var rev=r.reviewedBy?getU(r.reviewedBy):null;
-      var p=r.proposed||{};var det=typeMap[p.type]||p.type||'';
-      if(p.startTime&&p.endTime)det+=': '+p.startTime+'–'+p.endTime;
-      if(p.extraHours!=null)det+=' +'+(p.extraHours!=null?String(p.extraHours):'')+' h extra';
-      var ts=new Date(r.ts);
-      return{'Analista':u?u.name:r.analystId,'Fecha solicitud':ts.toLocaleDateString('es'),'Fecha asignada':r.dateStr||'(base)','Detalle':det,'Motivo':r.reason||'','Estado':r.status==='approved'?'Aprobado':r.status==='rejected'?'Rechazado':'Pendiente','Aprobado por':rev?rev.name:''};
-    });
-    var ws1=xlsxSheet(reqData);
-    ws1['!cols']=[{wch:18},{wch:14},{wch:14},{wch:28},{wch:28},{wch:12},{wch:16}];
-    var schedData=ANALYSTS.map(function(a){
-      var def=getAnalystScheduleDefault(a.id);
-      return{'Analista':a.name,'Hora entrada':def.startTime||'','Hora salida':def.endTime||'','Descanso (min)':def.breakMinutes||60,'Jornada (h)':calcHours(def).toFixed(1)};
-    });
-    var ws2=xlsxSheet(schedData);
-    ws2['!cols']=[{wch:18},{wch:14},{wch:14},{wch:16},{wch:12}];
-    var wb=XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb,ws1,'Solicitudes');
-    XLSX.utils.book_append_sheet(wb,ws2,'Horarios base');
-    xlsxDownload(wb,'horarios_'+today()+'.xlsx');
-  });
-}
-
 // Historial notificaciones
 function copyHistorial(btn){
   if(!isSupRole()&&!isReviewerRole()&&!isAuditorRole()){showToast('Solo supervisores, revisores y auditores pueden exportar.','warn');return;}
@@ -13690,10 +12896,7 @@ function markApproved(id){
     if(t.due&&_aDate>t.due){
       if(!confirm('⚠️ La fecha de aprobación ('+fmtDF(_aDate)+') es POSTERIOR a la fecha límite ('+fmtDF(t.due)+').\n\n¿Confirmar aprobación fuera de plazo?'))return;
     }
-    requireSignature(
-      'Aprobar análisis',
-      'Aprobación: '+t.producto+' '+t.lote,
-      function(reason){
+    var _applyApproval=function(reason){
         t.status='approved';
         t._ts=Date.now();
         t.approvedBy=currentUser.id;
@@ -13724,8 +12927,20 @@ function markApproved(id){
         saveLS();render();
         showToast('✅ Aprobado','success');
         saveNow().catch(e=>console.error('saveNow approved:',e));
+      };
+    if(t._revApproved){
+      // El revisor ya fechó y FIRMÓ su aprobación (requireSignature en reviewerApprove):
+      // la confirmación del supervisor cierra el aviso con un confirm simple, sin
+      // re-autenticar con contraseña. La autoría queda igual en el audit trail (APPROVE).
+      if(confirm('El revisor '+(t._revApprovedByName||'')+' aprobó este análisis'
+        +(t._revApprovedDate?' el '+fmtDF(t._revApprovedDate):'')+' con firma electrónica.'
+        +(t._revApprovedComment?'\nMotivo: '+t._revApprovedComment:'')
+        +'\n\n¿Confirmar la aprobación de '+t.producto+' '+t.lote+'?')){
+        _applyApproval('');
       }
-    );
+    } else {
+      requireSignature('Aprobar análisis','Aprobación: '+t.producto+' '+t.lote,_applyApproval);
+    }
   };
 }
 // El revisor pre-aprueba un análisis revisado: queda en 'reviewed' marcado como
@@ -13939,16 +13154,6 @@ function markAllNotifsRead(){
     if(isSup2 && n.type==='completed') return;
     if(!(n.readBy||[]).includes(uid)){if(!n.readBy)n.readBy=[];n.readBy.push(uid);}
   });
-  // Solicitudes de horario: marcar como vistas para suprimir badge sin bloquear acción
-  if(isSup2){
-    scheduleRequests.forEach(function(r){
-      if(r.status==='pending') r._seenBySup=true;
-    });
-  } else {
-    scheduleRequests.forEach(function(r){
-      if(r.analystId===uid && r.status==='approved') r._seenByAnalyst=true;
-    });
-  }
   saveLS();
   saveNow().catch(function(e){console.error(e);});
 }
@@ -13968,6 +13173,7 @@ function resolveAllCopies(opts, how){
     if(opts.taskId!=null && n.taskId!==opts.taskId) return;
     if(opts.freeTaskId!=null && n.freeTaskId!==opts.freeTaskId) return;
     if(opts.analystId!=null && n.analystId!==opts.analystId) return;
+    if(opts.needId!=null && n.needId!==opts.needId) return;
     n.status='resolved';
     n.resolvedHow=how;
     n.resolvedBy=currentUser.id;
@@ -14095,6 +13301,20 @@ function renderSamplingModal(){
     +(t.expectedArrival?'<div style="font-size:12px;margin-bottom:10px;padding:7px 10px;background:var(--bg);border-radius:var(--radius);border:1px solid var(--border)">'
       +'<span class="u-fg3">Llegada esperada: </span><b class="u-mono">'+fmtDDMMYY(t.expectedArrival)+'</b></div>':'')
     +(t.arrivalNotes?'<div style="font-size:11px;color:var(--text2);margin-bottom:10px;padding:6px 10px;background:var(--bg);border-radius:var(--radius)">📝 '+escH(t.arrivalNotes)+'</div>':'')
+    +(function(){
+      // Aviso de estándar secundario: el momento crítico es el muestreo — acá se
+      // decide tomar la cantidad adicional. El checkbox NO cierra la necesidad:
+      // la pasa a "muestreado" (el cierre es manual del supervisor al fraccionar).
+      var _ssn=stdSecNeedsForTask(t).filter(function(n){return n.status==='pendiente';});
+      if(!_ssn.length)return'';
+      return '<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:var(--radius);padding:10px 12px;margin-bottom:12px">'
+        +'<div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:4px">⭐ Desarrollo de estándar secundario pendiente</div>'
+        +'<div style="font-size:11px;color:#92400e">Muestrear <b>cantidad adicional</b> para análisis complementarios y fraccionamiento como estándar secundario.</div>'
+        +_ssn.map(function(n){return n.notes?'<div style="font-size:11px;color:#92400e;margin-top:3px;opacity:.85">📝 '+escH(n.notes)+'</div>':'';}).join('')
+        +'<label style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:#92400e;margin-top:8px;cursor:pointer">'
+        +'<input type="checkbox" id="f-sampling-stdsec" style="width:auto;margin:0">Se muestreó cantidad adicional para estándar secundario</label>'
+        +'</div>';
+    })()
     +'<div class="form-grid">'
     +'<div class="frow"><label>Fecha real de llegada <span style="color:var(--red)">*</span></label>'
     +'<input type="date" id="f-sampling-date" value="'+today()+'" style="font-weight:600"></div>'
@@ -14117,6 +13337,13 @@ function confirmSampling(){
   var samplingHours=parseFloat(document.getElementById('f-sampling-hours')?.value)||0;
   if(!samplingDate){alert('Ingresá la fecha real de llegada.');return;}
   if(!samplingHours||samplingHours<=0){alert('Ingresá las horas dedicadas al muestreo.');return;}
+  // Estándar secundario: guard anti-olvido. Si el aviso estaba visible y el checkbox
+  // quedó sin marcar, pedir confirmación explícita antes de registrar.
+  var _stdSecCb=document.getElementById('f-sampling-stdsec');
+  var _stdSecTaken=!!(_stdSecCb&&_stdSecCb.checked);
+  if(_stdSecCb&&!_stdSecTaken){
+    if(!confirm('⭐ Este producto requiere muestreo ADICIONAL para estándar secundario y no marcaste que se tomó.\n\n¿Registrar el muestreo igual? La necesidad seguirá pendiente y avisará en el próximo ingreso.'))return;
+  }
   if(!t.samplerAssignments)t.samplerAssignments=[];
   // Buscar asignación activa; si no existe, crear una (muestreo sin asignación previa)
   var sa=t.samplerAssignments.find(function(s){return s.sampler===currentUser.id&&!s.done;});
@@ -14157,94 +13384,36 @@ function confirmSampling(){
     producto:t.producto,
     lote:t.lote
   });
+  // Estándar secundario: registrar el muestreo adicional en las necesidades matcheadas
+  if(_stdSecTaken){
+    sa.stdSecSampled=true;
+    var _supU2=USERS.find(function(u){return u.role==='supervisor';});
+    stdSecNeedsForTask(t).filter(function(n){return n.status==='pendiente';}).forEach(function(n){
+      n.status='muestreado';
+      n.sampledBy=currentUser.id;n.sampledByName=currentUser.name;
+      n.sampledTs=Date.now();n.sampledTaskId=t.id;n._ts=Date.now();
+      resolveAllCopies({type:'stdsec_created',needId:n.id},'sampled');
+      replanNotifs.push({id:newNotifId(),type:'stdsec_sampled',needId:n.id,
+        producto:n.producto,taskId:t.id,lote:t.lote,
+        fromUserId:currentUser.id,fromName:currentUser.name,
+        forUserId:_supU2?_supU2.id:'',status:'pending',ts:Date.now(),_ts:Date.now()});
+      auditLog('EDIT','STDSEC',n.id,{field:'status',oldVal:'pendiente',newVal:'muestreado',
+        taskId:t.id,description:'Muestreo adicional p/ estándar secundario: '+n.producto+' (lote '+t.lote+')'},'');
+    });
+  }
   auditLog('SAMPLING','TASK',samplingTaskId,{
     field:'status',oldVal:'a-ingresar',newVal:'muestra-ok',
     sampler:currentUser.id,
     realArrivalDate:samplingDate,
     lotNotes:lotNotes||undefined,
     hours:samplingHours||undefined,
+    stdSecSampled:_stdSecTaken||undefined,
     selfAssigned:!sa.assignedBy||undefined,
-    description:'Muestreo registrado: '+t.producto+' '+t.lote+(samplingHours?' ('+samplingHours+'h)':'')
+    description:'Muestreo registrado: '+t.producto+' '+t.lote+(samplingHours?' ('+samplingHours+'h)':'')+(_stdSecTaken?' + cantidad adicional p/ estándar secundario':'')
   },'Muestreo realizado por '+currentUser.name);
   showSamplingModal=false;samplingTaskId=null;
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow confirmSampling:',e);});
-}
-function requestScheduleChange(analystId,dateStr){
-  schedModalAnalyst=analystId;schedModalDate=dateStr||null;showSchedModal=true;render();
-}
-function editScheduleRequest(reqId){
-  const r=scheduleRequests.find(function(x){return x.id===reqId;});if(!r)return;
-  // Open the schedule modal pre-filled with request data
-  schedModalAnalyst=r.analystId;
-  schedModalDate=r.dateStr||null;
-  showSchedModal=true;
-  render();
-}
-function declineApproval(reqId){
-  const r=scheduleRequests.find(function(x){return x.id===reqId;});if(!r)return;
-  if(!confirm('¿Declinar la aprobación de esta solicitud? El horario volverá al estado anterior.'))return;
-  const reason=prompt('Motivo (opcional):','');
-  if(reason===null)return;
-  r.status='rejected';
-  r.reviewedBy=currentUser.id;
-  r.reviewedTs=Date.now();
-  r.declineReason=reason;
-  r._ts=Date.now(); // CRÍTICO: garantiza que el merge preserve el estado resuelto
-  // Remove override if it was applied
-  if(r.dateStr&&analystSchedules[r.analystId]&&analystSchedules[r.analystId].overrides){
-    delete analystSchedules[r.analystId].overrides[r.dateStr];
-  }
-  auditLog('DECLINE_APPROVAL','SCHEDULE_REQUEST',reqId,{analystId:r.analystId},reason||'Aprobación declinada');
-  saveLS();render();
-  saveNow().catch(function(e){console.error('saveNow decline:',e);});
-}
-function approveSchedule(reqId){
-  if(!isSupRole()){alert('Solo el Supervisor puede aprobar cambios de horario.');return;}
-  const req=scheduleRequests.find(r=>r.id===reqId);if(!req)return;
-  if(req.proposed.type==='overtime'){
-    // Overtime: just mark approved, displayed separately in calendar
-  } else if(req.dateStr){
-    setAnalystDayOverride(req.analystId,req.dateStr,{...req.proposed,status:'approved',note:req.reason,type:req.proposed.type||'change'});
-  } else {
-    setAnalystDefault(req.analystId,req.proposed);
-  }
-  req.status='approved';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();
-  req._ts=Date.now(); // CRÍTICO: garantiza que el merge preserve la aprobación ante saves concurrentes
-  const uSched=getU(req.analystId);
-  auditLog('APPROVE','SCHEDULE',req.id,{
-    analystId:req.analystId,analystName:uSched?uSched.name:'?',
-    dateStr:req.dateStr||'(horario base)',proposed:JSON.stringify(req.proposed),
-    description:'Aprobación de cambio de horario: '+(uSched?uSched.name:'?')+' — '+(req.dateStr||'horario base')
-  },'');
-  saveLS();render();
-  saveNow().catch(e=>console.error('saveNow approve:',e));
-}
-function rejectSchedule(reqId){
-  if(!isSupRole()){alert('Solo el Supervisor puede rechazar solicitudes de horario.');return;}
-  const req=scheduleRequests.find(r=>r.id===reqId);if(!req)return;
-  var reason=prompt('Motivo del rechazo (opcional):','');
-  if(reason===null)return;
-  req.status='rejected';req.reviewedBy=currentUser.id;req.reviewedTs=Date.now();req.rejectionReason=reason||'';
-  req._ts=Date.now(); // CRÍTICO: garantiza que el merge preserve el rechazo ante saves concurrentes
-  const uSrej=getU(req.analystId);
-  auditLog('REJECT','SCHEDULE',req.id,{
-    analystId:req.analystId,analystName:uSrej?uSrej.name:'?',
-    dateStr:req.dateStr||'(horario base)',reason:reason||'',
-    description:'Rechazo de cambio de horario: '+(uSrej?uSrej.name:'?')+' — '+(req.dateStr||'horario base')+(reason?' | '+reason:'')
-  },reason||'');
-  replanNotifs.push({id:newNotifId(),type:'schedule_rejected',
-    analystId:req.analystId,forUserId:req.analystId,
-    reason:reason||'',rejectedByName:currentUser.name,rejectedById:currentUser.id,
-    dateStr:req.dateStr||'',proposed:req.proposed,
-    status:'pending',ts:Date.now()});
-  saveLS();render();saveNow().catch(e=>console.error('saveNow reject:',e));
-}
-function setAnalystScheduleDirect(analystId){
-  schedModalAnalyst=analystId;schedModalDate=null;showSchedModal=true;render();
-}
-function openDaySchedule(analystId,dateStr){
-  schedModalAnalyst=analystId;schedModalDate=dateStr;showSchedModal=true;render();
 }
 function markProg(id,assignDate){
   const t=tasks.find(x=>x.id===id);if(!t)return;
@@ -14263,14 +13432,14 @@ function markProg(id,assignDate){
       ?(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&a.date===assignDate&&!a._removed;})
       :(t.assignments||[]).filter(function(a){return a.analyst===currentUser.id&&!a._removed;});
     if(checkAssigns.length>0){
-      // Ventana permitida: 3 días hacia atrás hasta 1 día adelante
+      // Ventana permitida: 4 días hacia atrás hasta 1 día adelante
       var allOutOfWindow=checkAssigns.every(function(ma){
         var ad=new Date((ma.date||today())+'T12:00:00');
         var diff=Math.round((ad-todayDate)/(1000*60*60*24));
-        return diff<-3||diff>1;
+        return diff<-4||diff>1;
       });
       if(allOutOfWindow){
-        alert('Solo podés iniciar esta actividad dentro de los 3 días previos o el día siguiente a la fecha asignada.');return;
+        alert('Solo podés iniciar esta actividad dentro de los 4 días previos o el día siguiente a la fecha asignada.');return;
       }
     }
   }
@@ -14880,12 +14049,9 @@ function renderNotifPanel(){
     // supervisor (status approved/resolved legado) no son accionables aquí.
     return n.type==='replan'&&n.status==='pending'&&(isSup||(n.analystId===uid));
   }).sort(function(a,b){return b.ts-a.ts;});
-  const schedPend=isSup
-    ?scheduleRequests.filter(function(r){return r.status==='pending';})
-    :[];
-  const schedApproved=!isSup
-    ?scheduleRequests.filter(function(r){return r.analystId===uid&&r.status==='approved'&&!r._seenByAnalyst;})
-    :[];
+  // Horarios: registro en papel — solicitudes de cambio de horario eliminadas de la app
+  const schedPend=[];
+  const schedApproved=[];
   var confirmPend=[];
   if(isSup){
     tasks.forEach(function(t){
@@ -14953,6 +14119,11 @@ function renderNotifPanel(){
   var samplingDoneBadge=isSup
     ?replanNotifs.filter(function(n){return n.type==='sampling_done'&&n.status!=='resolved'&&isUnread(n);}).length
     :0;
+  // Estándar secundario: necesidad registrada / muestreo adicional realizado (supervisor)
+  var stdSecNotifs=isSup
+    ?replanNotifs.filter(function(n){return (n.type==='stdsec_created'||n.type==='stdsec_sampled')&&n.status!=='resolved';})
+        .sort(function(a,b){return(b.ts||0)-(a.ts||0);})
+    :[];
   var overdueAlerts=[];
   if(isSup){
     var _oTMs2=todayMs();
@@ -14962,11 +14133,11 @@ function renderNotifPanel(){
         if(!a.date)return;
         var dL=Math.round((_oTMs2-new Date(a.date+'T12:00:00').getTime())/86400000);
         var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0)||!!a._completedBySup;
-        if(dL>=3&&!done)overdueAlerts.push({task:t,assignment:a,analystId:a.analyst,daysLate:dL});
+        if(dL>=4&&!done)overdueAlerts.push({task:t,assignment:a,analystId:a.analyst,daysLate:dL});
       });
     });
   }
-  // Gestión atrasada ≥3 días (tareas únicas asignadas + ocurrencias recurrentes sin registro)
+  // Gestión atrasada ≥4 días (tareas únicas asignadas + ocurrencias recurrentes sin registro)
   var mgmtOverdue=isSup?mgmtOverdueScan():[];
   // totalBadge: solo no-leídas (badge de la campana)
   var ilrNotifs=(isSup||isReviewer)
@@ -14989,7 +14160,7 @@ function renderNotifPanel(){
     +(isSup?ftPendConfirm.length+mgmtPendConfirm.length+mgmtNotDoneNotifs.length:replanNotifs.filter(function(n){
       return n.type==='free_task_assigned'&&n.forUserId===uid&&n.status!=='resolved'&&isUnread(n);
     }).length)
-    +planReqNotifs.filter(isUnread).length+responseNotifBadge+samplingDoneBadge+overdueAlerts.length
+    +planReqNotifs.filter(isUnread).length+responseNotifBadge+samplingDoneBadge+stdSecNotifs.filter(isUnread).length+overdueAlerts.length
     +mgmtOverdue.length
     +ilrNotifs.length+docsNotifs.filter(isUnread).length
     +pendSuggPanelC+suggRespPanelC+revApprNotifs.length;
@@ -15116,7 +14287,7 @@ function renderNotifPanel(){
     html+='</div>';
   }
 
-  // ── Análisis atrasados 3+ días (supervisor) ──
+  // ── Análisis atrasados 4+ días (supervisor) ──
   if(overdueAlerts.length>0){
     html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:#fef3c7">'
       +'<div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:8px">🚨 Análisis atrasados — acción requerida ('+overdueAlerts.length+')</div>';
@@ -15138,7 +14309,7 @@ function renderNotifPanel(){
     html+='</div>';
   }
 
-  // ── Gestión atrasada 3+ días (supervisor) — espejo de análisis atrasados ──
+  // ── Gestión atrasada 4+ días (supervisor) — espejo de análisis atrasados ──
   if(mgmtOverdue.length>0){
     html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:#fef3c7">'
       +'<div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:8px">🚨 Gestión atrasada — acción requerida ('+mgmtOverdue.length+')</div>';
@@ -15236,6 +14407,28 @@ function renderNotifPanel(){
 
   // ── Muestreos completados (supervisor) ──
   if(isSup){
+    // ── Estándar secundario (supervisor): necesidades registradas y muestreos extra ──
+    if(stdSecNotifs.length>0){
+      html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:#fffbeb">'
+        +'<div style="font-size:12px;font-weight:600;color:#92400e;margin-bottom:8px">⭐ Estándares secundarios ('+stdSecNotifs.length+')</div>';
+      stdSecNotifs.forEach(function(n){
+        var isCreated=n.type==='stdsec_created';
+        html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid '+(isCreated?'#f59e0b':'#8b5cf6')+'">'
+          +'<div class="u-12b">'+escH(n.producto||'')+(n.lote?' — '+escH(n.lote):'')+'</div>'
+          +'<div style="font-size:11px;color:var(--text2);margin:3px 0">'
+          +(isCreated?'Necesidad de desarrollo registrada por <b>'+escH(n.fromName||'')+'</b>'
+            :'Muestreo adicional realizado por <b>'+escH(n.fromName||'')+'</b> — falta fraccionar y cerrar')
+          +'</div>'
+          +'<div style="font-size:10px;color:var(--text3);margin-bottom:5px">'+new Date(n.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div>'
+          +'<div style="display:flex;gap:4px;flex-wrap:wrap">'
+          +'<button class="btn sm" onclick="showNotifPanel=false;currentView=\'sugerencias\';render()" style="font-size:10px">Ver en Ingresos</button>'
+          +'<button class="btn sm" onclick="markStdSecNotifSeen(\''+n.id+'\')" style="font-size:10px">✓ Visto</button>'
+          +'</div>'
+          +'</div>';
+      });
+      html+='</div>';
+    }
+
     var samplingNotifs=replanNotifs.filter(function(n){return n.type==='sampling_done'&&n.status!=='resolved';}).sort(function(a,b){return b.ts-a.ts;});
     if(samplingNotifs.length>0){
       var _sNew=samplingNotifs.filter(isUnread).length;
@@ -15482,41 +14675,6 @@ function renderNotifPanel(){
     html+='</div>';
   }
 
-  // ── Solicitudes de horario aprobadas (analista) ──
-  if(schedApproved.length>0){
-    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--green-bg)">'
-      +'<div style="font-size:12px;font-weight:600;color:var(--green-text);margin-bottom:8px">✓ Cambios de horario aprobados ('+schedApproved.length+')</div>';
-    schedApproved.forEach(function(req){
-      html+='<div style="background:var(--surface);border-radius:var(--radius);padding:7px 9px;margin-bottom:5px;font-size:12px">'
-        +'<div style="font-weight:500">'+(req.dateStr?fmtDF(req.dateStr):'Horario predeterminado')+'</div>'
-        +'<div style="color:var(--text2)">'+(req.proposed?req.proposed.startTime+' – '+req.proposed.endTime+' aprobado':'')+'</div>'
-        +'<button class="btn sm" style="margin-top:4px;font-size:10px;width:100%" onclick="markSchedApprovedRead('+req.id+');showNotifPanel=false;currentView=\'cronograma\';render()">📅 Ver mi cronograma →</button>'
-        +'</div>';
-    });
-    html+='</div>';
-  }
-
-  // ── Solicitudes pendientes de horario (supervisor) ──
-  if(schedPend.length>0){
-    html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border)">'
-      +'<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🕐 Solicitudes de horario ('+schedPend.length+')</div>';
-    schedPend.forEach(function(req){
-      const u=getU(req.analystId);
-      html+='<div style="background:var(--bg);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px">'
-        +'<div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">'
-        +'<div class="av '+u.av+'" style="width:24px;height:24px;font-size:10px">'+escH(u.avInit)+'</div>'
-        +'<div class="u-12b">'+escH(u.name)+'</div>'
-        +'</div>'
-        +'<div style="font-size:11px;color:var(--text2);margin-bottom:2px">'+(req.proposed?'Propone: '+req.proposed.startTime+' – '+req.proposed.endTime:'')+'</div>'
-        +'<div style="font-size:11px;color:var(--text3);margin-bottom:6px">Motivo: '+escH(req.reason||'')+'</div>'
-        +'<div style="display:flex;gap:6px">'
-        +'<button class="btn sm suc" style="flex:1" onclick="approveSchedule('+req.id+')">✓ Aprobar</button>'
-        +'<button class="btn sm dan" style="flex:1" onclick="rejectSchedule('+req.id+')">✗ Rechazar</button>'
-        +'</div></div>';
-    });
-    html+='</div>';
-  }
-
   // ── Replanificaciones ──
   if(pendReplan.length>0){
     var _replanNew=pendReplan.filter(isUnread).length;
@@ -15704,6 +14862,7 @@ function setSamplerAssign(taskId, samplerId){
   var _snap={
     producto: (document.getElementById('f-prod')||{}).value,
     lote:     (document.getElementById('f-lote')||{}).value,
+    tipo:     (document.getElementById('f-tipo')||{}).value,
     status:   (document.getElementById('f-status')||{}).value,
     notes:    (document.getElementById('f-notes')||{}).value,
     due:      (document.getElementById('f-due')||{}).value,
@@ -15715,6 +14874,7 @@ function setSamplerAssign(taskId, samplerId){
   };
   if(_snap.producto!=null) t.producto=_snap.producto;
   if(_snap.lote!=null)     t.lote=_snap.lote;
+  if(_snap.tipo!=null)     t.tipo=_snap.tipo;
   if(_snap.status!=null)   t.status=_snap.status;
   if(_snap.notes!=null)    t.notes=_snap.notes;
   if(_snap.due!=null)      t.due=_snap.due;
@@ -15765,11 +14925,12 @@ function setNewSamplerAssign(samplerId){
   // newTaskPrefill y preserva los valores tipeados en el formulario (snapshot)
   // para que render() no los pierda, igual que setSamplerAssign en edición.
   var g=function(id){var el=document.getElementById(id);return el?el.value:null;};
-  var _snap={producto:g('f-prod'),lote:g('f-lote'),status:g('f-status'),notes:g('f-notes'),
+  var _snap={producto:g('f-prod'),lote:g('f-lote'),tipo:g('f-tipo'),status:g('f-status'),notes:g('f-notes'),
     due:g('f-due'),created:g('f-created'),priority:g('f-prio'),
     expectedArrival:g('f-expected-arrival'),arrivalNotes:g('f-arrival-notes'),samplerNote:g('f-sampler-note')};
   if(_snap.producto!=null) newTaskPrefill.producto=_snap.producto;
   if(_snap.lote!=null)     newTaskPrefill.lote=_snap.lote;
+  if(_snap.tipo!=null)     newTaskPrefill.tipo=_snap.tipo;
   if(_snap.status!=null)   newTaskPrefill.status=_snap.status;
   if(_snap.notes!=null)    newTaskPrefill.notes=_snap.notes;
   if(_snap.due!=null)      newTaskPrefill.due=_snap.due;
@@ -16119,6 +15280,14 @@ function saveTask(){
   _reqEditPrefill=null;
   showModal=false;editingTask=null;newTaskPrefill={};
   if(!_taskAuditDone) auditLog(_eid2?'EDIT':'CREATE','TASK',_eid2||nextId-1,{description:(_eid2?'Edicion':'Nuevo analisis')+': '+prod+' '+lote},'');
+  // Estándar secundario: si la tarea guardada es una MP que matchea una necesidad
+  // abierta, avisar acá mismo (momento de decisión del ingreso/planificación).
+  (function(){
+    var _ssT=tasks.find(function(x){return x.id===(_eid2||nextId-1);});
+    if(!_ssT)return;
+    var _ssN=stdSecNeedsForTask(_ssT).filter(function(n){return n.status==='pendiente';});
+    if(_ssN.length){setTimeout(function(){try{showToast('⭐ '+_ssT.producto+' tiene desarrollo de estándar secundario pendiente: prever muestreo adicional y ensayos de calificación.','warn');}catch(e){}},150);}
+  })();
   saveLS('counters');
   render();
   saveNow().catch(e=>console.error('saveNow task:',e));
@@ -16174,7 +15343,6 @@ function markSuggRespRead(notifId){
   if(n){n.status='resolved';n.resolvedTs=Date.now();n.resolvedHow='read';}
   saveLS();saveNow().catch(function(e){console.error(e);});render();
 }
-// Marcar cambio de horario aprobado como visto
 // Solicitar al Supervisor que planifique un ensayo
 // ── TAREAS LIBRES (sin producto) ──
 let showReceiveModal=false;
@@ -16560,13 +15728,6 @@ function requestPlanification(taskId){
   alert('✓ Solicitud enviada al Supervisor.');
 }
   }; // end _doReqPlan
-function markSchedApprovedRead(reqId){
-  var nid=Number(reqId);
-  var req=scheduleRequests.find(function(r){return r.id===nid||r.id===reqId;});
-  if(req){req._seenByAnalyst=true;}
-  saveLS();
-  render();
-}
 
 // ── BOOT v9 — GitHub Gist (sin SharePoint, sin Azure AD) ──
 
@@ -16609,26 +15770,6 @@ setTimeout(function(){
   if(el && el.textContent==='Cargando...'){ try{ gistBoot(); }catch(e){ console.error('boot retry:',e); } }
 }, 2500);
 
-function openOvertimeForSup(analystId, dateStr){
-  const u=getU(analystId);
-  const h=prompt('Horas extra a agregar para '+u.name+' el '+fmtDF(dateStr)+':', '');
-  if(h===null)return;
-  const val=parseFloat(h);
-  if(isNaN(val)||val<=0){alert('Número inválido.');return;}
-  const note=prompt('Motivo (opcional):', '');
-  if(note===null)return;
-  // Add as an approved overtime request directly
-  scheduleRequests.push({
-    id:nextSchedReqId++,
-    analystId,dateStr,status:'approved',
-    proposed:{type:'overtime',extraHours:val,startTime:'',endTime:'',breakMinutes:0},
-    reason:note||'Asignado por supervisor',
-    ts:Date.now(),requestedBy:currentUser.id,
-    reviewedBy:currentUser.id,reviewedTs:Date.now()
-  });
-  showSchedModal=false;saveLS();render();
-  saveNow().catch(function(e){console.error('saveNow supOvertime:',e);});
-}
 
 </script>
 </body>
