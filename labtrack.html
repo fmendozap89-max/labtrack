@@ -462,6 +462,9 @@ let showReplanModal=false,replanTaskId=null;
 let absences={};
 let absences_ts={};
 let workdayConfig={weekdays:{1:true,2:true,3:true,4:true,5:true,0:false,6:false},extra:[],off:[],guideUrl:''};
+// Cierre del día: declaración de horas totales por analista|día y desvíos aceptados por el supervisor
+let dayDeclarations=[]; // {analystId,date,hours,ts,_ts}
+let hourDevAcks=[];     // {analystId,date,by,byName,reason,revoked?,ts,_ts}
 let mgmtTasks=[];
 let editingMgmt=null;
 let showMgmtModal=false;
@@ -548,7 +551,7 @@ var _AUD_SAFE_FNS=new Set([
   'showTaskHistoryModal','_showILRDetails','gistSyncFromRemote',
   // filtros / tabs / preferencias de vista
   'setMTab','setTaskSort','setFS','setFA','toggleCalRole','_toggleTipo','_toggleIngresosType',
-  'toggleArchView','setMgmtMonthAnalyst','printCalendar',
+  'toggleArchView','setMgmtMonthAnalyst','printCalendar','openDayReconModal',
   // exportaciones y copias (solo lectura)
   'copyInformeTable','exportInformeXLSX','exportXLSX','copyTableToClipboard','exportTipoXLSX',
   'copyPendientes','exportPendientesXLSX','copyRevision','exportRevisionXLSX','copyAprobados',
@@ -621,7 +624,7 @@ function getSnapshot(){
     freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,stdSecNeeds,customTipos,
     customTipos_ts:(customTipos_ts||0),
     users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{}),...(u._ts?{_ts:u._ts}:{}),...(u._mustChangePwd?{_mustChangePwd:true}:{})})),
-    passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
+    passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,dayDeclarations,hourDevAcks,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
     // El audit trail vive en su propio archivo (labtrack_audit.json) — duplicarlo acá
     // engordaba el state hasta el límite de 1 MB de la API (que trunca y rompe el sync)
     auditTrail:[],
@@ -687,8 +690,18 @@ function applySnapshot(json){
       workdayConfig.extra=d.workdayConfig.extra||[];
       workdayConfig.off=d.workdayConfig.off||[];
       workdayConfig.guideUrl=d.workdayConfig.guideUrl||'';
+      // Jornada neta y tolerancia (cierre del día) — snapshots viejos no las traen:
+      // conservar el valor en memoria (los defaults los resuelven los getters)
+      if(d.workdayConfig.netHours!=null)workdayConfig.netHours=d.workdayConfig.netHours;
+      if(d.workdayConfig.tolHours!=null)workdayConfig.tolHours=d.workdayConfig.tolHours;
+      if(d.workdayConfig.maxHours!=null)workdayConfig.maxHours=d.workdayConfig.maxHours;
       if(d.workdayConfig._ts)workdayConfig._ts=d.workdayConfig._ts;
     }
+    // Declaraciones de jornada (cierre del día) y desvíos aceptados: retención 180 días
+    // por fecha del registro (poda determinística — converge entre clientes)
+    var _ddCutYMD=tsToYMD(Date.now()-180*24*60*60*1000);
+    dayDeclarations=(Array.isArray(d.dayDeclarations)?d.dayDeclarations:[]).filter(function(x){return (x.date||'')>=_ddCutYMD;});
+    hourDevAcks=(Array.isArray(d.hourDevAcks)?d.hourDevAcks:[]).filter(function(x){return (x.date||'')>=_ddCutYMD;});
     USERS.forEach(u=>{if(!passwords[u.id])passwords[u.id]=_DEFAULT_PWD_HASH||'labtrack123';});
     // El state ya no transporta el audit (vive en labtrack_audit.json y se carga en
     // cada pull/boot): si viene vacío, CONSERVAR el audit en memoria — no pisarlo.
@@ -903,7 +916,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082008; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082501; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -3035,6 +3048,140 @@ function isWorkdayFor(analystId, dateStr){
 }
 function getExtraEntry(dateStr){return workdayConfig.extra.find(e=>(e.date||e)===dateStr)||null;}
 function getOffEntry(dateStr){return workdayConfig.off.find(o=>(o.date||o)===dateStr)||null;}
+
+// ── JORNADA Y HORAS POR DÍA (cierre del día / conciliación) ──
+// Default 8 h (no 8,08): los minutos sobre las 8 h son descansos intermedios (decisión 2026-08-25)
+function getWorkdayNetHours(){var v=parseFloat(workdayConfig.netHours);return v>0?v:8;}
+function getWorkdayTolHours(){var v=parseFloat(workdayConfig.tolHours);return (!isNaN(v)&&v>=0)?v:1;}
+function getWorkdayMaxHours(){var v=parseFloat(workdayConfig.maxHours);return v>0?v:12;}
+function _fmtH(n){return String(Math.round((n||0)*100)/100);}
+// Jornada esperada de un analista en un día: 0 en no laborables y ausencias
+function expectedHoursFor(analystId,dateStr){
+  if(!isWorkdayFor(analystId,dateStr))return 0;
+  if(getAbsenceOnDate(analystId,dateStr))return 0;
+  return getWorkdayNetHours();
+}
+function getDayDeclaration(analystId,dateStr){
+  return dayDeclarations.find(function(x){return x.analystId===analystId&&x.date===dateStr;})||null;
+}
+function setDayDeclaration(analystId,dateStr,hours){
+  var ex=getDayDeclaration(analystId,dateStr);
+  if(ex){ex.hours=hours;ex.ts=Date.now();ex._ts=Date.now();}
+  else dayDeclarations.push({analystId:analystId,date:dateStr,hours:hours,ts:Date.now(),_ts:Date.now()});
+}
+function getDevAck(analystId,dateStr){
+  var a=hourDevAcks.find(function(x){return x.analystId===analystId&&x.date===dateStr;});
+  return (a&&!a.revoked)?a:null;
+}
+// Horas computables de una tarea única: realHours (flujo actual) o hours (campo legado —
+// en tareas ya realizadas equivale a las horas reales; los exports usan el mismo fallback).
+// Cuentan las realizadas: pending-confirm, confirmed, 'done' legado o sin status. Una
+// 'pending' solo tiene horas sugeridas y no suma; declined/rejected tampoco.
+function _ftDayHours(ft){
+  if(ft._deleted)return 0;
+  var st=ft.status||'pending-confirm';
+  if(st==='pending'||st==='declined'||st==='rejected')return 0;
+  var h=ft.realHours||ft.hours||0;
+  return h>0?h:0;
+}
+// Horas registradas por analista y día, sumando las 4 fuentes y filtrando tombstones.
+// Atribución por día PLANIFICADO: análisis → día de la porción (a.date); gestión → occDate
+// de la ocurrencia; tareas únicas → ft.date; muestreo → realArrivalDate.
+function dayHoursFor(analystId,dateStr){
+  var res={analisis:0,gestion:0,libres:0,muestreo:0,total:0,items:[]};
+  activeTasks().forEach(function(t){
+    (t.assignments||[]).forEach(function(a){
+      if(a._removed||a.analyst!==analystId||a.date!==dateStr)return;
+      var h=(a.sessions&&a.sessions.length)?a.sessions.reduce(function(s,x){return s+(x.hours||0);},0):(a.realHours||0);
+      if(h>0){res.analisis+=h;res.items.push({kind:'analisis',label:t.producto+' — '+t.lote,hours:h,taskId:t.id,approx:(a.sessions||[]).some(function(s){return s.approx;})});}
+    });
+    (t.samplerAssignments||[]).forEach(function(sa){
+      if(sa.sampler!==analystId||!sa.done||sa.realArrivalDate!==dateStr||!(sa.hours>0))return;
+      res.muestreo+=sa.hours;res.items.push({kind:'muestreo',label:'Muestreo: '+t.producto+' — '+t.lote,hours:sa.hours,taskId:t.id,saId:sa.id});
+    });
+  });
+  mgmtTasks.forEach(function(mt){
+    if(mt._deleted)return;
+    (mt.completions||[]).forEach(function(c){
+      if(c.analystId!==analystId||c.date!==dateStr||c.status==='not-done'||!(c.hours>0))return;
+      var cat=getMgmtCat(mt.category);
+      res.gestion+=c.hours;
+      res.items.push({kind:'gestion',label:cat.label+((mt.name||mt.description)?': '+(mt.name||mt.description):''),hours:c.hours,mgmtId:mt.id,occDate:c.date,approx:!!c.approx,pendConf:c.status==='pending-confirm'});
+    });
+  });
+  freeTasks.forEach(function(ft){
+    if(ft._deleted||ft.analystId!==analystId||ft.date!==dateStr)return;
+    var fh=_ftDayHours(ft);
+    if(!(fh>0))return;
+    res.libres+=fh;
+    res.items.push({kind:'libre',label:ft.description||'Tarea única',hours:fh,ftId:ft.id,approx:!!ft.approx});
+  });
+  res.total=Math.round((res.analisis+res.gestion+res.libres+res.muestreo)*100)/100;
+  return res;
+}
+// Mapa de totales analista|día en una sola pasada por el estado (para grillas: calendario
+// semanal del supervisor y conciliación — evita re-escanear tareas por cada celda)
+function _gridDayTotals(rowIds,dates){
+  var set={};
+  rowIds.forEach(function(id){dates.forEach(function(d){set[id+'|'+d]=0;});});
+  function add(id,d,h){var k=id+'|'+d;if(k in set)set[k]+=h;}
+  activeTasks().forEach(function(t){
+    (t.assignments||[]).forEach(function(a){
+      if(a._removed)return;
+      var h=(a.sessions&&a.sessions.length)?a.sessions.reduce(function(s,x){return s+(x.hours||0);},0):(a.realHours||0);
+      if(h>0)add(a.analyst,a.date,h);
+    });
+    (t.samplerAssignments||[]).forEach(function(sa){
+      if(sa.done&&sa.hours>0)add(sa.sampler,sa.realArrivalDate,sa.hours);
+    });
+  });
+  mgmtTasks.forEach(function(mt){
+    if(mt._deleted)return;
+    (mt.completions||[]).forEach(function(c){
+      if(c.status!=='not-done'&&c.hours>0)add(c.analystId,c.date,c.hours);
+    });
+  });
+  freeTasks.forEach(function(ft){
+    var fh=_ftDayHours(ft);
+    if(fh>0)add(ft.analystId,ft.date,fh);
+  });
+  return set;
+}
+// Estado de desvío de un analista|día. CRITERIO (definido por el supervisor, 2026-08-25):
+// es desvío cuando el día EXCEDE el máximo diario (default 12 h), o cuando las actividades
+// registradas se APARTAN más de la tolerancia (default 1 h) de la REFERENCIA del día:
+// el total declarado en el cierre si existe; si el analista no cerró el día (registró cada
+// actividad por separado, o son datos previos a esta función), la referencia es la jornada
+// por defecto (8 h en días laborables, 0 en no laborables/ausencias).
+function dayDevStatus(analystId,dateStr,actTotal){
+  var exp=expectedHoursFor(analystId,dateStr);
+  var decl=getDayDeclaration(analystId,dateStr);
+  var act=Math.round((actTotal||0)*100)/100;
+  var base=decl?decl.hours:act;
+  var ref=decl?decl.hours:exp; // lo indicado por el analista, o la jornada si no cerró el día
+  var maxD=getWorkdayMaxHours();
+  var tol=getWorkdayTolHours();
+  var st;
+  if(base<=0&&exp<=0)st='na';                          // no laborable, sin registro
+  else if(base<=0)st='none';                           // día laborable sin registro ni declaración
+  else if(base>maxD)st='over';                         // excede el máximo diario
+  else if(Math.abs(ref-act)>tol)st='mismatch';         // actividades apartadas de la referencia
+  else st='ok';
+  return {expected:exp,declared:decl?decl.hours:null,activities:act,base:Math.round(base*100)/100,ref:Math.round(ref*100)/100,status:st,ack:getDevAck(analystId,dateStr)};
+}
+function _reconRows(){return CAL_USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer';});}
+// Días con desvío (exceso o actividades≠declarado) sin aceptar en los últimos N días
+function _recentUnackedOverCount(days){
+  var dates=[];for(var i=1;i<=days;i++)dates.push(_relDate(-i));
+  var rows=_reconRows();
+  var totals=_gridDayTotals(rows.map(function(r){return r.id;}),dates);
+  var n=0;
+  rows.forEach(function(u){dates.forEach(function(d){
+    var dev=dayDevStatus(u.id,d,totals[u.id+'|'+d]||0);
+    if((dev.status==='over'||dev.status==='mismatch')&&!dev.ack)n++;
+  });});
+  return n;
+}
 function saveExtraWorkday(dateStr, analystIds, note){
   workdayConfig.off=workdayConfig.off.filter(o=>(o.date||o)!==dateStr);
   workdayConfig.extra=workdayConfig.extra.filter(e=>(e.date||e)!==dateStr);
@@ -3192,11 +3339,298 @@ function renderRrhh(){
     <div class="tab${rrhhTab==='absences'?' active':''}" onclick="rrhhTab='absences';render()">Ausencias</div>
     <div class="tab${rrhhTab==='abstypes'?' active':''}" onclick="rrhhTab='abstypes';render()">Tipos de ausencia</div>
     <div class="tab${rrhhTab==='workdays'?' active':''}" onclick="rrhhTab='workdays';render()">Días laborables</div>
+    <div class="tab${rrhhTab==='hours'?' active':''}" onclick="rrhhTab='hours';render()">Horas por día</div>
     <div class="tab${rrhhTab==='conflicts'?' active':''}" onclick="rrhhTab='conflicts';render()" style="position:relative">
       Conflictos${conflicts.length>0?`<span style="position:absolute;top:-3px;right:-4px;background:var(--red);color:#fff;border-radius:50%;width:14px;height:14px;font-size:8px;display:flex;align-items:center;justify-content:center;font-weight:700">${conflicts.length}</span>`:''}
     </div>
   </div>
-  ${rrhhTab==='workdays'?renderWorkdaysTab():rrhhTab==='abstypes'?renderAbsTypesTab():rrhhTab==='conflicts'?renderConflictsTab(conflicts):renderAbsencesTab()}`;
+  ${rrhhTab==='workdays'?renderWorkdaysTab():rrhhTab==='hours'?renderHoursRecon():rrhhTab==='abstypes'?renderAbsTypesTab():rrhhTab==='conflicts'?renderConflictsTab(conflicts):renderAbsencesTab()}`;
+}
+
+// ── CONCILIACIÓN DE HORAS POR DÍA (supervisor; auditor solo lectura) ──
+let reconWeekOffset=0;
+let reconOnlyDev=false;
+function _devCellStyle(st,ack){
+  if(ack)return 'background:var(--green-bg);color:var(--green-text);border:1px dashed var(--green)';
+  if(st==='over')return 'background:var(--red-bg);color:var(--red-text);border:1px solid var(--red)';
+  if(st==='ok')return 'background:var(--green-bg);color:var(--green-text);border:1px solid transparent';
+  if(st==='mismatch')return 'background:var(--amber-bg);color:var(--amber-text);border:1px solid var(--amber)';
+  if(st==='none')return 'background:var(--bg2);color:var(--text3);border:1px dashed var(--border2)';
+  return 'background:var(--bg2);color:var(--text3);border:1px solid transparent';
+}
+function renderHoursRecon(){
+  var wd=getCalDates('week',reconWeekOffset);
+  var todayStr=today();
+  var rows=_reconRows();
+  var totals=_gridDayTotals(rows.map(function(r){return r.id;}),wd);
+  var netH=getWorkdayNetHours(),tolH=getWorkdayTolHours();
+  var html='<div class="admin-wrap">'
+    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">'
+    +'<button class="btn" onclick="reconWeekOffset--;render()">← Semana</button>'
+    +'<span style="font-size:13px;font-weight:600;font-family:var(--mono);min-width:120px;text-align:center">'+fmtD(wd[0])+' – '+fmtD(wd[6])+'</span>'
+    +'<button class="btn" onclick="reconWeekOffset++;render()">Semana →</button>'
+    +'<button class="btn sm" onclick="reconWeekOffset=0;render()">Hoy</button>'
+    +'<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-left:10px;cursor:pointer"><input type="checkbox" '+(reconOnlyDev?'checked':'')+' onchange="reconOnlyDev=this.checked;render()" style="width:14px;height:14px">Solo desvíos</label>'
+    +'<span style="margin-left:auto;font-size:11px;color:var(--text2)">Jornada ref. <b class="u-mono">'+_fmtH(netH)+'h</b> · Desvío: <b class="u-mono">&gt;'+_fmtH(getWorkdayMaxHours())+'h</b>/día o <b class="u-mono">±'+_fmtH(tolH)+'h</b> vs declarado</span>'
+    +'</div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Es desvío cuando el día supera el máximo diario o cuando las actividades registradas se apartan más de la tolerancia del total <b>declarado por el analista</b> en su cierre. Si el analista no cerró el día (registró cada actividad por separado, o son datos previos al cierre), la referencia es la <b>jornada de '+_fmtH(netH)+' h</b>. Clic en una celda para ver el desglose, corregir horas o aceptar el desvío.</div>';
+  var devRows=rows.map(function(u){
+    var cells=wd.map(function(d){
+      if(d>=todayStr)return {d:d,future:true};
+      var act=totals[u.id+'|'+d]||0;
+      var dev=dayDevStatus(u.id,d,act);
+      return {d:d,dev:dev,act:act};
+    });
+    var hasDev=cells.some(function(c){return c.dev&&(c.dev.status==='over'||c.dev.status==='mismatch')&&!c.dev.ack;});
+    return {u:u,cells:cells,hasDev:hasDev};
+  });
+  var visRows=reconOnlyDev?devRows.filter(function(r){return r.hasDev;}):devRows;
+  html+='<div style="overflow-x:auto"><div style="min-width:720px">'
+    +'<div style="display:grid;grid-template-columns:130px repeat(7,minmax(0,1fr));gap:3px;margin-bottom:3px">'
+    +'<div style="font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;padding:4px 6px">Usuario</div>'
+    +wd.map(function(d){return '<div style="font-size:10px;font-weight:600;color:'+(d===todayStr?'var(--blue)':'var(--text2)')+';text-align:center;padding:4px 0">'+weekDayLabel(d)+'</div>';}).join('')
+    +'</div>';
+  if(!visRows.length)html+='<div class="empty">Sin desvíos en esta semana ✓</div>';
+  visRows.forEach(function(r){
+    var weekBase=0,weekExp=0;
+    r.cells.forEach(function(c){if(!c.future&&c.dev){weekBase+=c.dev.base;weekExp+=c.dev.expected;}});
+    html+='<div style="display:grid;grid-template-columns:130px repeat(7,minmax(0,1fr));gap:3px;margin-bottom:3px;align-items:stretch">'
+      +'<div style="display:flex;align-items:center;gap:6px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)">'
+      +'<div class="av '+r.u.av+'" style="width:20px;height:20px;font-size:8px;flex-shrink:0">'+escH(r.u.avInit)+'</div>'
+      +'<div style="min-width:0"><div style="font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(r.u.name.split(' ')[0])+'</div>'
+      +'<div style="font-size:9px;color:var(--text3);font-family:var(--mono)">Sem: '+_fmtH(weekBase)+'/'+_fmtH(weekExp)+'h</div></div>'
+      +'</div>'
+      +r.cells.map(function(c){
+        if(c.future)return '<div style="border-radius:var(--radius);background:var(--bg2);opacity:.45;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text3);min-height:44px">·</div>';
+        var dev=c.dev;
+        var dim=reconOnlyDev&&!((dev.status==='over'||dev.status==='mismatch')&&!dev.ack);
+        var stLbl=dev.ack?'✓ aceptado':dev.status==='over'?'exceso':dev.status==='mismatch'?'no coincide':dev.status==='none'?'sin registro':dev.status==='na'?'':'ok';
+        return '<div onclick="openDayReconModal(\''+r.u.id+'\',\''+c.d+'\')" style="border-radius:var(--radius);padding:4px 6px;cursor:pointer;min-height:44px;'+_devCellStyle(dev.status,dev.ack)+(dim?';opacity:.35':'')+'" title="Declarado: '+(dev.declared!=null?_fmtH(dev.declared)+'h':'—')+' · Actividades: '+_fmtH(dev.activities)+'h · Esperado: '+_fmtH(dev.expected)+'h'+(dev.ack?' · Aceptado por '+escH(dev.ack.byName||'')+(dev.ack.reason?': '+escH(dev.ack.reason):''):'')+'">'
+          +'<div style="font-family:var(--mono);font-size:12px;font-weight:700">'+(dev.status==='na'?'—':_fmtH(dev.base)+'h')+'</div>'
+          +'<div style="font-size:9px;opacity:.8">'+(dev.status==='na'?'no lab.':(dev.declared!=null?'decl':'act')+' · esp '+_fmtH(dev.expected)+(stLbl?' · '+stLbl:''))+'</div>'
+          +'</div>';
+      }).join('')
+      +'</div>';
+  });
+  html+='</div></div>'
+    +'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;font-size:11px;color:var(--text2)">'
+    +'<span><span style="display:inline-block;width:10px;height:10px;background:var(--green-bg);border:1px solid var(--green);border-radius:2px;vertical-align:middle"></span> Dentro de criterio / aceptado</span>'
+    +'<span><span style="display:inline-block;width:10px;height:10px;background:var(--red-bg);border:1px solid var(--red);border-radius:2px;vertical-align:middle"></span> Exceso (&gt;'+_fmtH(getWorkdayMaxHours())+' h)</span>'
+    +'<span><span style="display:inline-block;width:10px;height:10px;background:var(--amber-bg);border:1px solid var(--amber);border-radius:2px;vertical-align:middle"></span> Actividades ≠ declarado (o jornada sin cierre) &gt;±'+_fmtH(getWorkdayTolHours())+' h</span>'
+    +'<span><span style="display:inline-block;width:10px;height:10px;background:var(--bg2);border:1px dashed var(--border2);border-radius:2px;vertical-align:middle"></span> Sin registro</span>'
+    +'</div></div>';
+  return html;
+}
+// Desglose de un analista|día: fuentes registradas, pendientes del día, corrección y aceptación de desvío
+function openDayReconModal(analystId,dateStr){
+  var u=getU(analystId);
+  var dh=dayHoursFor(analystId,dateStr);
+  var dev=dayDevStatus(analystId,dateStr,dh.total);
+  var isSup=isSupRole();
+  var kindIcon={analisis:'🧪',gestion:'🗂',libre:'✏',muestreo:'📦'};
+  // Referencias para la corrección de horas del supervisor (saveDayReconEdits)
+  window._drItems={analystId:analystId,dateStr:dateStr,items:dh.items,declared:dev.declared};
+  var itemsHtml=dh.items.length?dh.items.map(function(it,i){
+    var act='';
+    if(it.kind==='analisis')act='<button class="btn sm" style="font-size:10px" onclick="document.getElementById(\'dayrecon-modal\').remove();openEdit('+it.taskId+')">🔍 Ver</button>';
+    else if(it.kind==='gestion'&&isSup)act='<button class="btn sm" style="font-size:10px" title="Corregir con desglose de fases" onclick="document.getElementById(\'dayrecon-modal\').remove();openMgmtComplModal('+it.mgmtId+',\''+it.occDate+'\')">✎</button>';
+    else if(it.kind==='muestreo')act='<button class="btn sm" style="font-size:10px" onclick="document.getElementById(\'dayrecon-modal\').remove();openEdit('+it.taskId+')">🔍 Ver</button>';
+    // El supervisor corrige las horas acá mismo: input por ítem + «Guardar correcciones»
+    var hoursHtml=isSup
+      ?'<input type="number" id="drh-'+i+'" min="0.25" max="24" step="0.25" value="'+it.hours+'" style="width:60px;text-align:center;font-family:var(--mono);font-weight:700;padding:4px 3px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);flex-shrink:0" title="Horas registradas — editá para corregir"><span style="font-size:11px;color:var(--text3)">h</span>'
+      :'<b class="u-mono" style="font-size:12px;flex-shrink:0">'+_fmtH(it.hours)+'h</b>';
+    return '<div style="display:flex;align-items:center;gap:8px;padding:6px 9px;background:var(--bg);border-radius:var(--radius);margin-bottom:4px;font-size:12px">'
+      +'<span style="flex-shrink:0">'+(kindIcon[it.kind]||'•')+'</span>'
+      +'<div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(it.label)+(it.approx?' <span title="Registrado como parte de un grupo — detalle aproximado" style="color:var(--text3)">≈</span>':'')+(it.pendConf?' <span style="font-size:9px;color:var(--amber-text)">⏳</span>':'')+'</div>'
+      +hoursHtml+act
+      +'</div>';
+  }).join(''):'<div style="font-size:12px;color:var(--text3);padding:8px 0">Sin horas registradas atribuidas a este día.</div>';
+  // Porciones de análisis del día SIN horas (pendientes) — herramientas de resolución del sup
+  var pendPortions=[];
+  activeTasks().forEach(function(t){
+    if(['done','reviewed','approved'].indexOf(t.status)>=0)return;
+    (t.assignments||[]).forEach(function(a){
+      if(a._removed||a.analyst!==analystId||a.date!==dateStr)return;
+      var done=(a.realHours>0)||(a.sessions&&a.sessions.length>0)||!!a._completedBySup;
+      if(!done)pendPortions.push({t:t,a:a});
+    });
+  });
+  var pendHtml=pendPortions.length?'<div style="font-size:11px;font-weight:600;color:var(--text2);margin:8px 0 4px">Porciones del día sin horas</div>'
+    +pendPortions.map(function(p){
+      return '<div style="display:flex;align-items:center;gap:8px;padding:6px 9px;background:var(--amber-bg);border-radius:var(--radius);margin-bottom:4px;font-size:12px">'
+        +'<div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--amber-text)">'+escH(p.t.producto+' — '+p.t.lote)+'</div>'
+        +(isSup?'<button class="btn sm suc" style="font-size:10px" onclick="document.getElementById(\'dayrecon-modal\').remove();completeTaskForAnalyst('+p.t.id+',\''+analystId+'\',\''+(p.a.date||'')+'\')">✓ Completar</button>'
+          +'<button class="btn sm dan" style="font-size:10px" onclick="document.getElementById(\'dayrecon-modal\').remove();supRemoveAssignmentDay('+p.t.id+',\''+analystId+'\',\''+(p.a.date||'')+'\')">🚫 Quitar día</button>':'')
+        +'</div>';
+    }).join(''):'';
+  var stTxt=dev.ack?'Desvío aceptado':dev.status==='over'?'Exceso (más de '+_fmtH(getWorkdayMaxHours())+' h)':dev.status==='mismatch'?('Actividades ≠ '+(dev.declared!=null?'declarado':'jornada — día sin cierre')+' (más de ±'+_fmtH(getWorkdayTolHours())+' h)'):dev.status==='none'?'Sin registro':dev.status==='na'?'Día no laborable':'Dentro de criterio';
+  var remanente=(dev.declared!=null)?Math.round((dev.declared-dev.activities)*100)/100:null;
+  var ackHtml='';
+  if(dev.ack){
+    ackHtml='<div style="background:var(--green-bg);border-radius:var(--radius);padding:8px 10px;font-size:11px;color:var(--green-text);margin-top:10px">✓ Desvío aceptado por <b>'+escH(dev.ack.byName||'')+'</b>'+(dev.ack.ts?' el '+new Date(dev.ack.ts).toLocaleDateString('es'):'')+(dev.ack.reason?'<br>Motivo: '+escH(dev.ack.reason):'')
+      +(isSup?'<div style="margin-top:6px"><button class="btn sm" style="font-size:10px" onclick="revokeDayDeviation(\''+analystId+'\',\''+dateStr+'\')">Quitar aceptación</button></div>':'')
+      +'</div>';
+  } else if(isSup&&(dev.status==='over'||dev.status==='mismatch'||dev.status==='none')){
+    ackHtml='<div style="background:var(--bg);border-radius:var(--radius);padding:8px 10px;margin-top:10px">'
+      +'<label style="font-size:11px;font-weight:600;color:var(--text2)">Aceptar desvío — motivo *</label>'
+      +'<div style="display:flex;gap:6px;margin-top:5px">'
+      +'<input type="text" id="devack-reason" placeholder="Ej: horas extra autorizadas / salida anticipada acordada" style="flex:1;padding:6px 9px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)">'
+      +'<button class="btn sm suc" onclick="acceptDayDeviation(\''+analystId+'\',\''+dateStr+'\')">✓ Aceptar</button>'
+      +'</div></div>';
+  }
+  var div=document.createElement('div');
+  div.innerHTML='<div class="modal-overlay" style="z-index:600" id="dayrecon-modal">'
+    +'<div class="modal" style="width:min(480px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">Horas del día</h3>'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:12px;color:var(--text2)">'
+    +'<div class="av '+u.av+'" style="width:22px;height:22px;font-size:9px">'+escH(u.avInit)+'</div>'
+    +'<b>'+escH(u.name)+'</b> · <span class="u-mono">'+fmtDF(dateStr)+'</span>'
+    +'</div>'
+    +'<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px">'
+    +'<div style="background:var(--bg);border-radius:var(--radius);padding:6px 8px;text-align:center"><div style="font-size:9px;color:var(--text3);text-transform:uppercase">Declarado</div>'
+    +(isSup&&dev.declared!=null
+      ?'<input type="number" id="drh-decl" min="0" max="24" step="0.25" value="'+dev.declared+'" style="width:70px;text-align:center;font-family:var(--mono);font-size:15px;font-weight:700;padding:2px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)" title="Declaración del analista — editá para corregirla">'
+      :'<div class="u-mono" style="font-size:15px;font-weight:700">'+(dev.declared!=null?_fmtH(dev.declared)+'h':'—')+'</div>')
+    +'</div>'
+    +'<div style="background:var(--bg);border-radius:var(--radius);padding:6px 8px;text-align:center"><div style="font-size:9px;color:var(--text3);text-transform:uppercase">Actividades</div><div class="u-mono" style="font-size:15px;font-weight:700">'+_fmtH(dev.activities)+'h</div></div>'
+    +'<div style="background:var(--bg);border-radius:var(--radius);padding:6px 8px;text-align:center"><div style="font-size:9px;color:var(--text3);text-transform:uppercase">Esperado</div><div class="u-mono" style="font-size:15px;font-weight:700">'+_fmtH(dev.expected)+'h</div></div>'
+    +'</div>'
+    +'<div style="font-size:12px;margin-bottom:8px"><span style="font-weight:700;padding:2px 8px;border-radius:10px;'+_devCellStyle(dev.status,dev.ack)+'">'+stTxt+'</span>'
+    +(remanente!=null&&remanente>0?' <span style="font-size:11px;color:var(--text2)">· '+_fmtH(remanente)+'h declaradas sin actividad asociada</span>':'')
+    +'</div>'
+    +itemsHtml+pendHtml+ackHtml
+    +'<div class="modal-btns" style="margin-top:12px">'
+    +'<button class="btn" data-esc onclick="document.getElementById(\'dayrecon-modal\').remove()">Cerrar</button>'
+    +(isSup&&(dh.items.length||dev.declared!=null)?'<button class="btn pri" onclick="saveDayReconEdits()" title="Aplica las horas editadas (ítems y declaración). Corrección de dedicación pura: no modifica estados del producto, confirmaciones ni notificaciones — queda auditada">💾 Guardar correcciones</button>':'')
+    +'</div></div></div>';
+  document.body.appendChild(div);
+}
+// Corrección de horas por el supervisor desde la conciliación: aplica los inputs editados
+// del desglose (análisis/gestión/tareas únicas/muestreo) y la declaración del analista.
+// Es una corrección de DEDICACIÓN PURA (dato de gestión): aplica a cualquier actividad sin
+// importar su estado y NO modifica en absoluto el flujo — ni estados del producto, ni
+// confirmaciones de porción, ni notificaciones. Solo horas + _ts + auditoría.
+function saveDayReconEdits(){
+  if(!isSupRole()){alert('Solo el Supervisor puede corregir horas.');return;}
+  var ref=window._drItems;
+  if(!ref)return;
+  var analystId=ref.analystId,dateStr=ref.dateStr;
+  var uName=getU(analystId).name;
+  var applied=0,skipped=[];
+  ref.items.forEach(function(it,i){
+    var el=document.getElementById('drh-'+i);
+    if(!el)return;
+    var nv=parseFloat(el.value);
+    if(isNaN(nv)||Math.abs(nv-it.hours)<1e-9)return; // sin cambio
+    if(!(nv>=0.25)){skipped.push(it.label+' (mínimo 0,25 h — para quitar el registro usá las herramientas del producto)');return;}
+    nv=Math.round(nv*100)/100;
+    if(it.kind==='analisis'){
+      var t=tasks.find(function(x){return x.id===it.taskId;});
+      if(!t||t._deleted){skipped.push(it.label);return;}
+      var a=(t.assignments||[]).find(function(x){return !x._removed&&x.analyst===analystId&&x.date===dateStr;});
+      if(!a){skipped.push(it.label);return;}
+      // Solo dedicación: se reemplazan las horas de la porción conservando el comentario;
+      // flags de confirmación, estado del producto y notificaciones quedan como estaban
+      var oldCmt=(a.sessions||[]).map(function(s){return s.comment;}).find(Boolean);
+      a.realHours=nv;
+      a.sessions=[{date:a.date||dateStr,hours:nv,ts:Date.now(),comment:oldCmt||undefined}];
+      t._ts=Date.now(); // t._ts, NUNCA a._ts (regla de carrera horas vs quita de día)
+      auditLog('EDIT','TASK',t.id,{field:'realHours',oldVal:it.hours,newVal:nv,analystId:analystId,date:dateStr,
+        description:'Corrección de dedicación (conciliación, sin cambio de estado): '+t.producto+' '+t.lote+' — '+uName+' '+fmtDF(dateStr)+': '+_fmtH(it.hours)+'h → '+_fmtH(nv)+'h'},'');
+      applied++;
+    } else if(it.kind==='gestion'){
+      var mt=mgmtTasks.find(function(x){return x.id===it.mgmtId;});
+      var c=mt&&(mt.completions||[]).find(function(x){return x.date===it.occDate&&x.analystId===analystId;});
+      if(!c){skipped.push(it.label);return;}
+      c.hours=nv;c.editedBy=currentUser.id;c.editedTs=Date.now();
+      mt._ts=Date.now();
+      auditLog('EDIT','MGMT',mt.id,{field:'hours',oldVal:it.hours,newVal:nv,analystId:analystId,date:it.occDate,
+        description:'Corrección de dedicación de gestión (conciliación, sin cambio de estado): '+uName+' '+fmtDF(it.occDate)+': '+_fmtH(it.hours)+'h → '+_fmtH(nv)+'h'},'');
+      applied++;
+    } else if(it.kind==='libre'){
+      var ft=freeTasks.find(function(x){return x.id===it.ftId;});
+      if(!ft||ft._deleted){skipped.push(it.label);return;}
+      ft.realHours=nv;
+      ft._ts=Date.now();
+      auditLog('EDIT','FREE_TASK',ft.id,{field:'realHours',oldVal:it.hours,newVal:nv,analystId:analystId,
+        description:'Corrección de dedicación de tarea única (conciliación, sin cambio de estado): '+(ft.description||'')+' — '+uName+': '+_fmtH(it.hours)+'h → '+_fmtH(nv)+'h'},'');
+      applied++;
+    } else if(it.kind==='muestreo'){
+      var t2=tasks.find(function(x){return x.id===it.taskId;});
+      var sa=t2&&(t2.samplerAssignments||[]).find(function(s){return (it.saId!=null&&s.id===it.saId)||(s.sampler===analystId&&s.done&&s.realArrivalDate===dateStr);});
+      if(!sa){skipped.push(it.label);return;}
+      sa.hours=nv;sa._ts=Date.now();
+      t2._ts=Date.now();
+      auditLog('EDIT','TASK',t2.id,{field:'samplingHours',oldVal:it.hours,newVal:nv,analystId:analystId,date:dateStr,
+        description:'Corrección de horas de muestreo (conciliación): '+t2.producto+' '+t2.lote+' — '+uName+': '+_fmtH(it.hours)+'h → '+_fmtH(nv)+'h'},'');
+      applied++;
+    }
+  });
+  // Declaración del analista: el supervisor puede corregirla (queda auditada con su identidad)
+  var dEl=document.getElementById('drh-decl');
+  if(dEl&&ref.declared!=null){
+    var dv=parseFloat(dEl.value);
+    if(!isNaN(dv)&&Math.abs(dv-ref.declared)>1e-9){
+      if(dv<0){skipped.push('Declaración inválida');}
+      else{
+        dv=Math.round(dv*100)/100;
+        var ex=dayDeclarations.find(function(x){return x.analystId===analystId&&x.date===dateStr;});
+        if(ex){ex.hours=dv;ex.editedBy=currentUser.id;ex.editedByName=currentUser.name;ex._ts=Date.now();}
+        auditLog('EDIT','HOURS',analystId+'|'+dateStr,{field:'declaredHours',oldVal:ref.declared,newVal:dv,analystId:analystId,date:dateStr,
+          description:'Corrección de declaración del día (conciliación): '+uName+' '+fmtDF(dateStr)+': '+_fmtH(ref.declared)+'h → '+_fmtH(dv)+'h'},'');
+        applied++;
+      }
+    }
+  }
+  if(!applied&&!skipped.length){showToast('Sin cambios para guardar','info');return;}
+  var m=document.getElementById('dayrecon-modal');if(m)m.remove();
+  if(applied){
+    saveLS();render();
+    saveNow().catch(function(e){console.error('saveNow reconEdits:',e);});
+    showToast('✓ '+applied+' corrección(es) aplicada(s)','success');
+  }
+  if(skipped.length)setTimeout(function(){try{showToast('⚠ Sin aplicar: '+skipped.join(' · '),'warn');}catch(e){}},applied?1600:0);
+  // Reabrir el desglose actualizado para ver el efecto de la corrección
+  setTimeout(function(){openDayReconModal(analystId,dateStr);},applied?250:0);
+}
+function acceptDayDeviation(analystId,dateStr){
+  if(!isSupRole()){alert('Solo el Supervisor puede aceptar desvíos.');return;}
+  var reason=((document.getElementById('devack-reason')||{}).value||'').trim();
+  if(!reason){alert('Indicá el motivo de la aceptación.');return;}
+  var ex=hourDevAcks.find(function(x){return x.analystId===analystId&&x.date===dateStr;});
+  if(ex){ex.revoked=false;ex.by=currentUser.id;ex.byName=currentUser.name;ex.reason=reason;ex.ts=Date.now();ex._ts=Date.now();}
+  else hourDevAcks.push({analystId:analystId,date:dateStr,by:currentUser.id,byName:currentUser.name,reason:reason,ts:Date.now(),_ts:Date.now()});
+  auditLog('DEV_ACK','HOURS',analystId+'|'+dateStr,{description:'Desvío de horas aceptado: '+getU(analystId).name+' — '+fmtDF(dateStr),analystId:analystId,date:dateStr,reason:reason},reason);
+  var m=document.getElementById('dayrecon-modal');if(m)m.remove();
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow devAck:',e);});
+  showToast('✓ Desvío aceptado','success');
+}
+function revokeDayDeviation(analystId,dateStr){
+  if(!isSupRole()){alert('Solo el Supervisor puede modificar aceptaciones.');return;}
+  var ex=hourDevAcks.find(function(x){return x.analystId===analystId&&x.date===dateStr;});
+  if(!ex)return;
+  if(!confirm('¿Quitar la aceptación del desvío de '+getU(analystId).name+' del '+fmtDF(dateStr)+'?'))return;
+  ex.revoked=true;ex.ts=Date.now();ex._ts=Date.now();
+  auditLog('DEV_ACK','HOURS',analystId+'|'+dateStr,{description:'Aceptación de desvío retirada: '+getU(analystId).name+' — '+fmtDF(dateStr),analystId:analystId,date:dateStr},'');
+  var m=document.getElementById('dayrecon-modal');if(m)m.remove();
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow devAckRevoke:',e);});
+}
+function saveWorkdayHoursCfg(){
+  if(!isSupRole()){alert('Solo el Supervisor puede modificar la jornada.');return;}
+  var nh=parseFloat((document.getElementById('wd-nethours')||{}).value);
+  var th=parseFloat((document.getElementById('wd-tolhours')||{}).value);
+  var mh=parseFloat((document.getElementById('wd-maxhours')||{}).value);
+  if(!(nh>0)||isNaN(th)||th<0||!(mh>0)){alert('Valores de jornada, máximo diario o tolerancia inválidos.');return;}
+  if(mh<nh){alert('El máximo diario no puede ser menor que la jornada de referencia.');return;}
+  workdayConfig.netHours=Math.round(nh*100)/100;
+  workdayConfig.tolHours=Math.round(th*100)/100;
+  workdayConfig.maxHours=Math.round(mh*100)/100;
+  workdayConfig._ts=Date.now();
+  auditLog('EDIT','WORKDAY_CONFIG','jornada',{description:'Jornada neta: '+workdayConfig.netHours+'h · Máximo diario: '+workdayConfig.maxHours+'h · Tolerancia vs declarado: ±'+workdayConfig.tolHours+'h'},'');
+  saveLS('workdayConfig');render();
+  showToast('✓ Jornada actualizada','success');
 }
 
 
@@ -3324,6 +3758,23 @@ function renderWorkdaysTab(){
   const DAY_HDR=['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
   return`<div style="display:grid;grid-template-columns:260px 1fr;gap:14px;align-items:start">
     <div>
+      <div class="sec">Jornada diaria</div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px;margin-bottom:14px">
+        <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Criterio del control de horas por día: es desvío superar el <b>máximo diario</b>, o que las actividades se aparten más de la <b>tolerancia</b> del total declarado por el analista (de la <b>jornada neta</b>, si no cerró el día).</p>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <label style="flex:1;font-size:12px">Jornada neta de referencia (h)</label>
+          <input type="number" id="wd-nethours" min="1" max="24" step="0.01" value="${getWorkdayNetHours()}" style="width:80px;text-align:center;font-family:var(--mono)">
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <label style="flex:1;font-size:12px">Máximo diario (h)</label>
+          <input type="number" id="wd-maxhours" min="1" max="24" step="0.25" value="${getWorkdayMaxHours()}" style="width:80px;text-align:center;font-family:var(--mono)">
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+          <label style="flex:1;font-size:12px">Tolerancia vs declarado (± h)</label>
+          <input type="number" id="wd-tolhours" min="0" max="8" step="0.25" value="${getWorkdayTolHours()}" style="width:80px;text-align:center;font-family:var(--mono)">
+        </div>
+        <button class="btn sm pri" style="width:100%" onclick="saveWorkdayHoursCfg()">Guardar jornada</button>
+      </div>
       <div class="sec">Días laborables por defecto</div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px;margin-bottom:14px">
         <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Definí qué días de la semana son laborables. Esto aplica a todos los analistas.</p>
@@ -3810,7 +4261,7 @@ const MGMT_FREQS=[
   {id:'monthly',label:'Mensual'},
   {id:'semestral',label:'Semestral'},
 ];
-const WORKDAY_HOURS=8;
+// La jornada de referencia ahora es configurable: getWorkdayNetHours() (Personal → Días laborables)
 
 function expandMgmt(mt, fromDate, toDate){
   const occ=[];
@@ -4255,8 +4706,8 @@ function renderMgmtWeek(isSup, wd, weekOccs){
     wd.forEach(function(d){
       var dayOccs=weekOccs.filter(function(o){return o.occDate===d&&(o.analysts||[]).includes(a.id);});
       var mgmtH=dayOccs.reduce(function(s,o){return s+(o.dedicacion||0);},0);
-      var pct=Math.min(mgmtH/WORKDAY_HOURS*100,100);
-      var overload=mgmtH>WORKDAY_HOURS;
+      var pct=Math.min(mgmtH/getWorkdayNetHours()*100,100);
+      var overload=mgmtH>getWorkdayNetHours();
       var isToday=d===todayStr;
       html+='<div class="wcell" style="'+(isToday?'background:rgba(26,79,138,.04)':'')+'">';
       dayOccs.forEach(function(o){
@@ -4467,7 +4918,7 @@ function renderMgmtModal(){
       <div class="frow"><label>Frecuencia</label><select id="mg-freq">${freqOpts}</select></div>
       <div class="frow"><label>Fecha inicio</label><input type="date" id="mg-start" value="${mt.startDate||today()}"></div>
       <div class="frow"><label>Fecha fin (si aplica)</label><input type="date" id="mg-end" value="${mt.endDate||''}"></div>
-      <div class="frow"><label>Dedicación horaria (h)</label><input type="number" id="mg-dedicacion" value="${mt.dedicacion||''}" min="0.5" max="24" step="0.5" placeholder="ej. 2" style="width:120px"></div>
+      <div class="frow"><label>Dedicación horaria (h)</label><input type="number" id="mg-dedicacion" value="${mt.dedicacion||''}" min="0.25" max="24" step="0.25" placeholder="ej. 2" style="width:120px"></div>
       <div class="frow form-full"><label>Asignados</label>
         <div class="analysts-check">
           ${[...CAL_USERS].sort((a,b)=>a.name.localeCompare(b.name,'es')).map(a=>`<div class="ana-check${selAna.has(a.id)?' selected':''}" id="mgac-${a.id}" onclick="this.classList.toggle('selected')">
@@ -4619,9 +5070,9 @@ function openMgmtComplModal(mgmtId,occDate){
     // Hours
     +'<div style="margin-bottom:12px"><label style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Horas reales dedicadas *</label>'
     +'<div style="display:flex;align-items:center;gap:8px;margin-top:6px">'
-    +'<button id="mc-btn-minus" type="button" onclick="var e=document.getElementById(\'mc-hrs\');if(!e.readOnly)e.value=Math.max(0.5,parseFloat(e.value||1)-0.5)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">−</button>'
-    +'<input type="number" id="mc-hrs" min="0.5" max="24" step="0.5" value="'+(existingCompl?existingCompl.hours:(mt.dedicacion||1))+'" style="width:90px;text-align:center;font-size:20px;font-weight:700;padding:5px;border:2px solid var(--border);border-radius:var(--radius);font-family:var(--mono)">'
-    +'<button id="mc-btn-plus" type="button" onclick="var e=document.getElementById(\'mc-hrs\');if(!e.readOnly)e.value=(parseFloat(e.value||1)+0.5)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">+</button>'
+    +'<button id="mc-btn-minus" type="button" onclick="var e=document.getElementById(\'mc-hrs\');if(!e.readOnly)e.value=Math.max(0.25,parseFloat(e.value||1)-0.25)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">−</button>'
+    +'<input type="number" id="mc-hrs" min="0.25" max="24" step="0.25" value="'+(existingCompl?existingCompl.hours:(mt.dedicacion||1))+'" style="width:90px;text-align:center;font-size:20px;font-weight:700;padding:5px;border:2px solid var(--border);border-radius:var(--radius);font-family:var(--mono)">'
+    +'<button id="mc-btn-plus" type="button" onclick="var e=document.getElementById(\'mc-hrs\');if(!e.readOnly)e.value=(parseFloat(e.value||1)+0.25)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">+</button>'
     +'<span style="font-size:12px;color:var(--text3)">horas</span>'
     +'</div></div>'
     // Subtasks
@@ -4646,7 +5097,7 @@ function openMgmtComplModal(mgmtId,occDate){
     var row=document.createElement('div');
     row.id=id;row.style.cssText='display:flex;align-items:center;gap:6px;margin-bottom:6px';
     row.innerHTML='<input type="text" placeholder="Descripción de la fase" value="'+escH(name||'')+'" style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px">'
-      +'<input type="number" min="0.5" max="24" step="0.5" value="'+(hours||0.5)+'" oninput="window._updateMgmtTotal()" style="width:65px;padding:5px 6px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;text-align:center;font-family:var(--mono)">'
+      +'<input type="number" min="0.25" max="24" step="0.25" value="'+(hours||0.25)+'" oninput="window._updateMgmtTotal()" style="width:65px;padding:5px 6px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;text-align:center;font-family:var(--mono)">'
       +'<span class="u-sm3">h</span>'
       +'<button type="button" onclick="document.getElementById(\''+id+'\').remove();window._updateMgmtTotal()" class="btn" style="width:24px;height:24px;padding:0;font-size:14px;line-height:1;color:var(--red)">✕</button>';
     container.appendChild(row);
@@ -6955,6 +7406,18 @@ function mergeSnapshot(local, remote) {
     (L.stdSecNeeds||[]).forEach(function(n){var rn=ssnMap[n.id];if(!rn||(n._ts||0)>(rn._ts||0))ssnMap[n.id]=n;});
     merged.stdSecNeeds=Object.values(ssnMap);
 
+    // ── Declaraciones de jornada y desvíos aceptados: por analista|día, gana _ts ──
+    ['dayDeclarations','hourDevAcks'].forEach(function(key){
+      var m2={};
+      (R[key]||[]).forEach(function(x){m2[(x.analystId||'')+'|'+(x.date||'')]=x;});
+      (L[key]||[]).forEach(function(x){
+        var k2=(x.analystId||'')+'|'+(x.date||'');
+        var rx=m2[k2];
+        if(!rx||(x._ts||0)>(rx._ts||0))m2[k2]=x;
+      });
+      merged[key]=Object.values(m2);
+    });
+
     // ── Candado de versión: monotónico, gana el mayor ──
     merged.minAppBuild    = Math.max(L.minAppBuild||0,    R.minAppBuild||0);
 
@@ -7851,6 +8314,7 @@ function renderDashboard(){
       </div>
       ${late>0&&!dashFilter?`<div class="notif">⚠ ${late} análisis vencido${late>1?'s':''}. Revisá Pendientes.</div>`:''}
     ${(()=>{const cc=checkAbsenceConflicts();return cc.length>0?`<div class="notif" style="background:var(--orange-bg);color:var(--orange-text);border-color:rgba(138,60,16,.2)">⚠ ${cc.length} análisis asignado${cc.length>1?'s':''} en días no laborables. <button class="btn sm" onclick="currentView='rrhh';rrhhTab='conflicts';render()" style="margin-left:6px;background:var(--orange-text);color:#fff;border-color:transparent">Ver conflictos</button></div>`:'';})()}
+    ${(()=>{const devN=_recentUnackedOverCount(7);return devN>0?`<div class="notif" style="background:var(--red-bg);color:var(--red-text);border-color:rgba(138,32,32,.2)">⏱ ${devN} día${devN>1?'s':''} con desvío de horas sin aceptar en los últimos 7 días (más de ${_fmtH(getWorkdayMaxHours())} h, o actividades apartadas del declarado — de la jornada si no hubo cierre). <button class="btn sm" onclick="currentView='rrhh';rrhhTab='hours';render()" style="margin-left:6px;background:var(--red);color:#fff;border-color:transparent">Ver conciliación</button></div>`:'';})()}
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
         <div class="sec" style="margin-bottom:0">${filterLabel[dashFilter]||'Filtrado'}</div>
         ${(dashFilter||filterSearch||_tipoFilter.length)?`<button class="btn sm" onclick="dashFilter='';filterSearch='';_tipoFilter=[];render()" style="font-size:11px;padding:2px 8px" title="Restablecer tarjeta, búsqueda y tipo">✕ Limpiar filtros</button>`:''}
@@ -7927,7 +8391,7 @@ function renderDashboard(){
         +'<button class="btn sm" onclick="currentView=\'review\';render()" style="margin-left:auto;background:var(--amber);color:#fff;border-color:transparent;flex-shrink:0">Ver ahora</button>'
       +'</div>';
     }
-    var _revRet=_revBanner;
+    var _revRet=_dayCloseCard()+_revBanner;
     // Si el revisor también tiene tareas asignadas, las mostramos abajo
     var _myId2=currentUser.id;
     var _myRevTasks=activeTasks().filter(function(t){return t.status!=='a-ingresar'&&t.status!=='muestra-ok'&&(t.assignments||[]).some(function(a){return a.analyst===_myId2&&!a._removed;})&&(t.status!=='observed'||_analystSeesObs(t,_myId2));});
@@ -8139,7 +8603,7 @@ function renderDashboard(){
     return (a.expectedArrival||'9999').localeCompare(b.expectedArrival||'9999');
   });
 
-  var _html='';
+  var _html=_dayCloseCard();
 
   // ── MUESTRAS A INGRESAR (asignadas a mí) ──
   if(_myIngreso.length>0){
@@ -9030,11 +9494,28 @@ function getCalRows(sup){
   return base.filter(function(a){return calRoleSel.indexOf(a.role)>=0;});
 }
 
+// Badge Σ de horas del día (calendario del supervisor): total declarado/registrado
+// vs jornada esperada — verde dentro de tolerancia, rojo exceso; defecto neutro (1ª etapa)
+function _sigmaCell(aid,role,d,totals){
+  if(role!=='analyst'&&role!=='reviewer')return'';
+  if(d>=today())return'';
+  var act=totals[aid+'|'+d]||0;
+  var dev=dayDevStatus(aid,d,act);
+  if(dev.status==='na')return'';
+  if(dev.status==='none')return'';
+  var col=dev.ack?'var(--green-text)':dev.status==='over'?'var(--red-text)':dev.status==='mismatch'?'var(--amber-text)':dev.status==='ok'?'var(--green-text)':'var(--text2)';
+  var bg=dev.ack?'var(--green-bg)':dev.status==='over'?'var(--red-bg)':dev.status==='mismatch'?'var(--amber-bg)':dev.status==='ok'?'var(--green-bg)':'var(--bg2)';
+  var ttl='Horas del día — Declarado: '+(dev.declared!=null?_fmtH(dev.declared)+'h':'—')+' · Actividades: '+_fmtH(dev.activities)+'h · Esperado: '+_fmtH(dev.expected)+'h'+(dev.ack?' · Desvío aceptado':'');
+  return '<div onclick="event.stopPropagation();openDayReconModal(\''+aid+'\',\''+d+'\')" style="margin-top:2px;font-size:9px;font-family:var(--mono);font-weight:700;color:'+col+';background:'+bg+';border-radius:3px;padding:0 3px;text-align:right;cursor:pointer" title="'+escH(ttl)+'">Σ '+_fmtH(dev.base)+'h'+(dev.ack?' ✓':'')+'</div>';
+}
 function renderCalWeek(sup){
   const wd=getCalDates(calView,weekOffset);
   const dayLbls=wd.map(d=>weekDayLabel(d));
   const todayStr=today();
   const rows=getCalRows(sup);
+  // Σ horas por día: solo supervisor/auditor (no revisor) y desactivable desde la toolbar
+  const _showSigma=canViewSup()&&localStorage.getItem('lt9-calSigma')!=='0';
+  const _sigTotals=_showSigma?_gridDayTotals(rows.map(r=>r.id),wd):null;
   const canAssign=isSupRole();
   var rfHtml=(sup||isReviewerRole())?renderCalRoleFilter():'';
   const _inline=calView==='3d'; // 3 días: producto y lote en la misma línea
@@ -9078,7 +9559,7 @@ function renderCalWeek(sup){
         :`<div style="${wd[i]===todayStr?'color:var(--blue);font-weight:700;':''}">${d}</div>`).join('')}</div>
       ${rows.map(a=>`<div class="wrow" style="${cols}">
         <div class="wcell-name"><div class="av ${a.av}" style="flex-shrink:0">${escH(a.avInit)}</div>${escH(a.name.split(' ')[0])}</div>
-        ${wd.map(d=>{if(_collapsed[d])return`<div class="wcell" style="background:var(--bg2);padding:0" title="No laborable"></div>`;const dt=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d&&!x._removed));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=activeTasks().filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const _wk=isWorkdayFor(a.id,d);const ab=_wk?getAbsenceOnDate(a.id,d):null;const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;const dmg=(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id));const absOnly=ab&&dt.length===0&&dft.length===0&&dst.length===0&&dmg.length===0;const _rowAssign=canAssign&&(a.role==='analyst'||a.role==='reviewer');return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} ${_rowAssign&&_wk?`onclick="calCellClick(event,'${a.id}','${d}')" title="Clic en el espacio vacío para asignar un producto pendiente"`:''} style="background:${ab?typ.color:d===todayStr?'rgba(26,79,138,.04)':''};${absOnly?'justify-content:center;align-items:center;':''}${_rowAssign&&_wk?'cursor:pointer;':''}">${_rowAssign&&_wk&&!ab&&dt.length===0?`<div style="font-size:10px;color:var(--blue);opacity:.55;text-align:center;padding:2px 0;pointer-events:none">＋ asignar</div>`:''}${_rowAssign&&!_wk&&!ab?`<div style="font-size:9px;color:var(--text3);opacity:.6;text-align:center;padding:1px 0;pointer-events:none">No lab.</div>`:''}${ab?(absOnly?`<div style="font-size:10px;font-weight:700;color:${typ.text};text-align:center;letter-spacing:.02em"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`:`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.text}1a;text-align:center"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`):''}${dt.map(t=>{const _asg=(t.assignments||[]).find(x=>x.analyst===a.id&&x.date===d&&!x._removed);const _asgDone=_asg&&((_asg.realHours>0)||(_asg.sessions&&_asg.sessions.length>0)||!!_asg._completedBySup);const _canDrag=sup&&d>=_yesterdayStr&&!_asgDone&&['a-ingresar','muestra-ok','pending','scheduled','progress','observed'].includes(t.status);return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ '+'':''}${t._interLab?`<div style="font-size:8px;color:#1d4ed8;font-weight:700;margin-bottom:1px">🔗 ${escH(t._interLab.fromLabName||'Inter-lab')}</div>`:''}${_inline?`<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="font-weight:600">${escH(t.producto)}</span> <span style="font-size:9px;opacity:.75;font-family:var(--mono)">${escH(t.lote)}</span></div>`:`<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div>`}</div>`;}).join('')}${dmg.map(o=>{const _mgDone=(o.completions||[]).some(c=>c.date===o.occDate&&c.analystId===a.id);const _mgDrag=sup&&!_mgDone&&d>=_yesterdayStr;return`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:${_mgDrag?'grab':'pointer'}" ${_mgDrag?`draggable="true" ondragstart="mgmtDragStart(event,${o.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} onclick="event.stopPropagation();${sup?'openMgmtOccModal('+o.id+',\''+d+'\')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}${sup?' — clic: gestionar este día · arrastrar: reasignar a otro usuario':''}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`;}).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}</div>`;}).join('')}
+        ${wd.map(d=>{if(_collapsed[d])return`<div class="wcell" style="background:var(--bg2);padding:0" title="No laborable"></div>`;const dt=activeTasks().filter(t=>(t.assignments||[]).some(x=>x.analyst===a.id&&x.date===d&&!x._removed));const dft=freeTasks.filter(ft=>ft.analystId===a.id&&ft.date===d&&(ft.status==='confirmed'||ft.status==='pending-confirm'||ft.status==='pending'));const dst=activeTasks().filter(t=>(t.samplerAssignments||[]).some(sa=>sa.sampler===a.id&&sa.done&&sa.realArrivalDate===d));const _wk=isWorkdayFor(a.id,d);const ab=_wk?getAbsenceOnDate(a.id,d):null;const typ=ab?getABSTypes()[ab.type]||getABSTypes()['absence']||{color:'#fdeee4',text:'#8a3c10',label:'Falta'}:null;const hasConflict=ab&&dt.length>0;const dmg=(_calCache[d]||[]).filter(o=>(o.analysts||[]).includes(a.id));const absOnly=ab&&dt.length===0&&dft.length===0&&dst.length===0&&dmg.length===0;const _rowAssign=canAssign&&(a.role==='analyst'||a.role==='reviewer');return`<div class="wcell" ${sup?`ondragover="calDragOver(event,'${a.id}','${d}')" ondragleave="calDragLeave(event)" ondrop="calDrop(event,'${a.id}','${d}')"`:''} ${_rowAssign&&_wk?`onclick="calCellClick(event,'${a.id}','${d}')" title="Clic en el espacio vacío para asignar un producto pendiente"`:''} style="background:${ab?typ.color:d===todayStr?'rgba(26,79,138,.04)':''};${absOnly?'justify-content:center;align-items:center;':''}${_rowAssign&&_wk?'cursor:pointer;':''}">${_rowAssign&&_wk&&!ab&&dt.length===0?`<div style="font-size:10px;color:var(--blue);opacity:.55;text-align:center;padding:2px 0;pointer-events:none">＋ asignar</div>`:''}${_rowAssign&&!_wk&&!ab?`<div style="font-size:9px;color:var(--text3);opacity:.6;text-align:center;padding:1px 0;pointer-events:none">No lab.</div>`:''}${ab?(absOnly?`<div style="font-size:10px;font-weight:700;color:${typ.text};text-align:center;letter-spacing:.02em"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`:`<div style="font-size:9px;font-weight:600;color:${typ.text};padding:1px 3px;border-radius:2px;margin-bottom:2px;background:${typ.text}1a;text-align:center"${ab.note?` title="${escH(ab.note)}"`:''}>${typ.label}</div>`):''}${dt.map(t=>{const _asg=(t.assignments||[]).find(x=>x.analyst===a.id&&x.date===d&&!x._removed);const _asgDone=_asg&&((_asg.realHours>0)||(_asg.sessions&&_asg.sessions.length>0)||!!_asg._completedBySup);const _canDrag=sup&&d>=_yesterdayStr&&!_asgDone&&['a-ingresar','muestra-ok','pending','scheduled','progress','observed'].includes(t.status);return`<div class="chip" onclick="openEdit(${t.id})" ${_canDrag?`draggable="true" ondragstart="calDragStart(event,${t.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} style="cursor:${_canDrag?'grab':'pointer'};margin-bottom:2px;background:${hasConflict?'var(--red-bg)':a.chipBg};color:${hasConflict?'var(--red-text)':a.chipTxt};${hasConflict?'border:1px solid var(--red);':''}">${hasConflict?'⚠ '+'':''}${t._interLab?`<div style="font-size:8px;color:#1d4ed8;font-weight:700;margin-bottom:1px">🔗 ${escH(t._interLab.fromLabName||'Inter-lab')}</div>`:''}${_inline?`<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="font-weight:600">${escH(t.producto)}</span> <span style="font-size:9px;opacity:.75;font-family:var(--mono)">${escH(t.lote)}</span></div>`:`<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.producto)}</div><div style="font-size:9px;opacity:.75;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(t.lote)}</div>`}</div>`;}).join('')}${dmg.map(o=>{const _mgDone=(o.completions||[]).some(c=>c.date===o.occDate&&c.analystId===a.id);const _mgDrag=sup&&!_mgDone&&d>=_yesterdayStr;return`<div style="padding:2px 5px;border-radius:3px;margin-bottom:2px;background:#ddeaf8;border-left:3px solid #1a4f8a;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:${_mgDrag?'grab':'pointer'}" ${_mgDrag?`draggable="true" ondragstart="mgmtDragStart(event,${o.id},'${a.id}','${d}')" ondragend="calDragEnd(event)"`:``} onclick="event.stopPropagation();${sup?'openMgmtOccModal('+o.id+',\''+d+'\')':''}" title="${escH(getMgmtCat(o.category).label+(o.startTime?' '+o.startTime:''))}${sup?' — clic: gestionar este día · arrastrar: reasignar a otro usuario':''}"><span style="font-weight:600;color:#1a4f8a">${escH(getMgmtCat(o.category).label)}</span>${o.startTime?`<span style="display:block;font-size:9px;color:#185FA5;font-family:var(--mono)">${o.startTime}${o.endTime?'–'+o.endTime:''}</span>`:''}</div>`;}).join('')}${dft.map(ft=>{const ftH=ft.realHours||ft.suggestedHours||ft.hours||0;const ftConf=ft.status==='confirmed';const ftPC=ft.status==='pending-confirm';const ftBg=ftConf?'var(--green-bg)':ftPC?'var(--amber-bg)':'var(--surface)';const ftBd=ftConf?'var(--green)':ftPC?'var(--amber)':'var(--text3)';const ftTxt=ftConf?'var(--green-text)':ftPC?'var(--amber-text)':'var(--text2)';const ftBs=ft.status==='pending'?'dashed':'solid';const ftTip=escH(ft.description)+(ftPC?' · Pend. confirmación':ft.status==='pending'?' · Pend. aceptación':' · Confirmada');return`<div style="padding:1px 3px;font-size:9px;background:${ftBg};border:1px ${ftBs} ${ftBd}44;border-left:2px ${ftBs} ${ftBd};border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${ftTxt}" title="${ftTip}">✏ ${escH(ft.description.slice(0,13))}${ftH?' '+ftH+'h':''}</div>`;}).join('')}${dst.map(t=>{const sa=(t.samplerAssignments||[]).find(function(s){return s.sampler===a.id&&s.done&&s.realArrivalDate===d;});return`<div style="padding:1px 3px;font-size:9px;background:#ede9fe;border:1px solid #7c3aed44;border-radius:3px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5b21b6" title="Muestreo: ${escH(t.producto)} — ${escH(t.lote)}${sa&&sa.hours?' ('+sa.hours+'h)':''}">🧪 ${escH(t.producto.slice(0,14))}${sa&&sa.hours?` ${sa.hours}h`:''}</div>`;}).join('')}${_showSigma?_sigmaCell(a.id,a.role,d,_sigTotals):''}</div>`;}).join('')}
       </div>`).join('')}
     </div>
   </div>
@@ -9513,6 +9994,7 @@ function renderWeek(){
       ${_cwBtn(120,'A+','Columnas amplias')}
     </div>
     ${rfHtml}
+    ${canViewSup()?`<button class="btn sm" onclick="localStorage.setItem('lt9-calSigma',localStorage.getItem('lt9-calSigma')==='0'?'1':'0');render()" title="Mostrar u ocultar el total de horas registradas por día (control de jornada)" style="${localStorage.getItem('lt9-calSigma')!=='0'?'background:var(--surface);font-weight:600;box-shadow:var(--shadow-sm)':''}">Σ horas</button>`:''}
     <button class="btn sm" onclick="printCalendar()" style="margin-left:auto">🖨 Imprimir / PDF</button>
   </div>`;
   const rows=getCalRows(sup);
@@ -12628,6 +13110,431 @@ function closeChangePwd(){showChangePwd=false;render();}
 function setFA(v){filterAnalyst=v;render();}
 
 function setFS(v){filterStatus=v;render();}
+// ══════════════════════════════════════════════════════════════
+// CIERRE DEL DÍA — el analista declara el total de horas del día y lo reparte
+// entre sus actividades (asignado ≤ declarado). Analista y revisor.
+// ══════════════════════════════════════════════════════════════
+function _dayCloseCard(){
+  if(!currentUser||(currentUser.role!=='analyst'&&currentUser.role!=='reviewer'))return'';
+  var _t=today();
+  var decl=getDayDeclaration(currentUser.id,_t);
+  var reg=dayHoursFor(currentUser.id,_t).total;
+  var exp=expectedHoursFor(currentUser.id,_t);
+  // Días laborables previos (ventana de 4) sin cierre — cada día se cierra por separado
+  var openPrev=[];
+  for(var i=1;i<=4;i++){
+    var d=_relDate(-i);
+    if(getDayDeclaration(currentUser.id,d))continue;
+    if(expectedHoursFor(currentUser.id,d)>0)openPrev.push(d);
+  }
+  return '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:12px">'
+    +'<span style="font-size:20px;flex-shrink:0">🕔</span>'
+    +'<div style="flex:1;min-width:180px">'
+    +'<div style="font-weight:700;font-size:13px">Cierre del día</div>'
+    +'<div style="font-size:11px;color:var(--text2)">'
+    +(decl?'Declaraste <b class="u-mono">'+_fmtH(decl.hours)+'h</b> hoy':'Jornada esperada: <b class="u-mono">'+_fmtH(exp)+'h</b>')
+    +' · Registrado hoy: <b class="u-mono">'+_fmtH(reg)+'h</b>'
+    +(openPrev.length?' · <span style="color:var(--amber-text);font-weight:600">'+openPrev.length+' día'+(openPrev.length>1?'s':'')+' previo'+(openPrev.length>1?'s':'')+' sin cerrar</span>':'')
+    +'</div></div>'
+    +(openPrev.length?'<button class="btn" onclick="openDayClose(\''+openPrev[openPrev.length-1]+'\')" style="flex-shrink:0" title="Abrir el cierre del día previo sin cerrar más antiguo dentro de la ventana">✎ Cerrar previos</button>':'')
+    +'<button class="btn pri" onclick="openDayClose()" style="flex-shrink:0">'+(decl?'✎ Revisar cierre':'🕔 Cerrar mi día')+'</button>'
+    +'</div>';
+}
+// Actividades pendientes de registrar de UN día concreto (para el cierre por día):
+// análisis con porción en esa fecha, gestión con ocurrencia ese día (accionable hasta
+// 3 días atrás, como en "Mi día") y tareas únicas de esa fecha (sin fecha = solo hoy)
+function _dcCollectRows(me,dateStr,todayStr){
+  var rows=[];
+  var dl=Math.round((new Date(todayStr+'T12:00:00')-new Date(dateStr+'T12:00:00'))/86400000);
+  activeTasks().forEach(function(t){
+    if(['done','reviewed','approved','observed','pending-confirm','a-ingresar','muestra-ok'].indexOf(t.status)>=0)return;
+    (t.assignments||[]).forEach(function(a){
+      if(a._removed||a.analyst!==me||a.date!==dateStr)return;
+      if((a.realHours>0)||(a.sessions&&a.sessions.length>0)||a._completedBySup)return;
+      rows.push({kind:'analisis',taskId:t.id,date:dateStr,label:t.producto+' — '+t.lote,daysLate:dl});
+    });
+  });
+  if(dl<=3){
+    mgmtTasks.flatMap(function(mt){return expandMgmt(mt,dateStr,dateStr);}).forEach(function(o){
+      if(!(o.analysts||[]).includes(me))return;
+      var c=(o.completions||[]).find(function(x){return x.date===o.occDate&&x.analystId===me;});
+      if(c&&c.status!=='not-done')return; // ya registrada (pendiente de confirmar o confirmada)
+      rows.push({kind:'gestion',mgmtId:o.id,date:o.occDate,label:getMgmtCat(o.category).label+((o.name||o.description)?': '+(o.name||o.description):''),daysLate:dl});
+    });
+  }
+  freeTasks.forEach(function(ft){
+    if(ft._deleted||ft.analystId!==me||ft.status!=='pending')return;
+    if(ft.date?ft.date!==dateStr:dateStr!==todayStr)return;
+    rows.push({kind:'libre',ftId:ft.id,date:ft.date||'',label:ft.description||'Tarea única',daysLate:dl});
+  });
+  rows.sort(function(a,b){return (a.label||'').localeCompare(b.label||'','es');});
+  return rows;
+}
+function openDayClose(dateStr){
+  if(!currentUser||(currentUser.role!=='analyst'&&currentUser.role!=='reviewer')){alert('El cierre del día es para quienes realizan análisis.');return;}
+  if(document.getElementById('dayclose-modal'))return;
+  var me=currentUser.id;
+  var todayStr=today();
+  // Cada día se cierra POR SEPARADO: declaración y reparto propios. Ventana: hoy y 4 días atrás.
+  var minDate=_relDate(-4);
+  var closeDate=(dateStr&&dateStr>=minDate&&dateStr<=todayStr)?dateStr:todayStr;
+  var isToday=closeDate===todayStr;
+  var rows=_dcCollectRows(me,closeDate,todayStr);
+  // Selector de día: estado de cada día de la ventana (declarado ✓ / pendientes / vacío)
+  var selDates=[];for(var i=0;i>=-4;i--)selDates.push(_relDate(i));
+  var daySelHtml='<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px">'
+    +selDates.map(function(d){
+      var dDecl=getDayDeclaration(me,d);
+      var dPend=d===closeDate?rows.length:_dcCollectRows(me,d,todayStr).length;
+      var act=d===closeDate;
+      var st=dDecl?'✓ '+_fmtH(dDecl.hours)+'h':(dPend>0?dPend+' pend.':'—');
+      var stCol=dDecl?'var(--green-text)':(dPend>0?'var(--amber-text)':'var(--text3)');
+      return '<div onclick="_dcSetDate(\''+d+'\')" style="cursor:pointer;text-align:center;padding:4px 9px;border-radius:var(--radius);border:2px solid '+(act?'var(--blue)':'var(--border)')+';background:'+(act?'var(--blue-bg)':'var(--surface)')+';min-width:56px">'
+        +'<div style="font-size:11px;font-weight:700;color:'+(act?'var(--blue-text)':'var(--text2)')+'">'+(d===todayStr?'Hoy':fmtD(d))+'</div>'
+        +'<div style="font-size:9px;font-weight:600;color:'+stCol+'">'+st+'</div>'
+        +'</div>';
+    }).join('')
+    +'</div>';
+  // "Ya registrado" del día: lo atribuido a ESA fecha (todas las fuentes, incl. muestreos)
+  var dhReg=dayHoursFor(me,closeDate);
+  var regItems=dhReg.items;
+  var regTotal=dhReg.total;
+  var exp=expectedHoursFor(me,closeDate);
+  var tol=getWorkdayTolHours();
+  var exDecl=getDayDeclaration(me,closeDate);
+  var defDecl=exDecl?exDecl.hours:Math.max(exp,regTotal);
+  var dayWord=isToday?'hoy':'el '+fmtDF(closeDate);
+  var kindIcon={analisis:'🧪',gestion:'🗂',libre:'✏',muestreo:'📦'};
+  var rowsHtml=rows.length?rows.map(function(r,i){
+    return '<div id="dcrow-'+i+'" style="display:flex;align-items:flex-start;gap:8px;padding:7px 9px;background:var(--bg);border-radius:var(--radius);margin-bottom:5px">'
+      +'<input type="checkbox" id="dc-g-'+i+'" onchange="_dcRecalc()" title="Seleccionar para agrupar" style="width:14px;height:14px;margin-top:6px;flex-shrink:0">'
+      +'<div style="flex:1;min-width:0">'
+      +'<div style="display:flex;align-items:center;gap:6px">'
+      +'<span style="flex-shrink:0">'+(kindIcon[r.kind]||'•')+'</span>'
+      +'<span style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(r.label)+'</span>'
+      +'</div>'
+      +'<div style="font-size:10px;color:var(--text2);margin-top:1px">'+(r.date?fmtDF(r.date):'')+(r.daysLate>0?' <span style="color:var(--red);font-weight:600">· atrasada '+r.daysLate+'d</span>':'')+'</div>'
+      +'<div id="dc-cwrap-'+i+'" style="display:none;margin-top:4px"><textarea id="dc-c-'+i+'" rows="1" placeholder="Comentario para el revisor (opcional)" style="width:100%;padding:4px 8px;border:1px solid var(--border2);border-radius:var(--radius);font-size:11px;resize:vertical;background:var(--surface);color:var(--text);box-sizing:border-box"></textarea></div>'
+      +'</div>'
+      +'<button class="btn sm" onclick="var w=document.getElementById(\'dc-cwrap-'+i+'\');w.style.display=w.style.display===\'none\'?\'block\':\'none\'" title="Comentario para el revisor" style="font-size:11px;padding:3px 6px;flex-shrink:0">💬</button>'
+      +'<input type="number" id="dc-h-'+i+'" min="0" max="24" step="0.25" placeholder="—" oninput="_dcRecalc()" style="width:64px;text-align:center;font-family:var(--mono);font-weight:700;padding:5px 4px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);flex-shrink:0">'
+      +'</div>';
+  }).join(''):'<div style="font-size:12px;color:var(--text3);padding:8px 0">No tenés actividades pendientes de registrar para este día.</div>';
+  var regHtml=regItems.length?'<details style="margin-bottom:10px"><summary style="cursor:pointer;font-size:11px;font-weight:600;color:var(--text2)">Ya registrado este día: <b class="u-mono">'+_fmtH(regTotal)+'h</b> ('+regItems.length+')</summary>'
+    +regItems.map(function(x){return '<div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--text2);padding:3px 8px">'
+      +'<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(x.label)+'</span><b class="u-mono">'+_fmtH(x.hours)+'h</b></div>';}).join('')
+    +'</details>':'';
+  var div=document.createElement('div');
+  div.innerHTML='<div class="modal-overlay" style="z-index:500" id="dayclose-modal">'
+    +'<div class="modal" style="width:min(560px,calc(100vw - 32px));display:flex;flex-direction:column">'
+    +'<h3 style="margin-bottom:2px;border-bottom:none;padding-bottom:0">Cierre del día</h3>'
+    +'<p style="font-size:12px;color:var(--text2);margin:0 0 8px">Cada día se cierra por separado: elegí el día, declará su total y repartilo entre las actividades de ese día.</p>'
+    +daySelHtml
+    +'<div style="background:var(--blue-bg);border-radius:var(--radius);padding:9px 12px;margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+    +'<label style="font-size:12px;font-weight:600;color:var(--blue-text);flex:1;min-width:170px">1 · Horas totales dedicadas '+dayWord+' *</label>'
+    +'<input type="number" id="dc-declared" min="0" max="24" step="0.25" value="'+defDecl+'" oninput="_dcRecalc()" style="width:84px;text-align:center;font-size:18px;font-weight:700;font-family:var(--mono);padding:5px;border:2px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
+    +'<div id="dc-declwarn" style="flex-basis:100%;font-size:11px;display:none"></div>'
+    +'</div>'
+    +'<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">2 · Repartí entre las actividades <span style="font-weight:400;color:var(--text3)">(vacío = queda pendiente; paso 0,25 h)</span></div>'
+    +regHtml
+    +'<div style="overflow:auto;max-height:38vh;margin-bottom:4px" id="dc-list">'+rowsHtml+'</div>'
+    +(rows.length>1?'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap"><button class="btn sm" id="dc-groupbtn" onclick="_dcGroup()" disabled>⛓ Agrupar seleccionadas</button><span style="font-size:10px;color:var(--text3)">Tareas cortas del mismo tipo → una sola dedicación repartida (detalle ≈ aproximado).</span></div>':'')
+    +'<div id="dc-groups"></div>'
+    +'<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:2px">'
+    +'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>Asignado (incluye lo ya registrado)</span><b class="u-mono" id="dc-sum">0h</b></div>'
+    +'<div style="background:var(--bg2);border-radius:3px;height:7px;overflow:hidden;margin-bottom:4px"><div id="dc-bar" style="height:100%;width:0%;background:var(--blue);transition:width .15s"></div></div>'
+    +'<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text2);flex-wrap:wrap;gap:4px"><span id="dc-rem"></span><span>Jornada ref.: <b class="u-mono">'+_fmtH(exp)+'h</b> · máx. '+_fmtH(getWorkdayMaxHours())+' h/día · desvío si lo asignado se aparta ±'+_fmtH(tol)+' h del declarado</span></div>'
+    +'<div id="dc-err" style="font-size:11px;color:var(--red);font-weight:600;margin-top:4px;display:none"></div>'
+    +'</div>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">'
+    +'<button class="btn" data-esc onclick="document.getElementById(\'dayclose-modal\').remove()">Cancelar</button>'
+    +'<button class="btn pri" id="dc-confirm" onclick="_doDayClose()">✓ Confirmar cierre</button>'
+    +'</div></div></div>';
+  document.body.appendChild(div);
+  window._dcRows=rows;
+  window._dcGroups=[];
+  window._dcMeta={regTotal:regTotal,exp:exp,tol:tol,todayStr:todayStr,closeDate:closeDate,dayWord:dayWord};
+  // Cambiar de día = cerrar este modal y abrir el cierre del día elegido (estado limpio)
+  window._dcSetDate=function(d){
+    var m=document.getElementById('dayclose-modal');if(m)m.remove();
+    openDayClose(d);
+  };
+  window._dcRecalc=function(){
+    var meta=window._dcMeta,rws=window._dcRows,groups=window._dcGroups;
+    var grouped={};groups.forEach(function(g){g.members.forEach(function(i){grouped[i]=true;});});
+    var sum=meta.regTotal;
+    rws.forEach(function(r,i){
+      if(grouped[i])return;
+      var v=parseFloat((document.getElementById('dc-h-'+i)||{}).value||0);
+      if(v>0)sum+=v;
+    });
+    groups.forEach(function(g){
+      var v=parseFloat((document.getElementById('dc-gh-'+g.gid)||{}).value||0);
+      if(v>0)sum+=v;
+    });
+    sum=Math.round(sum*100)/100;
+    var decl=parseFloat((document.getElementById('dc-declared')||{}).value||0)||0;
+    var sumEl=document.getElementById('dc-sum');if(sumEl)sumEl.textContent=_fmtH(sum)+'h / '+_fmtH(decl)+'h';
+    var over=sum>decl+1e-9;
+    var bar=document.getElementById('dc-bar');
+    if(bar){bar.style.width=(decl>0?Math.min(sum/decl*100,100):0)+'%';bar.style.background=over?'var(--red)':'var(--blue)';}
+    var rem=document.getElementById('dc-rem');
+    if(rem){
+      var remH=Math.max(decl-sum,0);
+      // Más de la tolerancia sin asignar = las actividades se apartan del declarado → desvío
+      rem.innerHTML=over?'':('<span style="'+(remH>meta.tol?'color:var(--amber-text);font-weight:600':'')+'">Sin asignar: <b class="u-mono">'+_fmtH(remH)+'h</b>'+(remH>meta.tol?' — quedará como desvío (se aparta más de ±'+_fmtH(meta.tol)+' h del declarado)':'')+'</span>');
+    }
+    var err=document.getElementById('dc-err');
+    if(err){err.style.display=over?'block':'none';if(over)err.textContent='La suma asignada ('+_fmtH(sum)+'h) supera el total declarado ('+_fmtH(decl)+'h). Ajustá el reparto o la declaración.';}
+    var warn=document.getElementById('dc-declwarn');
+    if(warn){
+      if(decl>getWorkdayMaxHours()){warn.style.display='block';warn.style.color='var(--red-text)';warn.innerHTML='⚠ Declarás <b>'+_fmtH(decl)+'h</b> — supera el máximo diario de '+_fmtH(getWorkdayMaxHours())+' h. No bloquea, pero quedará como desvío para el supervisor (las horas extra se gestionan fuera de la app).';}
+      else if(meta.exp===0&&decl>0){warn.style.display='block';warn.style.color='var(--amber-text)';warn.innerHTML='⚠ '+(meta.closeDate===meta.todayStr?'Hoy':'Ese día')+' figura como no laborable o con ausencia — la declaración quedará visible para el supervisor en la conciliación.';}
+      else warn.style.display='none';
+    }
+    var cf=document.getElementById('dc-confirm');
+    if(cf)cf.disabled=over;
+    var checked=[];rws.forEach(function(r,i){var cb=document.getElementById('dc-g-'+i);if(cb&&cb.checked&&!grouped[i])checked.push(i);});
+    var gb=document.getElementById('dc-groupbtn');
+    if(gb){
+      var sameKind=checked.length>=2&&checked.every(function(i){return rws[i].kind===rws[checked[0]].kind;});
+      gb.disabled=!sameKind;
+      gb.title=checked.length>=2&&!sameKind?'Solo se pueden agrupar actividades del mismo tipo':'Marcá 2 o más actividades del mismo tipo para agruparlas';
+    }
+  };
+  window._dcRenderGroups=function(){
+    var rws=window._dcRows,groups=window._dcGroups;
+    var host=document.getElementById('dc-groups');if(!host)return;
+    // conservar lo tecleado en grupos existentes al re-renderizar
+    var prev={};
+    groups.forEach(function(g){['gl','gh','gc'].forEach(function(p){var el=document.getElementById('dc-'+p+'-'+g.gid);if(el)prev[p+g.gid]=el.value;});});
+    host.innerHTML=groups.map(function(g){
+      return '<div style="border:1px dashed var(--blue);border-radius:var(--radius);padding:7px 9px;margin-bottom:6px;background:var(--blue-bg)">'
+        +'<div style="display:flex;align-items:center;gap:8px">'
+        +'<span style="flex-shrink:0">⛓</span>'
+        +'<input type="text" id="dc-gl-'+g.gid+'" value="'+escH(prev['gl'+g.gid]!=null?prev['gl'+g.gid]:g.label)+'" style="flex:1;min-width:0;font-size:12px;font-weight:600;padding:4px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)">'
+        +'<input type="number" id="dc-gh-'+g.gid+'" min="0" max="24" step="0.25" placeholder="total" value="'+escH(prev['gh'+g.gid]||'')+'" oninput="_dcRecalc()" style="width:64px;text-align:center;font-family:var(--mono);font-weight:700;padding:5px 4px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);flex-shrink:0">'
+        +'<button class="btn sm" onclick="_dcUngroup('+g.gid+')" title="Deshacer grupo" style="font-size:11px;padding:3px 6px;flex-shrink:0">✕</button>'
+        +'</div>'
+        +'<div style="font-size:10px;color:var(--blue-text);margin-top:4px">'+g.members.map(function(i){return escH(rws[i].label);}).join(' · ')+' <span style="opacity:.7">('+g.members.length+' tareas — reparto ≈)</span></div>'
+        +'<div style="margin-top:4px"><textarea id="dc-gc-'+g.gid+'" rows="1" placeholder="Comentario para el revisor (aplica a todo el grupo, opcional)" style="width:100%;padding:4px 8px;border:1px solid var(--border2);border-radius:var(--radius);font-size:11px;resize:vertical;background:var(--surface);color:var(--text);box-sizing:border-box">'+escH(prev['gc'+g.gid]||'')+'</textarea></div>'
+        +'</div>';
+    }).join('');
+  };
+  window._dcGroup=function(){
+    var rws=window._dcRows,groups=window._dcGroups;
+    var grouped={};groups.forEach(function(g){g.members.forEach(function(i){grouped[i]=true;});});
+    var checked=[];rws.forEach(function(r,i){var cb=document.getElementById('dc-g-'+i);if(cb&&cb.checked&&!grouped[i])checked.push(i);});
+    if(checked.length<2)return;
+    if(!checked.every(function(i){return rws[i].kind===rws[checked[0]].kind;})){alert('Solo se pueden agrupar actividades del mismo tipo.');return;}
+    var gid=groups.length?groups[groups.length-1].gid+1:1;
+    var kind=rws[checked[0]].kind;
+    var defLabel=kind==='analisis'?'Análisis cortos del día':kind==='gestion'?'Gestión agrupada del día':'Tareas únicas del día';
+    groups.push({gid:gid,kind:kind,members:checked,label:defLabel});
+    checked.forEach(function(i){var el=document.getElementById('dcrow-'+i);if(el)el.style.display='none';var cb=document.getElementById('dc-g-'+i);if(cb)cb.checked=false;});
+    _dcRenderGroups();
+    _dcRecalc();
+  };
+  window._dcUngroup=function(gid){
+    var groups=window._dcGroups;
+    var gi=groups.findIndex(function(g){return g.gid===gid;});
+    if(gi<0)return;
+    groups[gi].members.forEach(function(i){var el=document.getElementById('dcrow-'+i);if(el)el.style.display='';});
+    groups.splice(gi,1);
+    _dcRenderGroups();
+    _dcRecalc();
+  };
+  _dcRecalc();
+}
+function _doDayClose(){
+  var rows=window._dcRows||[],groups=window._dcGroups||[],meta=window._dcMeta||{};
+  var me=currentUser.id;
+  var todayStr=meta.todayStr||today();
+  // Día que se está cerrando: los registros y la declaración van a ESTA fecha
+  var closeDate=meta.closeDate||todayStr;
+  var decl=parseFloat((document.getElementById('dc-declared')||{}).value||0)||0;
+  if(!(decl>0)){alert('Indicá las horas totales dedicadas '+(meta.dayWord||'ese día')+'.');return;}
+  var grouped={};groups.forEach(function(g){g.members.forEach(function(i){grouped[i]=true;});});
+  var entries=[];
+  var sum=meta.regTotal||0;
+  rows.forEach(function(r,i){
+    if(grouped[i])return;
+    var v=parseFloat((document.getElementById('dc-h-'+i)||{}).value||0);
+    if(!(v>0))return;
+    var cmt=((document.getElementById('dc-c-'+i)||{}).value||'').trim();
+    entries.push({row:r,hours:Math.round(v*100)/100,comment:cmt});
+    sum+=v;
+  });
+  var groupErr=null;
+  groups.forEach(function(g){
+    if(groupErr)return;
+    var total=parseFloat((document.getElementById('dc-gh-'+g.gid)||{}).value||0);
+    if(!(total>0))return; // grupo sin horas: sus tareas quedan pendientes
+    var label=((document.getElementById('dc-gl-'+g.gid)||{}).value||'').trim()||g.label;
+    var cmt=((document.getElementById('dc-gc-'+g.gid)||{}).value||'').trim();
+    var n=g.members.length;
+    if(total<0.25*n-1e-9){groupErr='El grupo «'+label+'» necesita al menos '+_fmtH(0.25*n)+'h ('+n+' tareas × 0,25 h).';return;}
+    // Reparto en pasos de 0,25 h: base pareja + el resto a las primeras tareas.
+    // La suma repartida es EXACTA al total del grupo — los totales por día no se alteran.
+    var q=Math.round(total*4),baseQ=Math.floor(q/n),extra=q-baseQ*n;
+    g.members.forEach(function(idx,pos){
+      entries.push({row:rows[idx],hours:(baseQ+(pos<extra?1:0))/4,comment:cmt,approx:true,groupLabel:label});
+    });
+    sum+=q/4;
+  });
+  if(groupErr){alert(groupErr);return;}
+  sum=Math.round(sum*100)/100;
+  if(sum>decl+1e-9){alert('La suma asignada ('+_fmtH(sum)+'h) supera el total declarado ('+_fmtH(decl)+'h).');return;}
+  var applied=0,skipped=[];
+  var releaseCands=[];
+  var supU=USERS.find(function(u){return u.role==='supervisor';});
+  entries.forEach(function(e){
+    var r=e.row;
+    if(r.kind==='analisis'){
+      var t=tasks.find(function(x){return x.id===r.taskId;});
+      // Guards contra UI obsoleta: el estado pudo avanzar mientras el modal estaba abierto
+      if(!t||t._deleted||['done','reviewed','approved','observed'].indexOf(t.status)>=0){skipped.push(r.label);return;}
+      var a=(t.assignments||[]).find(function(x){return !x._removed&&x.analyst===me&&x.date===r.date;});
+      if(!a||a._completedBySup||(a.realHours>0)||(a.sessions&&a.sessions.length>0)){skipped.push(r.label);return;}
+      var prevStatus=t.status;
+      if(t.status==='pending'||t.status==='scheduled'){
+        t.startedTs=Date.now();
+        if(!t.startDatetime)t.startDatetime=new Date().toISOString().slice(0,16);
+      }
+      if(!a.sessions)a.sessions=[];
+      // La sesión lleva la fecha del día que se cierra (no la de registro): así la
+      // conciliación por día coincide exactamente con la declaración de ese día
+      var sess={date:closeDate,hours:e.hours,ts:Date.now()};
+      if(e.comment)sess.comment=e.comment;
+      if(e.approx){sess.approx=true;sess.group=e.groupLabel;}
+      a.sessions.push(sess);
+      a.realHours=(a.realHours||0)+e.hours;
+      a._pendingConfirm=true;a._completedTs=Date.now();
+      // Carga de horas: bumpear t._ts (NO a._ts — ante quita concurrente del día gana el tombstone)
+      t._ts=Date.now();
+      _trackMyPortion(t,a);
+      _tryAdvanceToPendingConfirm(t);
+      if(t.status==='pending-confirm'){t.completedBy=me;t.completedTs=Date.now();}
+      if(e.comment){
+        if(!t.completionComments)t.completionComments=[];
+        t.completionComments.push({by:me,byName:currentUser.name,ts:Date.now(),comment:e.comment});
+      }
+      auditLog('STATUS_CHANGE','TASK',t.id,{field:'status',oldVal:prevStatus,newVal:t.status,
+        description:t.producto+' '+t.lote+' — completado por '+currentUser.name+' (cierre del día'+(e.approx?', agrupado ≈':'')+')',
+        hours:e.hours,comment:e.comment||''},'Cierre del día: '+e.hours+'h');
+      if(supU){
+        replanNotifs=replanNotifs.filter(function(n){
+          return !(n.type==='completed'&&n.taskId===t.id&&n.analystId===me&&n.status!=='resolved');
+        });
+        replanNotifs.push({id:newNotifId(),type:'completed',taskId:t.id,
+          analystId:me,forUserId:supU.id,status:'pending',ts:Date.now(),
+          fromUser:me,fromName:currentUser.name,
+          hours:e.hours,comment:e.comment||'',producto:t.producto,lote:t.lote});
+      }
+      applied++;
+      var restEmpty=(t.assignments||[]).filter(function(x){
+        return x.analyst===me&&!x._removed
+          &&!((x.realHours>0)||(x.sessions&&x.sessions.length>0)||x._started||x._completedBySup);
+      }).map(function(x){return x.date;});
+      if(restEmpty.length&&!releaseCands.some(function(c){return c.taskId===t.id;})){
+        releaseCands.push({taskId:t.id,producto:t.producto,lote:t.lote,dates:restEmpty});
+      }
+    } else if(r.kind==='gestion'){
+      var mt=mgmtTasks.find(function(x){return x.id===r.mgmtId;});
+      if(!mt||mt._deleted){skipped.push(r.label);return;}
+      if(!mt.completions)mt.completions=[];
+      var idx=mt.completions.findIndex(function(c){return c.date===r.date&&c.analystId===me;});
+      var rec={date:r.date,analystId:me,ts:Date.now(),hours:e.hours,comment:e.comment||'',status:'pending-confirm'};
+      if(e.approx){rec.approx=true;rec.group=e.groupLabel;}
+      if(idx>=0)mt.completions[idx]=rec;else mt.completions.push(rec);
+      mt._ts=Date.now();
+      applied++;
+    } else if(r.kind==='libre'){
+      var ft=freeTasks.find(function(x){return x.id===r.ftId;});
+      if(!ft||ft._deleted||ft.status!=='pending'){skipped.push(r.label);return;}
+      ft.date=ft.date||closeDate;
+      ft.realHours=e.hours;
+      if(e.comment)ft.completionComment=e.comment;
+      if(e.approx){ft.approx=true;ft.group=e.groupLabel;}
+      ft.status='pending-confirm';
+      ft.completedBy=me;ft.completedTs=Date.now();ft._ts=Date.now();
+      if(supU){
+        replanNotifs.push({id:newNotifId(),type:'free_task_completed',
+          freeTaskId:ft.id,forUserId:supU.id,
+          analystId:me,fromUser:me,fromName:currentUser.name,
+          status:'pending',ts:Date.now(),
+          description:ft.description,hours:e.hours,date:ft.date,comment:e.comment||''});
+      }
+      resolveAllCopies({type:'free_task_assigned',freeTaskId:ft.id},'accepted');
+      applied++;
+    }
+  });
+  setDayDeclaration(me,closeDate,Math.round(decl*100)/100);
+  auditLog('DAY_CLOSE','HOURS',me+'|'+closeDate,{
+    description:'Cierre del día de '+currentUser.name+' ('+fmtDF(closeDate)+'): declaradas '+_fmtH(decl)+'h · asignadas '+_fmtH(sum)+'h en '+applied+' registro(s)'+(skipped.length?' · '+skipped.length+' omitida(s) por cambio de estado':''),
+    declared:decl,assigned:sum,records:applied
+  },'');
+  var m=document.getElementById('dayclose-modal');if(m)m.remove();
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow dayClose:',e);});
+  showToast('✓ Día '+fmtDF(closeDate)+' cerrado: '+_fmtH(decl)+'h declaradas · '+applied+' registro(s)','success');
+  if(skipped.length)setTimeout(function(){try{showToast('⚠ '+skipped.length+' actividad(es) no se registraron porque su estado cambió — revisá la vista.','warn');}catch(e){}},2400);
+  if(releaseCands.length)_offerReleaseBatch(releaseCands);
+}
+// Oferta consolidada de liberar los días restantes de TODOS los productos terminados
+// en el cierre (equivalente a _offerReleaseRemainingDays, en un único paso)
+function _offerReleaseBatch(cands){
+  if(document.getElementById('releasebatch-modal'))return;
+  var dv=document.createElement('div');
+  var rowsH=cands.map(function(c,i){
+    return '<label style="display:flex;align-items:flex-start;gap:8px;padding:7px 9px;background:var(--bg);border-radius:var(--radius);margin-bottom:5px;cursor:pointer;font-size:12px">'
+      +'<input type="checkbox" id="rb-'+i+'" style="width:14px;height:14px;margin-top:2px;flex-shrink:0">'
+      +'<span style="flex:1;min-width:0"><b>'+escH(c.producto)+'</b> <span class="u-mono" style="font-size:11px;color:var(--text3)">'+escH(c.lote)+'</span>'
+      +'<br><span style="font-size:11px;color:var(--text2)">Días sin usar: '+c.dates.slice().sort().map(function(d){return fmtDDMMYY(d);}).join(', ')+'</span></span>'
+      +'</label>';
+  }).join('');
+  dv.innerHTML='<div class="modal-overlay" style="z-index:600" id="releasebatch-modal">'
+    +'<div class="modal" style="width:min(460px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:6px;border-bottom:none;padding-bottom:0">¿Terminaste estos análisis?</h3>'
+    +'<p style="font-size:12px;color:var(--text2);margin:0 0 10px">Registraste horas en productos que aún tienen días asignados sin usar. Si los liberás, el análisis se considera <b>terminado de tu parte</b> y pasa a confirmación del supervisor; si no, los días quedan reservados y el producto sigue pendiente.</p>'
+    +rowsH
+    +'<div class="frow" style="margin-top:6px"><label style="font-size:11px">Motivo (el supervisor lo verá)</label><input type="text" id="rb-motivo" value="Finalizó el análisis antes de usar todos los días asignados" style="width:100%"></div>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">'
+    +'<button class="btn" data-esc onclick="document.getElementById(\'releasebatch-modal\').remove()">Conservar todos</button>'
+    +'<button class="btn pri" onclick="_doReleaseBatch()">Liberar seleccionados</button>'
+    +'</div></div></div>';
+  document.body.appendChild(dv);
+  window._dcRelCands=cands;
+}
+function _doReleaseBatch(){
+  var cands=window._dcRelCands||[];
+  var mot=((document.getElementById('rb-motivo')||{}).value||'').trim()||'Finalizó antes';
+  var any=false;
+  var sup=USERS.find(function(u){return u.role==='supervisor';});
+  cands.forEach(function(c,i){
+    var cb=document.getElementById('rb-'+i);
+    if(!cb||!cb.checked)return;
+    var t=tasks.find(function(x){return x.id===c.taskId;});
+    if(!t)return;
+    var released=[];
+    c.dates.forEach(function(d){ if(releaseAssignmentDay(c.taskId,d,mot,{context:'finished_early',silent:true,noNotif:true}))released.push(d); });
+    if(released.length){
+      any=true;
+      _tryAdvanceToPendingConfirm(t);
+      if(t.status==='pending-confirm'){t.completedBy=currentUser.id;t.completedTs=Date.now();}
+      replanNotifs.push({id:newNotifId(),type:'day_released',taskId:c.taskId,analystId:currentUser.id,
+        forUserId:sup?sup.id:'',fromName:currentUser.name,producto:t.producto,lote:t.lote,
+        dates:released,reason:mot,context:'finished_early',status:'pending',ts:Date.now()});
+    }
+  });
+  var m=document.getElementById('releasebatch-modal');if(m)m.remove();
+  if(any){
+    saveLS();render();
+    saveNow().catch(function(e){console.error('saveNow releaseBatch:',e);});
+    try{showToast('Días liberados · análisis dados por terminados','success');}catch(e){}
+  }
+}
+
 function markDone(id,assignDate){
   const t=tasks.find(x=>x.id===id);if(!t)return;
   // Guard contra UI obsoleta: un producto ya enviado a revisión o cerrado no se
@@ -12706,9 +13613,9 @@ function markDone(id,assignDate){
         +'<h3 style="margin-bottom:6px;border-bottom:none;padding-bottom:0">Completar análisis</h3>'
         +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(t.producto)+' — '+escH(t.lote)+'</p>'
         +'<div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:14px">'
-        +'<button onclick="var e=document.getElementById(\'hrs-input\');e.value=Math.max(0.5,parseFloat(e.value||1)-0.5)" class="btn" style="width:36px;height:36px;font-size:20px;padding:0">−</button>'
-        +'<div class="u-tac"><input type="number" id="hrs-input" min="0.5" max="24" step="0.5" value="1" style="width:80px;text-align:center;font-size:22px;font-weight:700;padding:6px;border:2px solid var(--border);border-radius:var(--radius);font-family:var(--mono)"><div style="font-size:11px;color:var(--text3);margin-top:3px">horas hoy</div></div>'
-        +'<button onclick="var e=document.getElementById(\'hrs-input\');e.value=(parseFloat(e.value||1)+0.5)" class="btn" style="width:36px;height:36px;font-size:20px;padding:0">+</button>'
+        +'<button onclick="var e=document.getElementById(\'hrs-input\');e.value=Math.max(0.25,parseFloat(e.value||1)-0.25)" class="btn" style="width:36px;height:36px;font-size:20px;padding:0">−</button>'
+        +'<div class="u-tac"><input type="number" id="hrs-input" min="0.25" max="24" step="0.25" value="1" style="width:80px;text-align:center;font-size:22px;font-weight:700;padding:6px;border:2px solid var(--border);border-radius:var(--radius);font-family:var(--mono)"><div style="font-size:11px;color:var(--text3);margin-top:3px">horas hoy</div></div>'
+        +'<button onclick="var e=document.getElementById(\'hrs-input\');e.value=(parseFloat(e.value||1)+0.25)" class="btn" style="width:36px;height:36px;font-size:20px;padding:0">+</button>'
         +'</div>'
         +'<div class="frow" style="margin-bottom:14px"><label>Comentario para el revisor <span style="color:var(--text3);font-weight:400">(opcional)</span></label>'
         +'<textarea id="complete-cmt" rows="2" placeholder="Observaciones del análisis, condiciones especiales, resultados relevantes…" style="width:100%;resize:vertical;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:12px"></textarea></div>'
@@ -13397,7 +14304,7 @@ function renderSamplingModal(){
     +'<div class="frow"><label>Fecha real de llegada <span style="color:var(--red)">*</span></label>'
     +'<input type="date" id="f-sampling-date" value="'+today()+'" style="font-weight:600"></div>'
     +'<div class="frow"><label>Horas dedicadas <span style="color:var(--red)">*</span></label>'
-    +'<input type="number" id="f-sampling-hours" min="0.5" max="24" step="0.5" placeholder="ej. 1.5" style="width:130px"></div>'
+    +'<input type="number" id="f-sampling-hours" min="0.25" max="24" step="0.25" placeholder="ej. 1.5" style="width:130px"></div>'
     +'<div class="frow form-full"><label>Datos de lote / Comentarios</label>'
     +'<textarea id="f-sampling-notes" style="min-height:70px" placeholder="N° serie, condición, cantidad, observaciones…"></textarea></div>'
     +'</div>'
@@ -15498,7 +16405,7 @@ function renderFreeTaskModal(){
     +'<div class="frow"><label>Fecha *</label>'
     +'<input id="ft-date" type="date" value="'+(ft?ft.date:pre?pre.date:today())+'"></div>'
     +'<div class="frow"><label>Horas sugeridas *</label>'
-    +'<input id="ft-hours" type="number" min="0.5" max="24" step="0.5" value="'+(ft?ft.hours:pre?pre.suggestedHours:1)+'"></div>'
+    +'<input id="ft-hours" type="number" min="0.25" max="24" step="0.25" value="'+(ft?ft.hours:pre?pre.suggestedHours:1)+'"></div>'
     +'</div>'
     +'<div class="frow"><label>Comentario</label>'
     +'<input id="ft-notes" type="text" placeholder="Opcional — detalle adicional" value="'+escH(ft?ft.notes||'':pre?pre.notes:'')+'"></div>'
@@ -15631,9 +16538,9 @@ function resolveFreeTaskBySup(ftId){
     +' style="width:100%;margin-top:6px;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text);box-sizing:border-box"></div>'
     +'<div style="margin-bottom:12px"><label style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Horas reales dedicadas *</label>'
     +'<div style="display:flex;align-items:center;gap:8px;margin-top:6px">'
-    +'<button onclick="var e=document.getElementById(\'rft-hrs\');e.value=Math.max(0.5,parseFloat(e.value||1)-0.5)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">−</button>'
-    +'<input type="number" id="rft-hrs" min="0.5" max="24" step="0.5" value="'+(ft.suggestedHours||ft.hours||1)+'" style="width:90px;text-align:center;font-size:20px;font-weight:700;padding:5px;border:2px solid var(--border);border-radius:var(--radius);font-family:var(--mono)">'
-    +'<button onclick="var e=document.getElementById(\'rft-hrs\');e.value=(parseFloat(e.value||1)+0.5)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">+</button>'
+    +'<button onclick="var e=document.getElementById(\'rft-hrs\');e.value=Math.max(0.25,parseFloat(e.value||1)-0.25)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">−</button>'
+    +'<input type="number" id="rft-hrs" min="0.25" max="24" step="0.25" value="'+(ft.suggestedHours||ft.hours||1)+'" style="width:90px;text-align:center;font-size:20px;font-weight:700;padding:5px;border:2px solid var(--border);border-radius:var(--radius);font-family:var(--mono)">'
+    +'<button onclick="var e=document.getElementById(\'rft-hrs\');e.value=(parseFloat(e.value||1)+0.25)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">+</button>'
     +'<span style="font-size:12px;color:var(--text3)">horas</span>'
     +'</div></div>'
     +'<div style="margin-bottom:16px"><label style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Comentario (opcional)</label>'
@@ -15732,9 +16639,9 @@ function confirmFreeTaskAsAnalyst(ftId){
     +' style="width:100%;margin-top:6px;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text);box-sizing:border-box"></div>'
     +'<div style="margin-bottom:12px"><label style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Horas reales dedicadas *</label>'
     +'<div style="display:flex;align-items:center;gap:8px;margin-top:6px">'
-    +'<button onclick="var e=document.getElementById(\'cft-hrs\');e.value=Math.max(0.5,parseFloat(e.value||1)-0.5)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">−</button>'
-    +'<input type="number" id="cft-hrs" min="0.5" max="24" step="0.5" value="'+(ft.suggestedHours||ft.hours||1)+'" style="width:90px;text-align:center;font-size:20px;font-weight:700;padding:5px;border:2px solid var(--border);border-radius:var(--radius);font-family:var(--mono)">'
-    +'<button onclick="var e=document.getElementById(\'cft-hrs\');e.value=(parseFloat(e.value||1)+0.5)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">+</button>'
+    +'<button onclick="var e=document.getElementById(\'cft-hrs\');e.value=Math.max(0.25,parseFloat(e.value||1)-0.25)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">−</button>'
+    +'<input type="number" id="cft-hrs" min="0.25" max="24" step="0.25" value="'+(ft.suggestedHours||ft.hours||1)+'" style="width:90px;text-align:center;font-size:20px;font-weight:700;padding:5px;border:2px solid var(--border);border-radius:var(--radius);font-family:var(--mono)">'
+    +'<button onclick="var e=document.getElementById(\'cft-hrs\');e.value=(parseFloat(e.value||1)+0.25)" class="btn" style="width:34px;height:34px;font-size:18px;padding:0">+</button>'
     +'<span style="font-size:12px;color:var(--text3)">horas</span>'
     +'</div></div>'
     +'<div style="margin-bottom:16px"><label style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Comentario (opcional)</label>'

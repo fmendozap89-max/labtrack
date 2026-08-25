@@ -229,9 +229,16 @@
     </div>
 
     <div class="step sx">
-      <h4>10 · «Personal»: ausencias y días laborables <span class="who s">Supervisor</span></h4>
-      <p>Cuatro pestañas: <b>Ausencias</b> (vacaciones, licencias y faltas — se ven en el calendario del equipo), <b>Tipos de ausencia</b> (categorías configurables), <b>Días laborables</b> (semana laboral de lunes a viernes, con días extra de sábado/domingo o días no laborables puntuales) y <b>Conflictos</b> (detecta asignaciones en días no laborables o con ausencia, con la opción de activar el día o corregir la asignación).</p>
-      <div class="tip">El <b>horario de trabajo y las horas extra</b> del personal se registran en planillas de papel: la app no los gestiona.</div>
+      <h4>10 · «Personal»: ausencias, días laborables y horas por día <span class="who s">Supervisor</span></h4>
+      <p>Cinco pestañas: <b>Ausencias</b> (vacaciones, licencias y faltas — se ven en el calendario del equipo), <b>Tipos de ausencia</b> (categorías configurables), <b>Días laborables</b> (semana laboral, días extra o no laborables puntuales, y la configuración de la <b>jornada</b>: referencia 8 h, máximo diario 12 h y tolerancia ±1 h), <b>Horas por día</b> (la conciliación de dedicación, abajo) y <b>Conflictos</b> (asignaciones en días no laborables o con ausencia).</p>
+      <p><b>Horas por día — conciliación de la dedicación.</b> Grilla analista × día de la semana con lo <b>declarado</b> en el cierre del día, las <b>actividades registradas</b> (análisis + gestión + tareas únicas + muestreos) y la referencia. Se marca <b>desvío</b> solo si el día supera el <b>máximo diario</b> (12 h) o si las actividades se apartan más de <b>±1 h</b> de lo declarado (de la jornada de 8 h, si el analista no cerró el día). Con el filtro <b>Solo desvíos</b> ves lo pendiente de resolver. Al hacer clic en una celda se abre el desglose del día, donde podés:</p>
+      <ul class="clean">
+        <li><b>Corregir horas</b> de cualquier actividad y de la declaración del analista, directamente en el desglose. Es una corrección de dedicación pura: <b>no cambia el estado</b> de ningún producto ni sus confirmaciones — solo las horas, con registro en el Audit Trail.</li>
+        <li><b>Resolver porciones sin horas</b> del día (completar por el analista o quitar el día).</li>
+        <li><b>Aceptar el desvío</b> con motivo (p. ej. horas extra autorizadas en papel) — la celda queda marcada ✓ y sale del filtro de desvíos.</li>
+      </ul>
+      <p>En el <b>calendario del equipo</b>, cada día pasado muestra el total «Σ» del analista con el mismo semáforo (activable con el botón <span class="btnref">Σ horas</span>); y en «Mi día» te avisa si hay días con desvío sin aceptar en la última semana.</p>
+      <div class="tip">El <b>horario de entrada/salida y las horas extra</b> del personal se siguen registrando en planillas de papel. Lo que la app gestiona es la <b>dedicación diaria a las actividades</b> — la materia prima de los indicadores del laboratorio.</div>
     </div>
 
     <div class="step sx">
@@ -277,7 +284,7 @@
 
     <div class="step rx">
       <h4>3 · «Análisis»: también analizás <span class="who r">Revisor</span></h4>
-      <p>Tu módulo <b>Análisis</b> abre en <b>⏰ Pendientes</b> (lo accionable primero: productos sin asignar que podés <b>Solicitar</b>, y tus análisis por iniciar), sigue <b>💡 Ingresos</b>, luego <b>🔬 Análisis</b> y cierra <b>⭐ Estándares</b> — que a diferencia del analista muestra el <b>listado completo</b> de análisis y lotes, igual que el supervisor. Cuando te asignan lotes, los ejecutás igual que un analista: iniciar, registrar horas, completar, replanificar (ver la <a href="#analista">Guía del Analista</a>).</p>
+      <p>Tu módulo <b>Análisis</b> abre en <b>⏰ Pendientes</b> (lo accionable primero: productos sin asignar que podés <b>Solicitar</b>, y tus análisis por iniciar), sigue <b>💡 Ingresos</b>, luego <b>🔬 Análisis</b> y cierra <b>⭐ Estándares</b> — que a diferencia del analista muestra el <b>listado completo</b> de análisis y lotes, igual que el supervisor. Cuando te asignan lotes, los ejecutás igual que un analista: iniciar, registrar horas, completar, replanificar, y también <b>cerrar tu día</b> declarando el total de horas y repartiéndolo entre tus actividades (ver la <a href="#analista">Guía del Analista</a>).</p>
     </div>
 
     <div class="step rx">
@@ -295,6 +302,7 @@
       <h4>1 · Tu pantalla de inicio: «Mi día» <span class="who a">Analista</span></h4>
       <p>Al ingresar ves <b>Mi día</b>: tu trabajo del día de un vistazo. Desde acá hacés casi toda tu tarea diaria.</p>
       <ul class="clean">
+        <li><b>🕔 Cierre del día</b> (tarjeta superior): declarás las horas totales del día y las repartís entre tus actividades — la forma recomendada de registrar tu dedicación (ver paso 5). La tarjeta también avisa si te quedaron días previos sin cerrar.</li>
         <li><b>Muestras asignadas a ingresar</b>: muestras pendientes de registrar su llegada — botón <span class="btnref">✎ Registrar llegada</span>.</li>
         <li><b>Hoy</b>: tus análisis y tareas del día. Si algo fue observado, aparece <span class="btnref">↩ Re-enviar</span>.</li>
         <li><b>Próximas</b>: lo que viene en los próximos días.</li>
@@ -328,10 +336,24 @@
       <figure class="shot" data-snap="ana_modal_completar" data-modal="1"><figcaption>Cuadro real «Completar análisis».</figcaption></figure>
       <div class="tip">Si un análisis lo hacen entre varios analistas, cada uno registra sus horas y el análisis avanza cuando todas las partes están completas. Si terminás antes y te sobran días asignados, la app te ofrece <b>liberarlos</b> para que queden disponibles.</div>
       <div class="tip"><b>Días completados por el supervisor:</b> si el supervisor cargó él mismo las horas de uno de tus días (desde la edición del producto), ese día ya queda <b>completado</b> — no te aparecen los botones de Iniciar/Completar ni el aviso de atraso, y no requiere ninguna acción tuya.</div>
+      <div class="tip"><b>Recomendado:</b> en lugar de completar actividad por actividad, cerrá todo junto al final de la jornada con el <b>Cierre del día</b> (paso 5). Ambos caminos valen — lo importante es que las horas queden registradas fielmente.</div>
     </div>
 
     <div class="step">
-      <h4>5 · ¿Te falta o te sobra tiempo? Replanificar y liberar día <span class="who a">Analista</span></h4>
+      <h4>5 · Cerrar tu día: declarar el total y repartirlo <span class="who a">Analista</span></h4>
+      <p>El <b>Cierre del día</b> (tarjeta 🕔 de «Mi día») es la forma <b>preferida</b> de registrar tu dedicación: al terminar la jornada declarás cuántas horas trabajaste en total y las repartís entre las actividades de ese día, todo en un solo paso.</p>
+      <ul class="clean">
+        <li><b>1 · Elegí el día.</b> Cada día se cierra <b>por separado</b>: el selector muestra hoy y hasta 4 días atrás, con el estado de cada uno (✓ cerrado, pendientes). Podés cerrar hoy y después un día anterior que te haya quedado abierto.</li>
+        <li><b>2 · Declará el total.</b> Las horas totales dedicadas ese día <b>al análisis, la gestión y las actividades libres</b>. La jornada de referencia es de 8 h, pero declará lo que realmente trabajaste.</li>
+        <li><b>3 · Repartilo.</b> Asigná horas (paso de 0,25 h) a cada análisis, actividad de gestión o tarea única del día; lo que dejes vacío queda pendiente. Podés agregar un <b>comentario para el revisor</b> por tarea, y <b>agrupar tareas cortas del mismo tipo</b> (p. ej. varios ensayos de estabilidad) en una sola dedicación que se reparte automáticamente.</li>
+        <li><b>4 · Confirmá.</b> La suma repartida <b>no puede superar el total declarado</b>; lo ya registrado durante el día (con ✓ Completar, muestreos, gestión) también cuenta. Cada análisis queda completado y pasa a confirmación del supervisor, igual que con el botón individual.</li>
+      </ul>
+      <div class="tip"><b>Registrá lo más fiel posible a la realidad.</b> Estas horas alimentan los indicadores del laboratorio (dedicación por producto, carga por analista, conciliación de jornadas): valen por lo que reflejan, no por «cuadrar». Si un día trabajaste más o menos que la jornada, declaralo tal cual — el supervisor lo concilia; solo se marca desvío si el día supera las 12 h o si lo repartido se aparta más de 1 h de lo que declaraste.</div>
+      <div class="tip">¿Preferís completar cada actividad por separado? Podés: en ese caso no hay declaración del día y tu dedicación se compara contra la jornada de 8 h en la conciliación del supervisor.</div>
+    </div>
+
+    <div class="step">
+      <h4>6 · ¿Te falta o te sobra tiempo? Replanificar y liberar día <span class="who a">Analista</span></h4>
       <p>La planificación por días puede crecer o achicarse según el trabajo real:</p>
       <ul class="clean">
         <li><b>Replanificar = necesito más tiempo.</b> Se pide desde el último día asignado, proponiendo una nueva fecha con motivo. <b>Si ya trabajaste en el producto, ese día no se mueve</b>: la nueva fecha se agrega como día adicional y todo tu trabajo previo (horas, sesiones) se conserva. Si todavía no empezaste, simplemente se mueve la fecha.</li>
@@ -342,7 +364,7 @@
     </div>
 
     <div class="step">
-      <h4>6 · Si te observan un análisis: corregir y re-enviar <span class="who a">Analista</span></h4>
+      <h4>7 · Si te observan un análisis: corregir y re-enviar <span class="who a">Analista</span></h4>
       <p>Cuando el revisor o el supervisor encuentra algo a corregir, <b>observa</b> el análisis y te llega una notificación. El análisis aparece como <span class="pill ob">observado</span> en «Mi día» con el botón <span class="btnref">↩ Re-enviar</span>.</p>
       <p>Al tocarlo, explicás en el <b>comentario de corrección</b> qué resolviste y, si hace falta, marcás <i>Solicitar replanificación de fechas</i>. Al re-enviar vuelve a quedar <span class="pill do">completado</span> para una nueva revisión.</p>
       <figure class="shot" data-snap="ana_modal_reenviar" data-modal="1"><figcaption>Cuadro real «Re-enviar análisis» tras una observación.</figcaption></figure>
@@ -350,13 +372,13 @@
     </div>
 
     <div class="step">
-      <h4>7 · Tus notificaciones <span class="who a">Analista</span></h4>
+      <h4>8 · Tus notificaciones <span class="who a">Analista</span></h4>
       <p>La campana <span class="btnref">🔔</span> arriba a la derecha muestra tus avisos activos (observaciones, respuestas a tus solicitudes, tareas asignadas) y el historial de los últimos días.</p>
       <figure class="shot" data-snap="ana_notif_panel" data-modal="1"><figcaption>Panel real de notificaciones del Analista.</figcaption></figure>
     </div>
 
     <div class="step">
-      <h4>8 · «Gestión»: tareas únicas y recurrentes <span class="who a">Analista</span></h4>
+      <h4>9 · «Gestión»: tareas únicas y recurrentes <span class="who a">Analista</span></h4>
       <p>El trabajo que no es análisis de un lote, para que tus horas queden completas:</p>
       <ul class="clean">
         <li><b>🎯 Tareas únicas</b>: trabajo puntual (capacitación, orden de laboratorio, preparación de reactivos) — lo registrás con <span class="btnref">+ Registrar tarea única</span> y el supervisor lo confirma.</li>
@@ -366,7 +388,7 @@
     </div>
 
     <div class="step">
-      <h4>9 · Pestaña «💡 Ingresos»: registrar llegadas y sugerir productos <span class="who a">Analista</span></h4>
+      <h4>10 · Pestaña «💡 Ingresos»: registrar llegadas y sugerir productos <span class="who a">Analista</span></h4>
       <p>Dentro de <b>Mis análisis</b>, la pestaña <b>💡 Ingresos</b> muestra las muestras pendientes de ingresar. Con <span class="btnref">📥 Registrar llegada</span> confirmás que la muestra llegó/se muestreó (fecha real y horas). Con <span class="btnref">+ Nueva sugerencia</span> proponés un ingreso: el supervisor la recibe y confirma.</p>
       <p><b>⭐ Estándares secundarios:</b> si durante un análisis detectás que el estándar secundario de una MP activa está por vencer o se está agotando, registrá la <b>necesidad de desarrollo</b> en la pestaña <b>⭐ Estándares</b> con <span class="btnref">+ Registrar necesidad</span>. El supervisor recibe la notificación de cada ingreso que matchee y decide validar el lote para el desarrollo o descartar el match; al muestreador el aviso ⭐ le pedirá cantidad adicional. Si el análisis de aprobación está en curso, se pueden sumar ahí los ensayos de calificación. Solo el supervisor valida, descarta, cierra o elimina.</p>
       <figure class="shot" data-snap="ana_ingresos"><figcaption>«Mis análisis» — pestaña 💡 Ingresos.</figcaption></figure>
@@ -374,12 +396,12 @@
     </div>
 
     <div class="step">
-      <h4>10 · «Calendario equipo»: coordinar la planificación <span class="who a">Analista</span></h4>
+      <h4>11 · «Calendario equipo»: coordinar la planificación <span class="who a">Analista</span></h4>
       <p>El calendario del equipo en <b>ventana de 14 días</b>: qué tiene asignado cada analista y revisor día por día, con las ausencias y los días no laborables (los fines de semana se achican salvo que estén habilitados). Navegás con <span class="btnref">← Semana / Semana →</span> o saltás la ventana completa con <span class="btnref">« / »</span>; <span class="btnref">Hoy</span> vuelve al presente. Es de <b>solo consulta</b> y sirve para coordinar entre ustedes — ver quién está con qué antes de pedir un producto, acordar un cambio o avisar una demora.</p>
     </div>
 
     <div class="step">
-      <h4>11 · Tu cuenta <span class="who a">Analista</span></h4>
+      <h4>12 · Tu cuenta <span class="who a">Analista</span></h4>
       <p>Abajo a la izquierda: <span class="btnref">Cambiar clave</span> para actualizar tu contraseña y <span class="btnref">Salir</span> para cerrar sesión. Por seguridad, la sesión se cierra sola tras un rato de inactividad.</p>
     </div>
   </section>
