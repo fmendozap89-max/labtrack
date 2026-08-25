@@ -438,7 +438,10 @@ var labConfigPwd=''; // hash SHA-256 de la clave maestra de configuración de la
 var labConfigPwd_ts=0; // timestamp del último cambio de la clave maestra (para merge entre dispositivos)
 // Registro de borrados definitivos (usuarios, tareas libres, gestión, labs externos): id → timestamp.
 // Sin esto, el merge por unión resucitaría los registros eliminados desde copias remotas.
-var deletionsReg={users:{},freeTasks:{},mgmtTasks:{},externalLabs:{}};
+// archivedTasks (2026-08-25): ids de tareas movidas a labtrack_archive.json — sin este
+// registro, cualquier dispositivo con copia local anterior al archivado las RESUCITABA
+// en el merge (unión por id) y el estado nunca bajaba de tamaño (ciclo archivo↔resurrección)
+var deletionsReg={users:{},freeTasks:{},mgmtTasks:{},externalLabs:{},archivedTasks:{}};
 function _regDeletion(kind,id){
   if(!deletionsReg[kind])deletionsReg[kind]={};
   deletionsReg[kind][id]=Date.now();
@@ -647,8 +650,8 @@ function applySnapshot(json){
     if(!d||!d.tasks)return false;
     // Registro de borrados definitivos: cargar y podar entradas de más de 90 días
     // (poda determinística — todos los clientes convergen)
-    deletionsReg=d.deletions&&typeof d.deletions==='object'?d.deletions:{users:{},freeTasks:{},mgmtTasks:{},externalLabs:{}};
-    ['users','freeTasks','mgmtTasks','externalLabs'].forEach(function(k){
+    deletionsReg=d.deletions&&typeof d.deletions==='object'?d.deletions:{users:{},freeTasks:{},mgmtTasks:{},externalLabs:{},archivedTasks:{}};
+    ['users','freeTasks','mgmtTasks','externalLabs','archivedTasks'].forEach(function(k){
       if(!deletionsReg[k])deletionsReg[k]={};
       var _delCut=Date.now()-90*24*60*60*1000;
       Object.keys(deletionsReg[k]).forEach(function(id){
@@ -709,7 +712,9 @@ function applySnapshot(json){
     else if(!Array.isArray(auditTrail))auditTrail=[];
     interLabRequests=d.interLabRequests||[];
     externalLabs=(d.externalLabs||[]).filter(function(l){return !deletionsReg.externalLabs[l.id];});
-    tasks=d.tasks;
+    // Tareas ya archivadas: no re-entran al estado (registro deletions.archivedTasks,
+    // poda determinística — converge; la copia completa vive en labtrack_archive.json)
+    tasks=d.tasks.filter(function(t){return !deletionsReg.archivedTasks[t.id];});
     freeTasks=(d.freeTasks||[]).filter(function(f){return !deletionsReg.freeTasks[f.id];});
     nextFreeTaskId=d.nextFreeTaskId||freeTasks.length+1;
     productSuggestions=d.productSuggestions||[];
@@ -916,7 +921,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082501; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082502; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -2470,6 +2475,9 @@ async function archiveOldApproved(){
     if(!res)return; // escritura falló → NO podar el estado; se reintenta en el próximo boot
     var ids=new Set(cand.map(function(t){return t.id;}));
     tasks=tasks.filter(function(t){return !ids.has(t.id);});
+    // Registrar el archivado (viaja en el snapshot): el merge y applySnapshot filtran
+    // estos ids — sin esto, dispositivos con copia local previa resucitaban las tareas
+    cand.forEach(function(t){_regDeletion('archivedTasks',t.id);});
     window._archTasks=arr;
     auditLog('ARCHIVE','TASK','batch',{count:cand.length,description:'Archivado automático: '+cand.length+' producto(s) aprobado(s) hace más de '+ARCHIVE_APPROVED_AFTER_DAYS+' días → '+GIST_FILE_ARCHIVE},'');
     saveLS();
@@ -6843,7 +6851,11 @@ function stdSecBadge(t){
 function _stdSecInfoBox(t){
   var _devBox=t.stdSecDev
     ?'<div style="background:#5b21b6;color:#fff;border-radius:var(--radius);padding:8px 12px;margin-bottom:12px;font-size:12px"><b>⭐ Lote asignado a desarrollo de estándar secundario</b>'
-      +'<div style="font-size:11px;margin-top:2px;opacity:.9">Validado por '+escH((getU(t.stdSecDev.by)||{}).name||'')+(t.stdSecDev.ts?' el '+new Date(t.stdSecDev.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}):'')+'. Incluir los ensayos de calificación como estándar.</div></div>'
+      +'<div style="font-size:11px;margin-top:2px;opacity:.9">Validado por '+escH((getU(t.stdSecDev.by)||{}).name||'')+(t.stdSecDev.ts?' el '+new Date(t.stdSecDev.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}):'')+'. Incluir los ensayos de calificación como estándar.</div>'
+      // La marca es permanente por diseño (histórico filtrable), pero una asignación hecha
+      // por error (p. ej. sobre una necesidad luego eliminada) necesita poder revertirse
+      +(isSupRole()?'<div style="margin-top:6px"><button class="btn sm" onclick="removeStdSecDevMark('+t.id+')" title="Quitar la marca de desarrollo de estándar de este lote (p. ej. si se asignó por error). Queda registrado en el Audit Trail." style="font-size:10px;background:rgba(255,255,255,.15);border-color:rgba(255,255,255,.4);color:#fff">✕ Quitar marca</button></div>':'')
+      +'</div>'
     :'';
   var ns=stdSecNeedsForTask(t);
   if(!ns.length)return _devBox;
@@ -6857,6 +6869,23 @@ function _stdSecInfoBox(t){
       +(n.notes?'<div style="font-size:11px;margin-top:2px;opacity:.85">📝 '+escH(n.notes)+'</div>':'')
       +'</div>';
   }).join('');
+}
+// Quita la marca de desarrollo de estándar de un lote (solo supervisor). Para el caso
+// de asignaciones por error — p. ej. sobre una necesidad de prueba luego eliminada —
+// donde la marca "permanente" quedaba como residuo sin ninguna vía de limpieza.
+function removeStdSecDevMark(taskId){
+  if(!isSupRole()){alert('Solo el Supervisor puede quitar la marca de desarrollo de estándar.');return;}
+  var t=tasks.find(function(x){return x.id===taskId;});
+  if(!t||!t.stdSecDev)return;
+  if(!confirm('¿Quitar la marca «⭐ Lote asignado a desarrollo de estándar secundario» de '+t.producto+' — '+t.lote+'?\n\nEl lote deja de aparecer en el filtro ⭐ STD. La acción queda en el Audit Trail.'))return;
+  var _oldNeed=t.stdSecDev.needId||'';
+  delete t.stdSecDev;
+  t._ts=Date.now(); // sin bump, el merge resucita la marca desde otro dispositivo
+  auditLog('EDIT','TASK',taskId,{field:'stdSecDev',oldVal:_oldNeed,newVal:null,
+    description:'Marca de desarrollo de estándar secundario quitada: '+t.producto+' '+t.lote},'');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow removeStdSecDev:',e);});
+  showToast('✓ Marca de estándar quitada','success');
 }
 function openStdSecModal(){
   if(isAuditorRole()){alert('Modo auditor: solo lectura. No es posible ejecutar acciones que modifican datos.');return;}
@@ -7360,8 +7389,8 @@ function mergeSnapshot(local, remote) {
 
     // ── Registro de borrados: unión por id (gana el timestamp mayor) ──
     // Debe mergearse ANTES que users/freeTasks/externalLabs para poder filtrarlos.
-    var mergedDel = {users:{},freeTasks:{},mgmtTasks:{},externalLabs:{}};
-    ['users','freeTasks','mgmtTasks','externalLabs'].forEach(function(k){
+    var mergedDel = {users:{},freeTasks:{},mgmtTasks:{},externalLabs:{},archivedTasks:{}};
+    ['users','freeTasks','mgmtTasks','externalLabs','archivedTasks'].forEach(function(k){
       var LD=(L.deletions||{})[k]||{}, RD=(R.deletions||{})[k]||{};
       var out={};
       Object.keys(RD).forEach(function(id){ out[id]=RD[id]; });
@@ -7381,7 +7410,9 @@ function mergeSnapshot(local, remote) {
       if(!rt){taskMap[t.id]=t;}
       else{taskMap[t.id]=_mergeTaskDeep(t,rt);}
     });
-    merged.tasks = Object.values(taskMap);
+    // Tareas ya movidas al archivo histórico: fuera del merge — sin este filtro, un
+    // dispositivo con copia local anterior al archivado las resucitaba en cada unión
+    merged.tasks = Object.values(taskMap).filter(function(t){ return !mergedDel.archivedTasks[t.id]; });
 
     // ── FreeTasks: merge by id, keep newer; borradas definitivas fuera ──
     var ftMap = {};
