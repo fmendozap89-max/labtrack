@@ -438,6 +438,10 @@ var labConfigPwd=''; // hash SHA-256 de la clave maestra de configuración de la
 var labConfigPwd_ts=0; // timestamp del último cambio de la clave maestra (para merge entre dispositivos)
 // Registro de borrados definitivos (usuarios, tareas libres, gestión, labs externos): id → timestamp.
 // Sin esto, el merge por unión resucitaría los registros eliminados desde copias remotas.
+// Catálogo maestro de productos (2026-08-25): PT/EE/Val eligen de los productos
+// terminados; MP de las materias primas. Entradas {id,name,kind:'PT'|'MP',_ts,_removed?}
+// — merge por id (gana _ts), baja lógica con tombstone (las vistas filtran _removed).
+let productCatalog=[];
 // archivedTasks (2026-08-25): ids de tareas movidas a labtrack_archive.json — sin este
 // registro, cualquier dispositivo con copia local anterior al archivado las RESUCITABA
 // en el merge (unión por id) y el estado nunca bajaba de tamaño (ciclo archivo↔resurrección)
@@ -624,7 +628,7 @@ function getSnapshot(){
     labName:_labName,
     v:7,
     tasks,nextId,nextUid,nextNotifId,nextAbsId,nextMgmtId,
-    freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,stdSecNeeds,customTipos,
+    freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,stdSecNeeds,productCatalog,customTipos,
     customTipos_ts:(customTipos_ts||0),
     users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{}),...(u._ts?{_ts:u._ts}:{}),...(u._mustChangePwd?{_mustChangePwd:true}:{})})),
     passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,dayDeclarations,hourDevAcks,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
@@ -730,6 +734,14 @@ function applySnapshot(json){
       if(s.status==='pending')return true; // sin resolver: nunca purgar por edad
       if(_pendSuggIds[s.id])return true;   // referenciada por notif activa
       return Math.max(s._ts||0,s.suggestedTs||0)>_suggCut;
+    });
+    // Catálogo maestro de productos: tombstones se conservan (impiden resurrección por
+    // merge); poda determinística de bajas con más de 90 días — converge entre clientes
+    productCatalog=Array.isArray(d.productCatalog)?d.productCatalog:[];
+    var _pcCut=Date.now()-90*24*60*60*1000;
+    productCatalog=productCatalog.filter(function(p){
+      if(!p._removed)return true;
+      return (p._removedTs||0)>=_pcCut;
     });
     stdSecNeeds=d.stdSecNeeds||[];
     // Retención: necesidades de estándar secundario cerradas o eliminadas (tombstone)
@@ -921,7 +933,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082502; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082503; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -2353,6 +2365,8 @@ function selectTipoPill(val){
     b.style.borderColor=active?b.dataset.color:'var(--border)';
     b.style.fontWeight=active?'700':'400';
   });
+  // El autocompletado del campo Producto sigue a la familia del tipo (PT/EE/Val ↔ MP)
+  if(typeof _catSyncDatalist==='function')_catSyncDatalist();
 }
 function renderTipoPillsHtml(currentTipo){
   var html='<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">';
@@ -6807,6 +6821,79 @@ function confirmSuggestion(id){
   openNewTaskFromSuggestion(id);
 }
 
+// ── CATÁLOGO MAESTRO DE PRODUCTOS ──
+// PT/EE/Val se nombran desde los productos terminados; MP desde las materias primas.
+// Limp/IL/Otros y tipos personalizados siguen con texto libre.
+function catKindForTipo(tipo){
+  if(tipo==='PT'||tipo==='EE'||tipo==='Val')return 'PT';
+  if(tipo==='MP')return 'MP';
+  return null;
+}
+function catKindLabel(kind){return kind==='PT'?'productos terminados':'materias primas';}
+function activeCatalog(kind){
+  return productCatalog.filter(function(p){return !p._removed&&(!kind||p.kind===kind);})
+    .sort(function(a,b){return (a.name||'').localeCompare(b.name||'','es',{sensitivity:'base'});});
+}
+function _catNorm(s){return (s||'').trim().toLowerCase().replace(/\s+/g,' ');}
+function catFindByName(kind,name){
+  var n=_catNorm(name);
+  if(!n)return null;
+  return activeCatalog(kind).find(function(p){return _catNorm(p.name)===n;})||null;
+}
+// Alta al catálogo (solo supervisor). Devuelve la entrada (existente si ya estaba).
+function addCatalogProduct(kind,name,silent){
+  if(!isSupRole()){alert('Solo el Supervisor administra el catálogo de productos.');return null;}
+  var nm=(name||'').trim().replace(/\s+/g,' ');
+  if(!nm)return null;
+  var ex=catFindByName(kind,nm);
+  if(ex)return ex;
+  var p={id:'pc'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),name:nm,kind:kind,_ts:Date.now()};
+  productCatalog.push(p);
+  auditLog('CREATE','CATALOG',p.id,{description:'Alta en catálogo de '+catKindLabel(kind)+': '+nm,kind:kind,name:nm},'');
+  if(!silent)showToast('✓ «'+nm+'» agregado al catálogo','success');
+  return p;
+}
+// Mejor candidato del catálogo para un nombre no catalogado (rectificación asistida).
+// Determinístico y conservador: contención («Suero fisiológico» dentro de «Suero
+// fisiológico 100 mL», «Ranical» dentro de «Hisopado Ranical») o palabras compartidas.
+function _catSuggestFor(kind,name){
+  // Además de _normProd, separa dígitos de letras («500mg» ≡ «500 mg») para el matching
+  function _cmp(s){return _normProd(s).replace(/(\d)([a-z])/g,'$1 $2').replace(/([a-z])(\d)/g,'$1 $2').replace(/\s+/g,' ');}
+  var n=_cmp(name);
+  if(!n)return null;
+  var best=null,bestScore=0;
+  activeCatalog(kind).forEach(function(p){
+    var c=_cmp(p.name);
+    if(!c)return;
+    var score=0;
+    if(c===n)score=100;
+    else if(n.indexOf(c)>=0)score=80+Math.min(c.length,15);      // catálogo contenido en el nombre viejo
+    else if(c.indexOf(n)>=0)score=70+Math.min(n.length,15);      // nombre viejo contenido en el catálogo
+    else{
+      var wa=n.split(' '),wb=c.split(' ');
+      var shared=wa.filter(function(w){return w.length>2&&wb.indexOf(w)>=0;}).length;
+      if(shared)score=shared*10+((shared===wb.length||shared===wa.length)?15:0);
+    }
+    if(score>bestScore){bestScore=score;best=p;}
+  });
+  return bestScore>=35?{entry:best,score:bestScore}:null;
+}
+// Datalists de autocompletado para el campo Producto del modal (una por familia)
+function _catDatalistsHtml(){
+  return '<datalist id="pc-dl-PT">'+activeCatalog('PT').map(function(p){return '<option value="'+escH(p.name)+'">';}).join('')+'</datalist>'
+    +'<datalist id="pc-dl-MP">'+activeCatalog('MP').map(function(p){return '<option value="'+escH(p.name)+'">';}).join('')+'</datalist>';
+}
+// Ajusta el autocompletado del campo Producto según el tipo elegido (onchange de f-tipo)
+function _catSyncDatalist(){
+  var tipoEl=document.getElementById('f-tipo'),prodEl=document.getElementById('f-prod');
+  if(!tipoEl||!prodEl)return;
+  var k=catKindForTipo(tipoEl.value);
+  // Limp: los productos terminados se sugieren como ayuda (la limpieza es de un producto)
+  var l=k?('pc-dl-'+k):(tipoEl.value==='Limp'?'pc-dl-PT':null);
+  if(l)prodEl.setAttribute('list',l);
+  else prodEl.removeAttribute('list');
+}
+
 // ── DESARROLLO DE ESTÁNDAR SECUNDARIO (MP activas) ──
 // Normalización para matching de nombres libres: minúsculas, sin acentos, sin
 // puntuación. LAXO a propósito: un falso positivo se descarta con un clic; un
@@ -7436,6 +7523,12 @@ function mergeSnapshot(local, remote) {
     (R.stdSecNeeds||[]).forEach(function(n){ssnMap[n.id]=n;});
     (L.stdSecNeeds||[]).forEach(function(n){var rn=ssnMap[n.id];if(!rn||(n._ts||0)>(rn._ts||0))ssnMap[n.id]=n;});
     merged.stdSecNeeds=Object.values(ssnMap);
+
+    // ── Catálogo maestro de productos: merge por id, gana _ts (tombstones incluidos) ──
+    var pcMap={};
+    (R.productCatalog||[]).forEach(function(p){pcMap[p.id]=p;});
+    (L.productCatalog||[]).forEach(function(p){var rp=pcMap[p.id];if(!rp||(p._ts||0)>(rp._ts||0))pcMap[p.id]=p;});
+    merged.productCatalog=Object.values(pcMap);
 
     // ── Declaraciones de jornada y desvíos aceptados: por analista|día, gana _ts ──
     ['dayDeclarations','hourDevAcks'].forEach(function(key){
@@ -11058,20 +11151,485 @@ function renderAdminModule(){
   // Auditor: Usuarios (solo lectura, el sweep quita los controles) + Audit Trail.
   // Laboratorios y Sistema quedan fuera: tokens de sync y reinicio de datos.
   if(isAuditorRole()){
-    if(window.adminTab!=='usuarios'&&window.adminTab!=='audit')window.adminTab='audit';
+    if(['usuarios','audit','productos'].indexOf(window.adminTab)<0)window.adminTab='audit';
     return '<div class="tab-bar">'
       +_at('usuarios','👥 Usuarios','Usuarios del sistema (solo consulta)')
+      +_at('productos','📦 Productos','Catálogo maestro de productos (solo consulta)')
       +_at('audit','🔍 Audit Trail','Registro de todas las acciones del sistema')
       +'</div>'
-      +(window.adminTab==='audit'?renderAuditTrail():renderAdmin());
+      +(window.adminTab==='audit'?renderAuditTrail():window.adminTab==='productos'?renderProductCatalogTab():renderAdmin());
   }
   var tb='<div class="tab-bar">'
     +_at('usuarios','👥 Usuarios','Alta, edición, roles, contraseñas y colores de los usuarios')
+    +_at('productos','📦 Productos','Catálogo maestro de productos terminados y materias primas, y rectificación de nombres')
     +_at('labs','🏭 Laboratorios','Sincronización GitHub, laboratorios internos y externos, limpieza inter-lab')
     +_at('sistema','⚙ Sistema','Guía de usuario, tipos de muestra y reinicio de datos')
     +_at('audit','🔍 Audit Trail','Registro de todas las acciones del sistema')
     +'</div>';
-  return tb+(window.adminTab==='audit'?renderAuditTrail():renderAdmin());
+  return tb+(window.adminTab==='audit'?renderAuditTrail():window.adminTab==='productos'?renderProductCatalogTab():renderAdmin());
+}
+
+// ── ADMIN → PRODUCTOS: catálogo maestro + rectificación de nombres ──
+function renderProductCatalogTab(){
+  if(!canViewSup())return '<div class="empty">Acceso restringido</div>';
+  var isSup=isSupRole();
+  var q=_catNorm(window._pcSearch||'');
+  // Uso por nombre normalizado (análisis activos, cualquier estado)
+  var useCount={};
+  activeTasks().forEach(function(t){
+    var k=catKindForTipo(t.tipo);
+    if(!k)return;
+    var key=k+'|'+_catNorm(t.producto);
+    useCount[key]=(useCount[key]||0)+1;
+  });
+  window._pcRows=[];
+  function _section(kind,icon,label){
+    var list=activeCatalog(kind).filter(function(p){return !q||_catNorm(p.name).indexOf(q)>=0;});
+    var h='<div style="flex:1;min-width:280px">'
+      +'<div class="sec" style="display:flex;align-items:center;gap:6px">'+icon+' '+label+' <span style="font-size:11px;color:var(--text3);font-weight:400">('+list.length+')</span>'
+      +(isSup&&list.length?'<button class="btn sm" style="margin-left:auto;font-size:10px;padding:2px 7px;color:var(--red)" title="Vaciar esta familia del catálogo para sustituirla por un listado nuevo (los análisis no se modifican)" onclick="catClearKind(\''+kind+'\')">🗑 Vaciar</button>':'')
+      +'</div>'
+      +'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:6px 10px;max-height:420px;overflow:auto">';
+    if(!list.length)h+='<div style="font-size:12px;color:var(--text3);padding:8px 0">Sin productos'+(q?' que coincidan con la búsqueda':'')+'.</div>';
+    list.forEach(function(p){
+      var i=window._pcRows.length;window._pcRows.push(p.id);
+      var uc=useCount[kind+'|'+_catNorm(p.name)]||0;
+      h+='<div style="display:flex;align-items:center;gap:6px;padding:4px 2px;border-bottom:1px solid var(--border);font-size:12px">'
+        +(isSup?'<input type="checkbox" onchange="_pcSelToggle('+i+')"'+((window._pcSel||{})[p.id]?' checked':'')+' title="Seleccionar para unificar" style="width:13px;height:13px;flex-shrink:0">':'')
+        +'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(p.name)+'</span>'
+        +(uc?'<span class="u-xs3" style="flex-shrink:0" title="Análisis activos con este producto">'+uc+' uso'+(uc>1?'s':'')+'</span>':'')
+        +(isSup?'<button class="btn sm" style="font-size:10px;padding:2px 6px;flex-shrink:0" title="Renombrar (ofrece rectificar los análisis existentes)" onclick="catRenameEntry('+i+')">✎</button>'
+          +'<button class="btn sm" style="font-size:10px;padding:2px 6px;color:var(--red);flex-shrink:0" title="Dar de baja del catálogo" onclick="catRemoveEntry('+i+')">🗑</button>':'')
+        +'</div>';
+    });
+    return h+'</div></div>';
+  }
+  // Nombres en uso NO catalogados (rectificación) — agrupados por nombre normalizado y familia
+  var rect={};
+  activeTasks().forEach(function(t){
+    var k=catKindForTipo(t.tipo);
+    if(!k||catFindByName(k,t.producto))return;
+    var key=k+'|'+_catNorm(t.producto);
+    if(!rect[key])rect[key]={kind:k,name:(t.producto||'').trim(),count:0};
+    rect[key].count++;
+  });
+  window._rectRows=Object.values(rect).sort(function(a,b){return b.count-a.count||a.name.localeCompare(b.name,'es');});
+  var rectHtml='';
+  if(window._rectRows.length){
+    // Rectificación ASISTIDA: cada fila arranca con el mejor candidato del catálogo ya
+    // elegido (contención/palabras compartidas); un solo botón aplica todas las elegidas
+    var _nSug=0;
+    var _rowsHtml=window._rectRows.map(function(r,i){
+      var sug=isSup?_catSuggestFor(r.kind,r.name):null;
+      if(sug)_nSug++;
+      var opts=activeCatalog(r.kind).map(function(p){
+        return '<option value="'+p.id+'"'+(sug&&sug.entry.id===p.id?' selected':'')+'>'+escH(p.name)+'</option>';
+      }).join('');
+      return '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--amber-bg);border-radius:var(--radius);margin-bottom:5px;font-size:12px;flex-wrap:wrap">'
+        +'<b style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--amber-text)">'+escH(r.name)+'</b>'
+        +'<span class="u-xs3" style="flex-shrink:0">'+(r.kind==='PT'?'PT/EE/Val':'MP')+' · '+r.count+' lote'+(r.count>1?'s':'')+'</span>'
+        +(sug?'<span style="font-size:9px;font-weight:700;background:#d1fae5;color:#065f46;border-radius:8px;padding:1px 7px;flex-shrink:0" title="Destino propuesto automáticamente por similitud — revisalo y ajustá si hace falta">✦ sugerido</span>':'')
+        +(isSup?'<span style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap">'
+          +'<select id="rect-sel-'+i+'" style="max-width:240px;padding:4px 8px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)"><option value="">— elegir producto del catálogo —</option>'+opts+'</select>'
+          +'<button class="btn sm pri" style="font-size:11px" onclick="applyRectify('+i+')">→ Rectificar</button>'
+          +'<button class="btn sm" style="font-size:11px" title="Agregar este nombre al catálogo tal cual está" onclick="catAddAsIs('+i+')">➕ Alta tal cual</button>'
+          +'</span>':'')
+        +'</div>';
+    }).join('');
+    rectHtml='<div class="sec" style="margin-top:20px">🛠 Rectificación de nombres no catalogados <span style="font-size:11px;color:var(--amber-text);font-weight:400">('+window._rectRows.length+')</span></div>'
+      +'<div style="font-size:12px;color:var(--text2);margin-bottom:8px">Análisis ya cargados cuyo nombre no está en el catálogo. Cada fila trae el <b>destino propuesto</b> ya elegido (✦) cuando hay un candidato claro — revisá, ajustá lo que haga falta y aplicá <b>todo junto</b> con un clic; se renombran todos los lotes de cada nombre <b>sin importar ni modificar su estado</b>. Las filas sin propuesta se resuelven a mano o con «Alta tal cual».</div>'
+      +(isSup&&window._rectRows.length>1?'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">'
+        +'<button class="btn pri" onclick="applyRectifyAll()">✔ Aplicar todas las elegidas</button>'
+        +'<span style="font-size:11px;color:var(--text2)">'+_nSug+' de '+window._rectRows.length+' con destino propuesto — el resumen se confirma antes de aplicar</span>'
+        +'</div>':'')
+      +_rowsHtml;
+  }
+  // Corrección individual: buscar cualquier análisis (todo tipo y estado) y corregir
+  // producto/tipo/lote juntos — para datos viejos con información mezclada en el nombre
+  var fixQ=_catNorm(window._fixSearch||'');
+  var fixHtml='<div class="sec" style="margin-top:20px">✎ Corrección individual de análisis</div>'
+    +'<div style="font-size:12px;color:var(--text2);margin-bottom:8px">Para datos antiguos con información mezclada en el nombre (p. ej. «Hisopado Ranical» → producto <b>Ranical</b>, tipo <b>Limp</b>, lote «X hisopado»): buscá el análisis y corregí <b>producto, tipo y lote</b> juntos — vale para cualquier tipo y cualquier estado, y el estado no se modifica.</div>'
+    +'<div style="margin-bottom:8px;max-width:320px"><input type="text" id="fix-search" placeholder="Buscar por producto o lote…" value="'+escH(window._fixSearch||'')+'" oninput="_srch(\'_fixSearch\',this.value,\'fix-search\')" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text);box-sizing:border-box"></div>';
+  if(fixQ.length>=2){
+    var fixHits=activeTasks().filter(function(t){
+      return _catNorm(t.producto).indexOf(fixQ)>=0||_catNorm(t.lote).indexOf(fixQ)>=0;
+    }).slice(0,30);
+    fixHtml+=fixHits.length?fixHits.map(function(t){
+      return '<div style="display:flex;align-items:center;gap:8px;padding:5px 10px;background:var(--bg);border-radius:var(--radius);margin-bottom:4px;font-size:12px;flex-wrap:wrap">'
+        +'<b style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+'</b>'
+        +'<span class="u-mono" style="font-size:11px;color:var(--text3)">'+escH(t.lote)+'</span>'
+        +sampleTypeBadge(t.tipo)
+        +'<span class="pill '+t.status+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
+        +(isSup?'<button class="btn sm" style="margin-left:auto;font-size:11px" onclick="openFixIdModal('+t.id+')">✎ Corregir</button>':'')
+        +'</div>';
+    }).join(''):'<div style="font-size:12px;color:var(--text3);padding:6px 0">Sin análisis que coincidan.</div>';
+  } else {
+    fixHtml+='<div style="font-size:11px;color:var(--text3)">Escribí al menos 2 caracteres para buscar.</div>';
+  }
+  return '<div class="admin-wrap">'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><h4 style="margin-bottom:0">📦 Catálogo maestro de productos</h4></div>'
+    +'<div class="sub">Los análisis <b>PT / EE / Val</b> se nombran desde los productos terminados y las <b>MP</b> desde las materias primas (los demás tipos siguen con texto libre). El campo Producto autocompleta desde este catálogo y no admite nombres fuera de la lista. Marcá con la casilla productos <b>analíticamente equivalentes</b> (p. ej. presentaciones que solo difieren en volumen) para <b>⛓ unificarlos</b>; con <b>🗑 Vaciar</b> podés sustituir el listado completo por uno nuevo y rectificar lo existente contra él.</div>'
+    +(isSup?'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">'
+      +'<input type="text" id="pc-new-name" placeholder="Nombre del producto…" style="flex:1;min-width:200px;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
+      +'<select id="pc-new-kind" style="padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)"><option value="PT">Producto terminado</option><option value="MP">Materia prima</option></select>'
+      +'<button class="btn pri" onclick="catAddFromAdmin()">+ Agregar</button>'
+      +'</div>'
+      +'<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--blue);padding:4px 0">📋 Cargar lista desde Excel</summary>'
+      +'<div style="background:var(--bg);border-radius:var(--radius);padding:10px 12px;margin-top:6px">'
+      +'<div style="font-size:11px;color:var(--text2);margin-bottom:6px">Pegá una columna con los <b>nombres</b> (una por línea). Opcional: segunda columna con la familia (<b>PT</b> o <b>MP</b>) separada por tabulación — si falta, se usa la familia elegida acá. Los que ya existen se omiten.</div>'
+      +'<textarea id="pc-paste" rows="6" placeholder="Amoxicilina 500 mg\tPT&#10;Etilendiamina\tMP&#10;…" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;font-family:var(--mono);resize:vertical;background:var(--surface);color:var(--text);box-sizing:border-box"></textarea>'
+      +'<div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">'
+      +'<label style="font-size:12px">Familia por defecto:</label>'
+      +'<select id="pc-paste-kind" style="padding:5px 9px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)"><option value="PT">Producto terminado</option><option value="MP">Materia prima</option></select>'
+      +'<button class="btn pri" onclick="catBulkPaste()">Cargar al catálogo</button>'
+      +'</div></div></details>':'')
+    +'<div style="margin-bottom:10px;max-width:320px"><input type="text" id="pc-search" placeholder="Buscar en el catálogo…" value="'+escH(window._pcSearch||'')+'" oninput="_srch(\'_pcSearch\',this.value,\'pc-search\')" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text);box-sizing:border-box"></div>'
+    +(function(){
+      // Barra de unificación: productos analíticamente equivalentes marcados con la casilla
+      if(!isSup)return'';
+      var sels=_pcSelected();
+      if(!sels.length)return'';
+      var sameKind=sels.every(function(p){return p.kind===sels[0].kind;});
+      return '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--blue-bg);border-radius:var(--radius);padding:7px 12px;margin-bottom:10px;font-size:12px;color:var(--blue-text)">'
+        +'<b>'+sels.length+' seleccionado'+(sels.length>1?'s':'')+'</b>'
+        +'<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+sels.map(function(p){return escH(p.name);}).join(' · ')+'</span>'
+        +'<span style="margin-left:auto;display:flex;gap:6px">'
+        +(sels.length>=2&&sameKind?'<button class="btn sm pri" style="font-size:11px" onclick="openUnifyModal()">⛓ Unificar</button>':(sels.length>=2?'<span style="font-size:11px">solo misma familia</span>':''))
+        +'<button class="btn sm" style="font-size:11px" onclick="_pcSelClear()">✕ Limpiar</button>'
+        +'</span></div>';
+    })()
+    +'<div style="display:flex;gap:14px;flex-wrap:wrap">'
+    +_section('PT','🏷','Productos terminados')
+    +_section('MP','🧪','Materias primas')
+    +'</div>'
+    +rectHtml
+    +fixHtml
+    +'</div>';
+}
+// Modal de corrección de identificación (producto/tipo/lote) — datos antiguos con
+// información mezclada. Cualquier tipo y estado; el estado NO se modifica.
+function openFixIdModal(taskId){
+  if(!isSupRole()){alert('Solo el Supervisor puede corregir la identificación de un análisis.');return;}
+  var t=tasks.find(function(x){return x.id===taskId;});
+  if(!t)return;
+  if(document.getElementById('fixid-modal'))return;
+  // Datalist del campo producto: estricto para PT/EE/Val/MP; para Limp los productos
+  // terminados se ofrecen como AYUDA (una limpieza es de un producto) sin ser estrictos
+  function _fixList(tipo){var k=catKindForTipo(tipo);return k?('pc-dl-'+k):(tipo==='Limp'?'pc-dl-PT':'');}
+  var tipoOpts=SAMPLE_TYPES.map(function(st){
+    return '<option value="'+st.id+'"'+(t.tipo===st.id?' selected':'')+'>'+escH(st.label)+(st.title&&st.title!==st.label?' — '+escH(st.title):'')+'</option>';
+  }).join('');
+  var div=document.createElement('div');
+  div.innerHTML='<div class="modal-overlay" style="z-index:600" id="fixid-modal">'
+    +'<div class="modal" style="width:min(440px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">Corregir identificación</h3>'
+    +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:var(--text2);flex-wrap:wrap">'
+    +'<b>'+escH(t.producto)+'</b><span class="u-mono">'+escH(t.lote)+'</span>'+sampleTypeBadge(t.tipo)
+    +'<span class="pill '+t.status+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
+    +'</div>'
+    +'<div style="background:var(--blue-bg);border-radius:var(--radius);padding:7px 10px;font-size:11px;color:var(--blue-text);margin-bottom:12px">Corrección de datos: el estado, las horas y las fechas no se modifican. Queda registrada en el Audit Trail.</div>'
+    +'<div class="frow"><label>Producto *</label><input type="text" id="fx-prod" value="'+escH(t.producto||'')+'"'+(_fixList(t.tipo)?' list="'+_fixList(t.tipo)+'"':'')+' style="width:100%"></div>'
+    +'<div class="frow"><label>Tipo *</label><select id="fx-tipo" onchange="var l=(function(v){var k=catKindForTipo(v);return k?(\'pc-dl-\'+k):(v===\'Limp\'?\'pc-dl-PT\':\'\');})(this.value);var p=document.getElementById(\'fx-prod\');if(l)p.setAttribute(\'list\',l);else p.removeAttribute(\'list\');" style="width:100%">'+tipoOpts+'</select></div>'
+    +'<div class="frow"><label>Lote *</label><input type="text" id="fx-lote" value="'+escH(t.lote||'')+'" style="width:100%"></div>'
+    +_catDatalistsHtml()
+    +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">'
+    +'<button class="btn" data-esc onclick="document.getElementById(\'fixid-modal\').remove()">Cancelar</button>'
+    +'<button class="btn pri" onclick="applyFixId('+t.id+')">💾 Guardar corrección</button>'
+    +'</div></div></div>';
+  document.body.appendChild(div);
+}
+function applyFixId(taskId){
+  if(!isSupRole()){alert('Solo el Supervisor puede corregir la identificación de un análisis.');return;}
+  var t=tasks.find(function(x){return x.id===taskId;});
+  if(!t)return;
+  var prod=((document.getElementById('fx-prod')||{}).value||'').trim().replace(/\s+/g,' ');
+  var tipo=((document.getElementById('fx-tipo')||{}).value||'').trim();
+  var lote=((document.getElementById('fx-lote')||{}).value||'').trim();
+  if(!prod||!tipo||!lote){alert('Producto, tipo y lote son obligatorios.');return;}
+  // Catálogo estricto para las familias catalogadas (con alta en el acto del supervisor)
+  var k=catKindForTipo(tipo);
+  if(k){
+    var m=catFindByName(k,prod);
+    if(!m){
+      if(!confirm('«'+prod+'» no está en el catálogo de '+catKindLabel(k)+'.\n\n¿Agregarlo al catálogo y continuar?'))return;
+      m=addCatalogProduct(k,prod,true);
+      if(!m)return;
+    }
+    prod=m.name;
+  } else if(tipo==='Limp'){
+    // Limpieza: texto libre, pero si coincide con un producto terminado se usa la
+    // grafía canónica del catálogo (unifica nombres para los indicadores)
+    var mLimp=catFindByName('PT',prod);
+    if(mLimp)prod=mLimp.name;
+  }
+  if(prod===t.producto&&tipo===t.tipo&&lote===t.lote){showToast('Sin cambios','info');return;}
+  // Aviso de duplicado producto+lote (no bloquea: los datos viejos pueden requerirlo)
+  var dup=activeTasks().some(function(x){
+    return x.id!==t.id&&_catNorm(x.producto)===_catNorm(prod)&&_catNorm(x.lote)===_catNorm(lote);
+  });
+  if(dup&&!confirm('Ya existe otro análisis con producto «'+prod+'» y lote «'+lote+'».\n\n¿Guardar igual?'))return;
+  var old={producto:t.producto,tipo:t.tipo,lote:t.lote};
+  t.producto=prod;t.tipo=tipo;t.lote=lote;
+  t._ts=Date.now();
+  if(t._integrityHash)stampIntegrity(t);
+  auditLog('EDIT','TASK',t.id,{field:'identificacion',
+    oldVal:old.producto+' | '+old.tipo+' | '+old.lote,
+    newVal:prod+' | '+tipo+' | '+lote,
+    description:'Corrección de identificación (sin cambio de estado): «'+old.producto+' / '+old.lote+' / '+old.tipo+'» → «'+prod+' / '+lote+' / '+tipo+'»'},'');
+  var m2=document.getElementById('fixid-modal');if(m2)m2.remove();
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow fixId:',e);});
+  showToast('✓ Identificación corregida','success');
+}
+function catAddFromAdmin(){
+  if(!isSupRole()){alert('Solo el Supervisor administra el catálogo.');return;}
+  var nm=((document.getElementById('pc-new-name')||{}).value||'').trim();
+  var kind=((document.getElementById('pc-new-kind')||{}).value||'PT');
+  if(!nm){alert('Indicá el nombre del producto.');return;}
+  if(catFindByName(kind,nm)){alert('«'+nm+'» ya está en el catálogo de '+catKindLabel(kind)+'.');return;}
+  addCatalogProduct(kind,nm,true);
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow catAdd:',e);});
+  showToast('✓ «'+nm+'» agregado','success');
+}
+function catBulkPaste(){
+  if(!isSupRole()){alert('Solo el Supervisor administra el catálogo.');return;}
+  var raw=((document.getElementById('pc-paste')||{}).value||'');
+  var defK=((document.getElementById('pc-paste-kind')||{}).value||'PT');
+  var lines=raw.split(/\r?\n/).map(function(l){return l.trim();}).filter(Boolean);
+  if(!lines.length){alert('Pegá al menos una línea con un nombre de producto.');return;}
+  var adds=[],dups=0,bad=[],seen={};
+  lines.forEach(function(l){
+    var parts=l.split(/\t|;/).map(function(x){return x.trim();});
+    var name=(parts[0]||'').replace(/\s+/g,' ');
+    var kRaw=(parts[1]||'').toLowerCase();
+    var kind=kRaw?(/^pt$|termin/.test(kRaw)?'PT':(/^mp$|prima/.test(kRaw)?'MP':null)):defK;
+    if(!name)return;
+    if(!kind){bad.push(l);return;}
+    var key=kind+'|'+_catNorm(name);
+    if(seen[key])return;
+    seen[key]=1;
+    if(catFindByName(kind,name)){dups++;return;}
+    adds.push({kind:kind,name:name});
+  });
+  if(bad.length){alert('Filas con familia no reconocida (usar PT o MP en la segunda columna):\n\n'+bad.slice(0,8).join('\n')+(bad.length>8?'\n… y '+(bad.length-8)+' más':''));return;}
+  if(!adds.length){alert('Nada nuevo para agregar'+(dups?' ('+dups+' ya estaban en el catálogo)':'')+'.');return;}
+  var byK={PT:0,MP:0};adds.forEach(function(a){byK[a.kind]++;});
+  if(!confirm('Se agregarán '+adds.length+' producto(s) al catálogo: '+byK.PT+' terminado(s) y '+byK.MP+' materia(s) prima(s)'+(dups?' ('+dups+' ya existían y se omiten)':'')+'.\n\n¿Continuar?'))return;
+  adds.forEach(function(a){
+    productCatalog.push({id:'pc'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),name:a.name,kind:a.kind,_ts:Date.now()});
+  });
+  auditLog('CREATE','CATALOG','bulk',{description:'Carga masiva al catálogo: '+adds.length+' producto(s) ('+byK.PT+' PT, '+byK.MP+' MP)',count:adds.length},'');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow catBulk:',e);});
+  showToast('✓ '+adds.length+' producto(s) agregados al catálogo','success');
+}
+function catRenameEntry(i){
+  if(!isSupRole()){alert('Solo el Supervisor administra el catálogo.');return;}
+  var id=(window._pcRows||[])[i];
+  var p=productCatalog.find(function(x){return x.id===id&&!x._removed;});
+  if(!p)return;
+  var nv=prompt('Nuevo nombre para «'+p.name+'»:',p.name);
+  if(nv===null)return;
+  nv=nv.trim().replace(/\s+/g,' ');
+  if(!nv||nv===p.name)return;
+  var clash=catFindByName(p.kind,nv);
+  if(clash&&clash.id!==p.id){alert('«'+nv+'» ya existe en el catálogo de '+catKindLabel(p.kind)+'.');return;}
+  var old=p.name;
+  p.name=nv;p._ts=Date.now();
+  auditLog('EDIT','CATALOG',p.id,{field:'name',oldVal:old,newVal:nv,description:'Renombre en catálogo: «'+old+'» → «'+nv+'»'},'');
+  var norm=_catNorm(old);
+  var cnt=activeTasks().filter(function(t){return catKindForTipo(t.tipo)===p.kind&&_catNorm(t.producto)===norm;}).length;
+  if(cnt&&confirm('Hay '+cnt+' análisis con el nombre anterior «'+old+'». ¿Rectificarlos ahora a «'+nv+'»? (no cambia su estado)')){
+    rectifyProductName(p.kind,old,p,true);
+    return;
+  }
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow catRename:',e);});
+}
+function catRemoveEntry(i){
+  if(!isSupRole()){alert('Solo el Supervisor administra el catálogo.');return;}
+  var id=(window._pcRows||[])[i];
+  var p=productCatalog.find(function(x){return x.id===id&&!x._removed;});
+  if(!p)return;
+  var norm=_catNorm(p.name);
+  var cnt=activeTasks().filter(function(t){return catKindForTipo(t.tipo)===p.kind&&_catNorm(t.producto)===norm;}).length;
+  if(!confirm('¿Dar de baja «'+p.name+'» del catálogo de '+catKindLabel(p.kind)+'?'+(cnt?'\n\nHay '+cnt+' análisis con este nombre: conservan su nombre y aparecerán como "no catalogados" en la rectificación.':'')))return;
+  p._removed=true;p._removedTs=Date.now();p._ts=Date.now();
+  auditLog('DELETE','CATALOG',p.id,{description:'Baja del catálogo: '+p.name+' ('+catKindLabel(p.kind)+')',name:p.name,kind:p.kind},'');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow catRemove:',e);});
+}
+function catAddAsIs(i){
+  if(!isSupRole()){alert('Solo el Supervisor administra el catálogo.');return;}
+  var r=(window._rectRows||[])[i];
+  if(!r)return;
+  if(!addCatalogProduct(r.kind,r.name,true))return;
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow catAddAsIs:',e);});
+  showToast('✓ «'+r.name+'» agregado al catálogo','success');
+}
+function applyRectify(i){
+  if(!isSupRole()){alert('Solo el Supervisor puede rectificar nombres.');return;}
+  var r=(window._rectRows||[])[i];
+  if(!r)return;
+  var sel=document.getElementById('rect-sel-'+i);
+  var entry=productCatalog.find(function(p){return p.id===(sel?sel.value:'')&&!p._removed;});
+  if(!entry){alert('Elegí el producto del catálogo al que rectificar.');return;}
+  rectifyProductName(r.kind,r.name,entry,false);
+}
+// Aplica en LOTE todas las filas de rectificación que tienen destino elegido (las
+// sugerencias vienen preseleccionadas): un solo confirm con el resumen y un solo guardado
+function applyRectifyAll(){
+  if(!isSupRole()){alert('Solo el Supervisor puede rectificar nombres.');return;}
+  var rows=window._rectRows||[];
+  var todo=[];
+  rows.forEach(function(r,i){
+    var sel=document.getElementById('rect-sel-'+i);
+    var entry=productCatalog.find(function(p){return p.id===(sel?sel.value:'')&&!p._removed;});
+    if(entry)todo.push({r:r,entry:entry});
+  });
+  if(!todo.length){alert('Ninguna fila tiene destino elegido. Elegí el producto del catálogo en cada fila (o usá las sugerencias ✦).');return;}
+  var totLots=todo.reduce(function(s,x){return s+x.r.count;},0);
+  if(!confirm('Se rectificarán '+todo.length+' nombre(s) — '+totLots+' lote(s) en total:\n\n'
+    +todo.slice(0,14).map(function(x){return '· «'+x.r.name+'» → «'+x.entry.name+'»';}).join('\n')
+    +(todo.length>14?'\n… y '+(todo.length-14)+' más':'')
+    +'\n\nNo se modifica ningún estado. Queda en el Audit Trail.\n\n¿Continuar?'))return;
+  var tot=0;
+  todo.forEach(function(x){tot+=rectifyProductName(x.r.kind,x.r.name,x.entry,true,true)||0;});
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow rectifyAll:',e);});
+  showToast('✓ '+todo.length+' nombre(s) rectificados · '+tot+' análisis','success');
+}
+// Renombra TODOS los análisis activos con el nombre viejo (misma familia) al nombre del
+// catálogo — corrección de dato puro: cualquier estado, sin modificarlo; re-estampa el
+// hash de integridad donde exista; alcanza también necesidades de estándar abiertas y
+// sugerencias pendientes con el mismo nombre. Los lotes ya archivados no se tocan.
+function rectifyProductName(kind,oldName,entry,skipConfirm,deferPersist){
+  if(!isSupRole()){alert('Solo el Supervisor puede rectificar nombres.');return;}
+  var norm=_catNorm(oldName);
+  var nTasks=activeTasks().filter(function(t){return catKindForTipo(t.tipo)===kind&&_catNorm(t.producto)===norm;});
+  if(!nTasks.length&&skipConfirm!==true){showToast('No hay análisis con ese nombre','info');return;}
+  if(skipConfirm!==true){
+    if(!confirm('Rectificar «'+oldName+'» → «'+entry.name+'»\n\nAlcanza '+nTasks.length+' análisis (solo cambia el nombre: se conservan estados, lotes, horas y fechas) más las necesidades de estándar y sugerencias pendientes con el mismo nombre. Queda en el Audit Trail.\n\n¿Continuar?'))return;
+  }
+  nTasks.forEach(function(t){
+    t.producto=entry.name;
+    t._ts=Date.now();
+    if(t._integrityHash)stampIntegrity(t);
+  });
+  var nNeeds=0,nSuggs=0;
+  stdSecNeeds.forEach(function(n){
+    if(n._removed||n.status==='cerrado')return;
+    if(_catNorm(n.producto)===norm){n.producto=entry.name;n._ts=Date.now();nNeeds++;}
+  });
+  productSuggestions.forEach(function(s){
+    if(s.status!=='pending')return;
+    if(_catNorm(s.producto)===norm){s.producto=entry.name;s._ts=Date.now();nSuggs++;}
+  });
+  auditLog('EDIT','CATALOG',entry.id,{field:'rectify',oldVal:oldName,newVal:entry.name,kind:kind,
+    tasks:nTasks.map(function(t){return t.id;}),needs:nNeeds,suggestions:nSuggs,
+    description:'Rectificación de nombre de producto: «'+oldName+'» → «'+entry.name+'» ('+nTasks.length+' análisis'+(nNeeds?', '+nNeeds+' necesidad(es) de estándar':'')+(nSuggs?', '+nSuggs+' sugerencia(s)':'')+')'},'');
+  if(deferPersist===true)return nTasks.length; // el llamador (unificación) guarda una sola vez
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow rectify:',e);});
+  showToast('✓ '+nTasks.length+' análisis rectificado(s) → '+entry.name,'success');
+  return nTasks.length;
+}
+// ── Unificación de entradas del catálogo (productos analíticamente equivalentes) ──
+// P. ej. «Suero fisiológico 100 mL» + «Suero fisiológico 250 mL» → «Suero fisiológico»:
+// las entradas fusionadas se dan de baja y TODOS los análisis, necesidades de estándar
+// y sugerencias con esos nombres se rectifican al nombre unificado (sin cambiar estados).
+function _pcSelToggle(i){
+  var id=(window._pcRows||[])[i];
+  if(!id)return;
+  if(!window._pcSel)window._pcSel={};
+  if(window._pcSel[id])delete window._pcSel[id];else window._pcSel[id]=true;
+  render();
+}
+function _pcSelClear(){window._pcSel={};render();}
+function _pcSelected(){
+  var sel=window._pcSel||{};
+  return productCatalog.filter(function(p){return !p._removed&&sel[p.id];});
+}
+function openUnifyModal(){
+  if(!isSupRole()){alert('Solo el Supervisor administra el catálogo.');return;}
+  var sels=_pcSelected();
+  if(sels.length<2){alert('Marcá al menos 2 productos del catálogo para unificar.');return;}
+  if(sels.some(function(p){return p.kind!==sels[0].kind;})){alert('Solo se pueden unificar productos de la misma familia (terminados con terminados, materias primas con materias primas).');return;}
+  if(document.getElementById('unify-modal'))return;
+  var kind=sels[0].kind;
+  // Nombre propuesto: la entrada más corta suele ser el nombre "sin aclaraciones"
+  var def=sels.slice().sort(function(a,b){return a.name.length-b.name.length;})[0].name;
+  var div=document.createElement('div');
+  div.innerHTML='<div class="modal-overlay" style="z-index:600" id="unify-modal">'
+    +'<div class="modal" style="width:min(440px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">⛓ Unificar productos</h3>'
+    +'<p style="font-size:12px;color:var(--text2);margin:0 0 10px">'+catKindLabel(kind).charAt(0).toUpperCase()+catKindLabel(kind).slice(1)+' seleccionados — analíticamente equivalentes:</p>'
+    +sels.map(function(p){return '<div style="font-size:12px;padding:4px 10px;background:var(--bg);border-radius:var(--radius);margin-bottom:4px">'+escH(p.name)+'</div>';}).join('')
+    +'<div class="frow" style="margin-top:10px"><label>Nombre unificado *</label>'
+    +'<input type="text" id="un-name" list="un-dl" value="'+escH(def)+'" style="width:100%">'
+    +'<datalist id="un-dl">'+sels.map(function(p){return '<option value="'+escH(p.name)+'">';}).join('')+'</datalist>'
+    +'<div style="font-size:11px;color:var(--text3);margin-top:4px">Puede ser uno de los seleccionados o un nombre nuevo (p. ej. sin el volumen).</div></div>'
+    +'<div style="background:var(--blue-bg);border-radius:var(--radius);padding:7px 10px;font-size:11px;color:var(--blue-text);margin-bottom:12px">Todos los análisis, necesidades de estándar y sugerencias con los nombres seleccionados pasan al nombre unificado — <b>sin importar su estado y sin modificarlo</b>. Las entradas fusionadas se dan de baja del catálogo. Queda en el Audit Trail.</div>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end">'
+    +'<button class="btn" data-esc onclick="document.getElementById(\'unify-modal\').remove()">Cancelar</button>'
+    +'<button class="btn pri" onclick="applyUnify()">⛓ Unificar</button>'
+    +'</div></div></div>';
+  document.body.appendChild(div);
+}
+function applyUnify(){
+  if(!isSupRole()){alert('Solo el Supervisor administra el catálogo.');return;}
+  var sels=_pcSelected();
+  if(sels.length<2)return;
+  var kind=sels[0].kind;
+  var nm=((document.getElementById('un-name')||{}).value||'').trim().replace(/\s+/g,' ');
+  if(!nm){alert('Indicá el nombre unificado.');return;}
+  // Destino: entrada existente con ese nombre (esté o no entre las seleccionadas);
+  // si no existe, se renombra la primera seleccionada al nombre nuevo
+  var target=catFindByName(kind,nm);
+  var totalTasks=0,merged=[];
+  if(!target){
+    target=sels[0];
+    var _oldT=target.name;
+    target.name=nm;target._ts=Date.now();
+    auditLog('EDIT','CATALOG',target.id,{field:'name',oldVal:_oldT,newVal:nm,description:'Renombre en catálogo (unificación): «'+_oldT+'» → «'+nm+'»'},'');
+    // Los análisis que usaban el nombre ANTERIOR del destino también se rectifican
+    if(_catNorm(_oldT)!==_catNorm(nm)){
+      totalTasks+=rectifyProductName(kind,_oldT,target,true,true)||0;
+      merged.push(_oldT);
+    }
+  }
+  sels.forEach(function(p){
+    if(p.id===target.id)return;
+    totalTasks+=rectifyProductName(kind,p.name,target,true,true)||0;
+    p._removed=true;p._removedTs=Date.now();p._ts=Date.now();
+    merged.push(p.name);
+  });
+  // Si el destino era una seleccionada con nombre distinto al unificado (caso raro:
+  // nm coincide con una entrada NO seleccionada), rectificar también las seleccionadas ya cubiertas arriba.
+  auditLog('EDIT','CATALOG',target.id,{field:'unify',newVal:target.name,merged:merged,tasks:totalTasks,
+    description:'Unificación de productos ('+catKindLabel(kind)+'): '+merged.map(function(n){return '«'+n+'»';}).join(' + ')+' → «'+target.name+'» ('+totalTasks+' análisis rectificados)'},'');
+  window._pcSel={};
+  var m=document.getElementById('unify-modal');if(m)m.remove();
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow unify:',e);});
+  showToast('✓ Unificados en «'+target.name+'» · '+totalTasks+' análisis rectificados','success');
+}
+// Vaciar una familia del catálogo (para sustituir el listado por uno mejor): baja lógica
+// de todas las entradas; los análisis conservan su nombre y quedan como "no catalogados"
+// para rectificarlos contra la lista nueva.
+function catClearKind(kind){
+  if(!isSupRole()){alert('Solo el Supervisor administra el catálogo.');return;}
+  var list=activeCatalog(kind);
+  if(!list.length){showToast('El catálogo de '+catKindLabel(kind)+' ya está vacío','info');return;}
+  if(!confirm('¿Vaciar el catálogo de '+catKindLabel(kind)+' ('+list.length+' entrada'+(list.length>1?'s':'')+')?\n\nLos análisis NO se modifican: conservan su nombre y van a aparecer como "no catalogados" en la rectificación, para mapearlos contra la lista nueva que cargues.\n\nQueda registrado en el Audit Trail.'))return;
+  list.forEach(function(p){p._removed=true;p._removedTs=Date.now();p._ts=Date.now();});
+  window._pcSel={};
+  auditLog('DELETE','CATALOG','bulk',{description:'Catálogo de '+catKindLabel(kind)+' vaciado ('+list.length+' entrada(s)) para sustituirlo por un listado nuevo',kind:kind,count:list.length},'');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow catClear:',e);});
+  showToast('✓ Catálogo de '+catKindLabel(kind)+' vaciado ('+list.length+')','success');
 }
 function renderAdmin(){
   // Auditor: solo la pestaña Usuarios (consulta); el resto sigue siendo sup-only
@@ -12164,7 +12722,7 @@ function renderTaskModal(){
     +(isEdit?_stdSecInfoBox(t):'')
     +'<div class="form-grid">'
     +'<div class="frow"><label>Tipo de muestra'+(t.tipo==='IL'?'':' <span style="color:var(--red)">*</span>')+'</label>'+(t.tipo==='IL'?'<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 11px;border:1px solid #1d4ed8;border-radius:20px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8">🔗 IL · Inter-laboratorio</span><input type="hidden" id="f-tipo" value="IL">':renderTipoPillsHtml(t.tipo||''))+'</div>'
-    +'<div class="frow"><label>Producto</label><input type="text" id="f-prod" value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg"></div>'
+    +'<div class="frow"><label>Producto</label><input type="text" id="f-prod"'+(function(){var k=catKindForTipo(t.tipo||'');var l=k?('pc-dl-'+k):((t.tipo||'')==='Limp'?'pc-dl-PT':'');return l?' list="'+l+'"':'';})()+' value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg">'+_catDatalistsHtml()+'</div>'
     +'<div class="frow"><label>N° de Lote</label><input type="text" id="f-lote" value="'+escH(t.lote||'')+'" placeholder="Ej: L-2024-001"></div>'
     +'<div class="frow"><label>Fecha de creación</label><input type="date" id="f-created" value="'+(t.created||today())+'" max="'+today()+'" title="No puede ser futura — si la muestra aún no ingresó, usá el estado A ingresar"></div>'
     +'<div class="frow"><label>Fecha límite de aprobación'+(isEdit&&!t.due?' <span style="color:var(--red);font-size:11px">⚠ no definida</span>':'')+'</label><input type="date" id="f-due" value="'+(t.due||'')+'" style="'+(isEdit&&!t.due?'border-color:var(--red);':'')+'">'+'</div>'
@@ -12664,6 +13222,25 @@ function confirmImport(){
         +'\n\nTipos válidos: '+tiposValidos+'.\n\nCorregí la columna "Tipo" en el archivo e importá de nuevo.';
       alert(msgTipo);
       return;
+    }
+    // ── Catálogo maestro: nombres PT/EE/Val/MP fuera del catálogo — el import es del
+    // supervisor: ofrecer alta en bloque; si declina, se cancela (criterio estricto)
+    var _pcNews={};
+    toImport.forEach(function(g){
+      var k=catKindForTipo((g.tipo||'').trim());
+      if(!k)return;
+      var m=catFindByName(k,g.producto);
+      if(m){g.producto=m.name;g.rows.forEach(function(r){r.producto=m.name;});}
+      else _pcNews[k+'|'+_catNorm(g.producto)]={kind:k,name:g.producto.trim().replace(/\s+/g,' ')};
+    });
+    var _pcNewList=Object.values(_pcNews);
+    if(_pcNewList.length){
+      var _pcMsg='Estos productos no están en el catálogo maestro:\n\n'
+        +_pcNewList.slice(0,12).map(function(x){return '· '+x.name+' ('+catKindLabel(x.kind)+')';}).join('\n')
+        +(_pcNewList.length>12?'\n… y '+(_pcNewList.length-12)+' más':'')
+        +'\n\n¿Agregarlos al catálogo y continuar con la importación?';
+      if(!confirm(_pcMsg))return;
+      _pcNewList.forEach(function(x){addCatalogProduct(x.kind,x.name,true);});
     }
     if(duplicates.length>0){
       var msg='Los siguientes registros YA EXISTEN y no seran importados (mismo Producto y Lote):\n\n'
@@ -15992,7 +16569,7 @@ function setNewSamplerAssign(samplerId){
 }
 function saveTask(){
   var _needsTerminalDialog=false,_terminalTargetStatus='',_taskAuditDone=false,_degradedFromChosen='';
-  const prod=document.getElementById('f-prod').value.trim();
+  let prod=document.getElementById('f-prod').value.trim();
   const lote=document.getElementById('f-lote').value.trim();
   if(!prod||!lote){alert('El producto y el lote son obligatorios.');return;}
   const created=document.getElementById('f-created').value;
@@ -16025,6 +16602,31 @@ function saveTask(){
   const tipo=(tipoEl?tipoEl.value.trim():'');
   // El tipo de producto (tipo de muestra: PT, MP, etc.) es obligatorio para cualquier ingreso, incluido el supervisor.
   if(!tipo){alert('El tipo de producto es obligatorio. Seleccioná un tipo de muestra.');return;}
+  // ── Catálogo maestro: PT/EE/Val nombran desde productos terminados; MP desde materias
+  // primas (estricto). Grandfathering: solo se valida si el producto o el tipo CAMBIARON —
+  // los datos históricos no catalogados no bloquean ediciones ajenas al nombre.
+  var _catKind=catKindForTipo(tipo);
+  if(_catKind){
+    var _pcChanged=!_t0edit||prod!==(_t0edit.producto||'')||tipo!==(_t0edit.tipo||'');
+    if(_pcChanged){
+      var _catMatch=catFindByName(_catKind,prod);
+      if(!_catMatch){
+        if(isSupRole()){
+          if(!confirm('«'+prod+'» no está en el catálogo de '+catKindLabel(_catKind)+'.\n\n¿Agregarlo al catálogo y continuar?'))return;
+          _catMatch=addCatalogProduct(_catKind,prod,true);
+          if(!_catMatch)return;
+        } else {
+          alert('«'+prod+'» no está en el catálogo de '+catKindLabel(_catKind)+'.\n\nElegí un producto de la lista, o pedile al supervisor que lo agregue (Administración → Productos).');
+          return;
+        }
+      }
+      prod=_catMatch.name; // nombre canónico del catálogo (unifica mayúsculas/variantes)
+    }
+  } else if(tipo==='Limp'){
+    // Limpieza: libre, pero adopta la grafía canónica si coincide con un producto terminado
+    var _mLimp=catFindByName('PT',prod);
+    if(_mLimp)prod=_mLimp.name;
+  }
   const _expectedArrivalEl=document.getElementById('f-expected-arrival');
   const _arrivalNotesEl=document.getElementById('f-arrival-notes');
   const expectedArrival=_expectedArrivalEl?_expectedArrivalEl.value:'';
