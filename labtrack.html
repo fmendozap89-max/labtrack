@@ -933,7 +933,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082601; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082602; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -6781,8 +6781,8 @@ function renderSuggestionModal(){
       +'<option value="" selected disabled hidden>Seleccionar tipo…</option>'
       +SAMPLE_TYPES.filter(function(st){return st.id!=='IL';}).map(function(st){return '<option value="'+st.id+'">'+escH(st.title)+'</option>';}).join('')
       +'</select></div>'
-    +'<div class="frow"><label>Producto *</label><input id="sug-producto" type="text" placeholder="Elegí primero el tipo y escribí para ver opciones…">'+_catDatalistsHtml()+'</div>'
-    +'<div class="frow"><label>Lote *</label><input id="sug-lote" type="text" placeholder="Número de lote / código"></div>'
+    +'<div class="frow"><label>Producto *</label><input id="sug-producto" type="text" autocomplete="off" placeholder="Elegí primero el tipo y escribí para ver opciones…">'+_catDatalistsHtml()+'</div>'
+    +'<div class="frow"><label>Lote *</label><input id="sug-lote" type="text" autocomplete="off" placeholder="Número de lote / código"></div>'
     +'<div class="frow"><label>Prioridad</label><select id="sug-priority"><option>Normal</option><option>Alta</option><option>Urgente</option></select></div>'
     +'<div class="frow"><label>F. Aprobación límite</label><input id="sug-due" type="date"></div>'
     +'<div class="frow"><label>Notas</label><textarea id="sug-notes" style="min-height:60px" placeholder="Observaciones para el supervisor…"></textarea></div>'
@@ -12741,8 +12741,8 @@ function renderTaskModal(){
     +(isEdit?_stdSecInfoBox(t):'')
     +'<div class="form-grid">'
     +'<div class="frow"><label>Tipo de muestra'+(t.tipo==='IL'?'':' <span style="color:var(--red)">*</span>')+'</label>'+(t.tipo==='IL'?'<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 11px;border:1px solid #1d4ed8;border-radius:20px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8">🔗 IL · Inter-laboratorio</span><input type="hidden" id="f-tipo" value="IL">':renderTipoPillsHtml(t.tipo||''))+'</div>'
-    +'<div class="frow"><label>Producto</label><input type="text" id="f-prod"'+(function(){var k=catKindForTipo(t.tipo||'');var l=k?('pc-dl-'+k):'';return l?' list="'+l+'"':'';})()+' value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg">'+_catDatalistsHtml()+'</div>'
-    +'<div class="frow"><label>N° de Lote</label><input type="text" id="f-lote" value="'+escH(t.lote||'')+'" placeholder="Ej: L-2024-001"></div>'
+    +'<div class="frow"><label>Producto</label><input type="text" id="f-prod" autocomplete="off"'+(function(){var k=catKindForTipo(t.tipo||'');var l=k?('pc-dl-'+k):'';return l?' list="'+l+'"':'';})()+' value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg">'+_catDatalistsHtml()+'</div>'
+    +'<div class="frow"><label>N° de Lote</label><input type="text" id="f-lote" autocomplete="off" value="'+escH(t.lote||'')+'" placeholder="Ej: L-2024-001"></div>'
     +'<div class="frow"><label>Fecha de creación</label><input type="date" id="f-created" value="'+(t.created||today())+'" max="'+today()+'" title="No puede ser futura — si la muestra aún no ingresó, usá el estado A ingresar"></div>'
     +'<div class="frow"><label>Fecha límite de aprobación'+(isEdit&&!t.due?' <span style="color:var(--red);font-size:11px">⚠ no definida</span>':'')+'</label><input type="date" id="f-due" value="'+(t.due||'')+'" style="'+(isEdit&&!t.due?'border-color:var(--red);':'')+'">'+'</div>'
     +'<div class="frow"><label>Prioridad</label><select id="f-prio">'
