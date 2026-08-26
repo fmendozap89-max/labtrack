@@ -933,7 +933,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082503; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082504; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -6857,8 +6857,21 @@ function addCatalogProduct(kind,name,silent){
 // Determinístico y conservador: contención («Suero fisiológico» dentro de «Suero
 // fisiológico 100 mL», «Ranical» dentro de «Hisopado Ranical») o palabras compartidas.
 function _catSuggestFor(kind,name){
-  // Además de _normProd, separa dígitos de letras («500mg» ≡ «500 mg») para el matching
-  function _cmp(s){return _normProd(s).replace(/(\d)([a-z])/g,'$1 $2').replace(/([a-z])(\d)/g,'$1 $2').replace(/\s+/g,' ');}
+  // Normalización para SUGERIR (nunca escribe sola — el supervisor revisa):
+  // separa dígitos de letras («500mg» ≡ «500 mg»), quita dosis/volúmenes/envases
+  // («2 mg», «x 2 mL», «(20 COMP)») y unifica sinónimos de presentación con las
+  // convenciones del catálogo (comprimidos/comp → compr; inyectable/amp → iny;
+  // solución oftálmica → sol oft) para que «FARMAZEPAN 2 MG (20 COMP)» matchee
+  // «Farmazepan 2 mg compr».
+  function _cmp(s){
+    var x=_normProd(s).replace(/(\d)([a-z])/g,'$1 $2').replace(/([a-z])(\d)/g,'$1 $2');
+    x=x.replace(/\b(x\s*)?\d+([.,]\d+)?\s*(mg|ml|mcg|g|ui|l)\b/g,' ');
+    x=x.replace(/\bcomprimidos?\b|\bcomp\b/g,'compr')
+       .replace(/\binyectables?\b|\bampollas?\b|\bamp\b/g,'iny')
+       .replace(/\bsoluci?on\b/g,'sol').replace(/\boftalmicas?\b/g,'oft');
+    x=x.replace(/\b\d+([.,]\d+)?\b/g,' '); // números sueltos residuales («(20 COMP)», «10%»)
+    return x.replace(/\s+/g,' ').trim();
+  }
   var n=_cmp(name);
   if(!n)return null;
   var best=null,bestScore=0;
