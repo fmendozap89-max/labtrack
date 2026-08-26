@@ -933,7 +933,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082505; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082601; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -6777,7 +6777,7 @@ function renderSuggestionModal(){
     +'<p style="font-size:12px;color:var(--text3);margin:0 0 14px">El supervisor recibirá esta sugerencia y confirmará el ingreso.</p>'
     // Tipo ANTES que Producto: al elegirlo, el campo Producto autocompleta desde la
     // familia del catálogo que corresponde (PT/EE/Val → terminados, MP → materias primas)
-    +'<div class="frow"><label>Tipo de producto *</label><select id="sug-tipo" onchange="var k=catKindForTipo(this.value);var l=k?(\'pc-dl-\'+k):(this.value===\'Limp\'?\'pc-dl-PT\':null);var p=document.getElementById(\'sug-producto\');if(l)p.setAttribute(\'list\',l);else p.removeAttribute(\'list\');">'
+    +'<div class="frow"><label>Tipo de producto *</label><select id="sug-tipo" onchange="var k=catKindForTipo(this.value);var p=document.getElementById(\'sug-producto\');if(k)p.setAttribute(\'list\',\'pc-dl-\'+k);else p.removeAttribute(\'list\');">'
       +'<option value="" selected disabled hidden>Seleccionar tipo…</option>'
       +SAMPLE_TYPES.filter(function(st){return st.id!=='IL';}).map(function(st){return '<option value="'+st.id+'">'+escH(st.title)+'</option>';}).join('')
       +'</select></div>'
@@ -6809,9 +6809,6 @@ function submitSuggestion(){
     var _sm=catFindByName(_sk,prod);
     if(_sm)prod=_sm.name;
     else if(!confirm('«'+prod+'» no está en el catálogo de '+catKindLabel(_sk)+'.\n\nPodés enviarla igual: si el supervisor la acepta, decidirá si lo agrega al catálogo.\n\n¿Enviar la sugerencia?'))return;
-  } else if(tipo==='Limp'){
-    var _sml=catFindByName('PT',prod);
-    if(_sml)prod=_sml.name;
   }
   var sug={id:nextSuggId++,producto:prod,lote:lote,
     tipo:tipo,
@@ -6835,10 +6832,11 @@ function confirmSuggestion(id){
 }
 
 // ── CATÁLOGO MAESTRO DE PRODUCTOS ──
-// PT/EE/Val se nombran desde los productos terminados; MP desde las materias primas.
-// Limp/IL/Otros y tipos personalizados siguen con texto libre.
+// PT/EE/Val/Limp se nombran desde los productos terminados (una limpieza es DE un
+// producto terminado — decisión 2026-08-26); MP desde las materias primas.
+// IL/Otros y tipos personalizados siguen con texto libre.
 function catKindForTipo(tipo){
-  if(tipo==='PT'||tipo==='EE'||tipo==='Val')return 'PT';
+  if(tipo==='PT'||tipo==='EE'||tipo==='Val'||tipo==='Limp')return 'PT';
   if(tipo==='MP')return 'MP';
   return null;
 }
@@ -6915,7 +6913,7 @@ function _catSyncDatalist(){
   if(!tipoEl||!prodEl)return;
   var k=catKindForTipo(tipoEl.value);
   // Limp: los productos terminados se sugieren como ayuda (la limpieza es de un producto)
-  var l=k?('pc-dl-'+k):(tipoEl.value==='Limp'?'pc-dl-PT':null);
+  var l=k?('pc-dl-'+k):null;
   if(l)prodEl.setAttribute('list',l);
   else prodEl.removeAttribute('list');
 }
@@ -11253,7 +11251,7 @@ function renderProductCatalogTab(){
       }).join('');
       return '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--amber-bg);border-radius:var(--radius);margin-bottom:5px;font-size:12px;flex-wrap:wrap">'
         +'<b style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--amber-text)">'+escH(r.name)+'</b>'
-        +'<span class="u-xs3" style="flex-shrink:0">'+(r.kind==='PT'?'PT/EE/Val':'MP')+' · '+r.count+' lote'+(r.count>1?'s':'')+'</span>'
+        +'<span class="u-xs3" style="flex-shrink:0">'+(r.kind==='PT'?'PT/EE/Val/Limp':'MP')+' · '+r.count+' lote'+(r.count>1?'s':'')+'</span>'
         +(sug?'<span style="font-size:9px;font-weight:700;background:#d1fae5;color:#065f46;border-radius:8px;padding:1px 7px;flex-shrink:0" title="Destino propuesto automáticamente por similitud — revisalo y ajustá si hace falta">✦ sugerido</span>':'')
         +(isSup?'<span style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap">'
           +'<select id="rect-sel-'+i+'" style="max-width:240px;padding:4px 8px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)"><option value="">— elegir producto del catálogo —</option>'+opts+'</select>'
@@ -11294,7 +11292,7 @@ function renderProductCatalogTab(){
   }
   return '<div class="admin-wrap">'
     +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><h4 style="margin-bottom:0">📦 Catálogo maestro de productos</h4></div>'
-    +'<div class="sub">Los análisis <b>PT / EE / Val</b> se nombran desde los productos terminados y las <b>MP</b> desde las materias primas (los demás tipos siguen con texto libre). El campo Producto autocompleta desde este catálogo y no admite nombres fuera de la lista. Marcá con la casilla productos <b>analíticamente equivalentes</b> (p. ej. presentaciones que solo difieren en volumen) para <b>⛓ unificarlos</b>; con <b>🗑 Vaciar</b> podés sustituir el listado completo por uno nuevo y rectificar lo existente contra él.</div>'
+    +'<div class="sub">Los análisis <b>PT / EE / Val / Limp</b> se nombran desde los productos terminados (una limpieza es de un producto) y las <b>MP</b> desde las materias primas (los demás tipos siguen con texto libre). El campo Producto autocompleta desde este catálogo y no admite nombres fuera de la lista. Marcá con la casilla productos <b>analíticamente equivalentes</b> (p. ej. presentaciones que solo difieren en volumen) para <b>⛓ unificarlos</b>; con <b>🗑 Vaciar</b> podés sustituir el listado completo por uno nuevo y rectificar lo existente contra él.</div>'
     +(isSup?'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">'
       +'<input type="text" id="pc-new-name" placeholder="Nombre del producto…" style="flex:1;min-width:200px;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
       +'<select id="pc-new-kind" style="padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)"><option value="PT">Producto terminado</option><option value="MP">Materia prima</option></select>'
@@ -11341,7 +11339,7 @@ function openFixIdModal(taskId){
   if(document.getElementById('fixid-modal'))return;
   // Datalist del campo producto: estricto para PT/EE/Val/MP; para Limp los productos
   // terminados se ofrecen como AYUDA (una limpieza es de un producto) sin ser estrictos
-  function _fixList(tipo){var k=catKindForTipo(tipo);return k?('pc-dl-'+k):(tipo==='Limp'?'pc-dl-PT':'');}
+  function _fixList(tipo){var k=catKindForTipo(tipo);return k?('pc-dl-'+k):'';}
   var tipoOpts=SAMPLE_TYPES.map(function(st){
     return '<option value="'+st.id+'"'+(t.tipo===st.id?' selected':'')+'>'+escH(st.label)+(st.title&&st.title!==st.label?' — '+escH(st.title):'')+'</option>';
   }).join('');
@@ -11382,11 +11380,6 @@ function applyFixId(taskId){
       if(!m)return;
     }
     prod=m.name;
-  } else if(tipo==='Limp'){
-    // Limpieza: texto libre, pero si coincide con un producto terminado se usa la
-    // grafía canónica del catálogo (unifica nombres para los indicadores)
-    var mLimp=catFindByName('PT',prod);
-    if(mLimp)prod=mLimp.name;
   }
   if(prod===t.producto&&tipo===t.tipo&&lote===t.lote){showToast('Sin cambios','info');return;}
   // Aviso de duplicado producto+lote (no bloquea: los datos viejos pueden requerirlo)
@@ -12748,7 +12741,7 @@ function renderTaskModal(){
     +(isEdit?_stdSecInfoBox(t):'')
     +'<div class="form-grid">'
     +'<div class="frow"><label>Tipo de muestra'+(t.tipo==='IL'?'':' <span style="color:var(--red)">*</span>')+'</label>'+(t.tipo==='IL'?'<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 11px;border:1px solid #1d4ed8;border-radius:20px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8">🔗 IL · Inter-laboratorio</span><input type="hidden" id="f-tipo" value="IL">':renderTipoPillsHtml(t.tipo||''))+'</div>'
-    +'<div class="frow"><label>Producto</label><input type="text" id="f-prod"'+(function(){var k=catKindForTipo(t.tipo||'');var l=k?('pc-dl-'+k):((t.tipo||'')==='Limp'?'pc-dl-PT':'');return l?' list="'+l+'"':'';})()+' value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg">'+_catDatalistsHtml()+'</div>'
+    +'<div class="frow"><label>Producto</label><input type="text" id="f-prod"'+(function(){var k=catKindForTipo(t.tipo||'');var l=k?('pc-dl-'+k):'';return l?' list="'+l+'"':'';})()+' value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg">'+_catDatalistsHtml()+'</div>'
     +'<div class="frow"><label>N° de Lote</label><input type="text" id="f-lote" value="'+escH(t.lote||'')+'" placeholder="Ej: L-2024-001"></div>'
     +'<div class="frow"><label>Fecha de creación</label><input type="date" id="f-created" value="'+(t.created||today())+'" max="'+today()+'" title="No puede ser futura — si la muestra aún no ingresó, usá el estado A ingresar"></div>'
     +'<div class="frow"><label>Fecha límite de aprobación'+(isEdit&&!t.due?' <span style="color:var(--red);font-size:11px">⚠ no definida</span>':'')+'</label><input type="date" id="f-due" value="'+(t.due||'')+'" style="'+(isEdit&&!t.due?'border-color:var(--red);':'')+'">'+'</div>'
@@ -16648,10 +16641,6 @@ function saveTask(){
       }
       prod=_catMatch.name; // nombre canónico del catálogo (unifica mayúsculas/variantes)
     }
-  } else if(tipo==='Limp'){
-    // Limpieza: libre, pero adopta la grafía canónica si coincide con un producto terminado
-    var _mLimp=catFindByName('PT',prod);
-    if(_mLimp)prod=_mLimp.name;
   }
   const _expectedArrivalEl=document.getElementById('f-expected-arrival');
   const _arrivalNotesEl=document.getElementById('f-arrival-notes');
