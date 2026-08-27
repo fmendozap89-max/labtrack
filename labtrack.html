@@ -441,6 +441,9 @@ var labConfigPwd_ts=0; // timestamp del último cambio de la clave maestra (para
 // Catálogo maestro de productos (2026-08-25): PT/EE/Val eligen de los productos
 // terminados; MP de las materias primas. Entradas {id,name,kind:'PT'|'MP',_ts,_removed?}
 // — merge por id (gana _ts), baja lógica con tombstone (las vistas filtran _removed).
+// Análisis externos (2026-08-27): p.ext={items:[{analisis,lab}],notes,by,ts} — requisito
+// de ensayos tercerizados; viaja con la entrada en el merge. Al ingresar el producto se
+// avisa al supervisor (notif ext_match, dedup en t.extNotified; solicitado = t.extRequested).
 let productCatalog=[];
 // archivedTasks (2026-08-25): ids de tareas movidas a labtrack_archive.json — sin este
 // registro, cualquier dispositivo con copia local anterior al archivado las RESUCITABA
@@ -933,7 +936,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082602; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082701; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -4265,7 +4268,9 @@ function getNotifBadge(){
   var revApprC=isSup?replanNotifs.filter(function(n){return n.type==='reviewer_approval'&&n.status==='pending';}).length:0;
   // Estándares secundarios: necesidad creada / match a validar / muestreo extra realizado
   var stdC=isSup?replanNotifs.filter(function(n){return(n.type==='stdsec_created'||n.type==='stdsec_match'||n.type==='stdsec_sampled')&&n.status!=='resolved'&&!(n.readBy||[]).includes(uid);}).length:0;
-  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC+samplingC+responseC+overdueC+suggC+mgmtC+ilrC+ilrDocsC+revApprC+stdC;
+  // Análisis externos: ingresos del listado pendientes de solicitar
+  var extC=isSup?replanNotifs.filter(function(n){return n.type==='ext_match'&&n.status!=='resolved'&&!(n.readBy||[]).includes(uid);}).length:0;
+  return obsC+replanC+schedPC+schedAC+confC+resubC+ftC+planC+samplingC+responseC+overdueC+suggC+mgmtC+ilrC+ilrDocsC+revApprC+stdC+extC;
 }
 function renderNotifBtn(){
   var totalAlerts=getNotifBadge();
@@ -5592,7 +5597,7 @@ function renderAprobados(){
     var anaAv=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':'';}).join('');
     var realH=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
     var approverName=_approverName(t);
-    var tipoCell='<div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+'</div>';
+    var tipoCell='<div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+extBadge(t)+'</div>';
     var _cmts=[];
     if(t.reviewComment)_cmts.push('Revisión: '+t.reviewComment);
     if(t.approvalComment)_cmts.push('Aprobación: '+t.approvalComment);
@@ -6742,7 +6747,7 @@ function renderSugerencias(){
         +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
         +'<span class="pill '+(isOk?'muestra-ok':'a-ingresar')+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
         +(t.tipo?'<span style="font-size:10px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:var(--text2)">'+escH(t.tipo)+'</span>':'')
-        +stdSecBadge(t)
+        +stdSecBadge(t)+extBadge(t)
         +(t.priority&&t.priority!=='Normal'?'<span class="pill '+t.priority.toLowerCase()+'" style="font-size:10px">'+t.priority+'</span>':'')
         +'</div>'
         +'<div style="font-weight:600;font-size:13px">'+escH(t.producto)+'</div>'
@@ -6916,6 +6921,268 @@ function _catSyncDatalist(){
   var l=k?('pc-dl-'+k):null;
   if(l)prodEl.setAttribute('list',l);
   else prodEl.removeAttribute('list');
+}
+
+// ── ANÁLISIS EXTERNOS (catálogo maestro) ──
+// Algunos PT/MP requieren ensayos tercerizados (análisis externo). El requisito vive
+// en la entrada del catálogo (p.ext={items:[{analisis,lab}],notes,by,ts}) y viaja con
+// ella en el merge (por id, gana _ts). Al guardar un ingreso de un producto del
+// listado se avisa al supervisor para SOLICITAR el análisis externo cuanto antes
+// (dedup por tarea en t.extNotified). "Solicitado" se marca en la tarea
+// (t.extRequested={by,ts}) — acción deliberada del supervisor, queda en el Audit Trail.
+function extKindForTipo(tipo){
+  // Limp queda afuera: la limpieza no requiere los ensayos externos del producto
+  if(tipo==='Limp')return null;
+  return catKindForTipo(tipo);
+}
+// Entrada del catálogo con análisis externos para (familia, nombre). Sin sort (se
+// llama por fila en render): scan directo con nombre normalizado — el catálogo es
+// estricto, así que el match exacto alcanza.
+function _extEntryFor(kind,name){
+  var n=_catNorm(name);
+  if(!kind||!n)return null;
+  for(var i=0;i<productCatalog.length;i++){
+    var p=productCatalog[i];
+    if(!p._removed&&p.kind===kind&&p.ext&&(p.ext.items||[]).length&&_catNorm(p.name)===n)return p;
+  }
+  return null;
+}
+function extReqForTask(t){
+  if(!t||t._deleted)return null;
+  return _extEntryFor(extKindForTipo(t.tipo),t.producto);
+}
+function _extSummary(p){
+  return ((p.ext||{}).items||[]).map(function(i){return i.analisis+(i.lab?' → '+i.lab:'');}).join(' · ');
+}
+function extCatalogList(){
+  return activeCatalog().filter(function(p){return p.ext&&(p.ext.items||[]).length;});
+}
+// Badge 🔬 para tarjetas/listados: cian = falta solicitar; verde ✓ = ya solicitado.
+// En históricos (done/reviewed/approved) solo se muestra si quedó solicitado (registro).
+function extBadge(t){
+  if(!t||t._deleted)return'';
+  var req=t.extRequested;
+  var p=extReqForTask(t);
+  if(!req&&(!p||['done','reviewed','approved'].includes(t.status)))return'';
+  var sum=p?_extSummary(p):'';
+  var title=req
+    ?('Análisis externo solicitado'+(req.ts?' el '+new Date(req.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}):'')+(sum?': '+sum:''))
+    :('Requiere análisis externo — solicitarlo cuanto antes: '+sum);
+  return '<span title="'+escH(title)+'" style="background:'+(req?'#d1fae5':'#cffafe')+';color:'+(req?'#065f46':'#0e7490')+';border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap;cursor:help">🔬 EXT'+(req?' ✓':'')+'</span>';
+}
+// Recuadro para el detalle/edición del producto: requisito + estado de la solicitud
+function _extInfoBox(t){
+  var p=extReqForTask(t);
+  var req=t.extRequested;
+  if(!p&&!req)return'';
+  var items=p?((p.ext||{}).items||[]):[];
+  var notes=p?((p.ext||{}).notes||''):'';
+  return '<div style="background:'+(req?'#ecfdf5':'#ecfeff')+';border:1px solid '+(req?'#10b981':'#06b6d4')+';border-radius:var(--radius);padding:8px 12px;margin-bottom:12px;font-size:12px;color:'+(req?'#065f46':'#0e7490')+'">'
+    +'<b>🔬 '+(req?'Análisis externo solicitado':'Requiere análisis externo')+'</b>'
+    +(items.length?'<div style="font-size:11px;margin-top:3px">'+items.map(function(i){return '· '+escH(i.analisis)+(i.lab?' — <b>'+escH(i.lab)+'</b>':'');}).join('<br>')+'</div>':'')
+    +(notes?'<div style="font-size:11px;margin-top:2px;opacity:.85">📝 '+escH(notes)+'</div>':'')
+    +(req
+      ?'<div style="font-size:11px;margin-top:4px">Solicitado por '+escH((getU(req.by)||{}).name||'')+(req.ts?' el '+new Date(req.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}):'')+'.'
+        +(isSupRole()?' <button class="btn sm" onclick="unmarkExtRequested('+t.id+')" title="Quitar la marca de solicitado (p. ej. si se marcó por error). Queda en el Audit Trail." style="font-size:10px">✕ Quitar marca</button>':'')
+        +'</div>'
+      :'<div style="font-size:11px;margin-top:4px">'
+        +(isSupRole()
+          ?'<button class="btn sm" onclick="markExtRequested('+t.id+')" style="font-size:10px;background:#0e7490;border-color:#0e7490;color:#fff">✓ Marcar solicitado</button>'
+          :'El supervisor debe solicitar el análisis externo cuanto antes.')
+        +'</div>')
+    +'</div>';
+}
+// Aviso al supervisor: ingreso de un producto del listado. Dedup por tarea
+// (t.extNotified guarda el id de catálogo ya avisado) — no repite entre guardados/
+// dispositivos. Se dispara en puntos de acción (guardar tarea, definir el requisito),
+// nunca en render.
+function _extNotifyTask(t){
+  if(!t||t._deleted)return;
+  if(['done','reviewed','approved'].includes(t.status))return;
+  if(t.extRequested)return;
+  var p=extReqForTask(t);
+  if(!p)return;
+  if(!t.extNotified)t.extNotified=[];
+  if(t.extNotified.indexOf(p.id)>=0)return;
+  t.extNotified.push(p.id);
+  t._ts=Date.now();
+  var _sup=USERS.find(function(u){return u.role==='supervisor';});
+  replanNotifs.push({id:newNotifId(),type:'ext_match',pcId:p.id,taskId:t.id,
+    producto:t.producto,lote:t.lote,analisis:_extSummary(p),
+    forUserId:_sup?_sup.id:'',status:'pending',ts:Date.now(),_ts:Date.now()});
+}
+function _extNotifySweep(p){
+  if(!p||!p.ext||!(p.ext.items||[]).length)return;
+  activeTasks().forEach(function(t){
+    if(extReqForTask(t)===p)_extNotifyTask(t);
+  });
+}
+// Marcar el análisis externo como solicitado (solo supervisor; queda en la tarea)
+function markExtRequested(taskId){
+  if(!isSupRole()){alert('Solo el Supervisor puede marcar el análisis externo como solicitado.');return;}
+  var t=tasks.find(function(x){return x.id===taskId&&!x._deleted;});
+  if(!t||t.extRequested)return;
+  var p=extReqForTask(t);
+  if(!confirm('¿Marcar el análisis externo de '+t.producto+' — '+t.lote+' como solicitado?'+(p?'\n\n'+_extSummary(p):'')))return;
+  t.extRequested={by:currentUser.id,ts:Date.now()};
+  t._ts=Date.now();
+  resolveAllCopies({type:'ext_match',taskId:t.id},'requested');
+  auditLog('EDIT','TASK',t.id,{field:'extRequested',newVal:'solicitado',
+    description:'Análisis externo solicitado: '+t.producto+' '+t.lote+(p?' ('+_extSummary(p)+')':'')},'');
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow extReq:',e);});
+  showToast('🔬 Análisis externo marcado como solicitado','success');
+}
+function unmarkExtRequested(taskId){
+  if(!isSupRole()){alert('Solo el Supervisor puede quitar la marca de solicitado.');return;}
+  var t=tasks.find(function(x){return x.id===taskId;});
+  if(!t||!t.extRequested)return;
+  if(!confirm('¿Quitar la marca de análisis externo solicitado de '+t.producto+' — '+t.lote+'?\n\nEl aviso vuelve a quedar pendiente. Queda en el Audit Trail.'))return;
+  delete t.extRequested;
+  t.extNotified=[]; // rehabilita el aviso si el producto sigue en el listado
+  t._ts=Date.now();
+  auditLog('EDIT','TASK',t.id,{field:'extRequested',oldVal:'solicitado',newVal:null,
+    description:'Marca de análisis externo solicitado quitada: '+t.producto+' '+t.lote},'');
+  _extNotifyTask(t);
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow extUnreq:',e);});
+  showToast('✓ Marca quitada','success');
+}
+// Marcar vista una notificación de análisis externo (no toca la tarea, solo la campana)
+function markExtNotifSeen(notifId){
+  if(isAuditorRole())return;
+  var n=replanNotifs.find(function(x){return x.id===notifId;});if(!n)return;
+  n.status='resolved';n.resolvedHow='seen';n.resolvedBy=currentUser.id;n._ts=Date.now();
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow ext seen:',e);});
+}
+// ── Configuración del requisito (Administración → Productos) ──
+function openExtReqModal(pcId){
+  if(!isSupRole()){alert('Solo el Supervisor administra el listado de análisis externos.');return;}
+  var p=productCatalog.find(function(x){return x.id===pcId&&!x._removed;});
+  if(!p)return;
+  if(document.getElementById('extreq-modal'))return;
+  var items=(p.ext&&p.ext.items&&p.ext.items.length)?p.ext.items:[{analisis:'',lab:''}];
+  var div=document.createElement('div');
+  div.innerHTML='<div class="modal-overlay" style="z-index:600" id="extreq-modal">'
+    +'<div class="modal" style="width:min(500px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">🔬 Análisis externos</h3>'
+    +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:var(--text2);flex-wrap:wrap"><b>'+escH(p.name)+'</b><span class="u-xs3">'+catKindLabel(p.kind)+'</span></div>'
+    +'<p style="font-size:12px;color:var(--text3);margin:0 0 10px">Ensayos de este producto que se tercerizan: qué análisis y dónde se realiza. Al ingresar el producto, el supervisor recibe el aviso 🔔 para solicitarlos cuanto antes.</p>'
+    +'<div id="extreq-rows">'+items.map(_extRowHtml).join('')+'</div>'
+    +'<button class="btn sm" onclick="_extAddRow()" style="margin-bottom:10px">+ Agregar análisis</button>'
+    +'<div class="frow"><label>Notas</label><textarea id="extreq-notes" style="min-height:50px" placeholder="Ej.: coordinar retiro de muestra, demora habitual 15 días…">'+escH((p.ext||{}).notes||'')+'</textarea></div>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;flex-wrap:wrap">'
+    +(p.ext&&(p.ext.items||[]).length?'<button class="btn dan" onclick="removeExtReq(\''+p.id+'\')" style="margin-right:auto">🗑 Quitar del listado</button>':'')
+    +'<button class="btn" data-esc onclick="document.getElementById(\'extreq-modal\').remove()">Cancelar</button>'
+    +'<button class="btn pri" onclick="saveExtReq(\''+p.id+'\')">💾 Guardar</button>'
+    +'</div></div></div>';
+  document.body.appendChild(div);
+}
+function _extRowHtml(it){
+  it=it||{};
+  return '<div class="extreq-row" style="display:flex;gap:6px;margin-bottom:6px;align-items:center">'
+    +'<input type="text" class="extreq-an" placeholder="Análisis (ej.: Endotoxinas)" value="'+escH(it.analisis||'')+'" style="flex:1.2;min-width:0">'
+    +'<input type="text" class="extreq-lab" placeholder="Dónde se realiza" value="'+escH(it.lab||'')+'" style="flex:1;min-width:0">'
+    +'<button class="btn sm" title="Quitar fila" onclick="this.parentNode.remove()" style="flex-shrink:0;color:var(--red)">✕</button>'
+    +'</div>';
+}
+function _extAddRow(){
+  var c=document.getElementById('extreq-rows');
+  if(c)c.insertAdjacentHTML('beforeend',_extRowHtml());
+}
+function saveExtReq(pcId){
+  if(!isSupRole()){alert('Solo el Supervisor administra el listado de análisis externos.');return;}
+  var p=productCatalog.find(function(x){return x.id===pcId&&!x._removed;});
+  if(!p)return;
+  var items=[],incomplete=false;
+  document.querySelectorAll('#extreq-rows .extreq-row').forEach(function(r){
+    var an=((r.querySelector('.extreq-an')||{}).value||'').trim();
+    var lab=((r.querySelector('.extreq-lab')||{}).value||'').trim();
+    if(!an&&!lab)return; // fila vacía: se ignora
+    if(!an||!lab){incomplete=true;return;}
+    items.push({analisis:an,lab:lab});
+  });
+  if(incomplete){alert('Completá el análisis Y dónde se realiza en cada fila (o dejá la fila vacía para descartarla).');return;}
+  if(!items.length){removeExtReq(pcId);return;} // sin filas = quitar el requisito
+  var notes=((document.getElementById('extreq-notes')||{}).value||'').trim();
+  var isNew=!(p.ext&&(p.ext.items||[]).length);
+  p.ext={items:items,notes:notes,by:currentUser.id,ts:Date.now()};
+  p._ts=Date.now();
+  auditLog(isNew?'CREATE':'EDIT','CATALOG',p.id,{field:'extAnalysis',newVal:_extSummary(p),
+    description:'Requisito de análisis externo '+(isNew?'definido':'actualizado')+': '+p.name+' — '+_extSummary(p)},'');
+  var m=document.getElementById('extreq-modal');if(m)m.remove();
+  // Avisar por los ingresos activos que ya matchean (solicitar cuanto antes)
+  _extNotifySweep(p);
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow extSave:',e);});
+  showToast('🔬 «'+p.name+'» en el listado de análisis externos','success');
+  var _m=activeTasks().filter(function(t){return extReqForTask(t)===p&&!['done','reviewed','approved'].includes(t.status);});
+  if(_m.length){
+    setTimeout(function(){alert('🔬 Hay '+_m.length+' ingreso'+(_m.length>1?'s':'')+' activo'+(_m.length>1?'s':'')+' de este producto:\n\n'
+      +_m.map(function(t){return '· '+t.producto+' — '+t.lote+' ('+statusLabel(t.status)+')'+(t.extRequested?' — ya solicitado':'');}).join('\n')
+      +'\n\nSi corresponde, solicitá el análisis externo cuanto antes (avisos en la campana 🔔).');},100);
+  }
+}
+function removeExtReq(pcId){
+  if(!isSupRole()){alert('Solo el Supervisor administra el listado de análisis externos.');return;}
+  var p=productCatalog.find(function(x){return x.id===pcId;});
+  if(!p||!p.ext)return;
+  if(!confirm('¿Quitar «'+p.name+'» del listado de análisis externos?\n\nLos avisos pendientes se resuelven y no se generarán nuevos al ingresarlo.'))return;
+  var old=_extSummary(p);
+  delete p.ext;
+  p._ts=Date.now();
+  resolveAllCopies({type:'ext_match',pcId:pcId},'deleted');
+  auditLog('DELETE','CATALOG',p.id,{field:'extAnalysis',oldVal:old,
+    description:'Requisito de análisis externo quitado: '+p.name},'');
+  var m=document.getElementById('extreq-modal');if(m)m.remove();
+  saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow extDel:',e);});
+  showToast('✓ «'+p.name+'» quitado del listado','success');
+}
+// Sección del listado en Administración → Productos (sup edita; auditor consulta)
+function renderExtReqSection(isSup){
+  var list=extCatalogList();
+  function pickOpts(kind,label){
+    var os=activeCatalog(kind).filter(function(p){return !(p.ext&&(p.ext.items||[]).length);})
+      .map(function(p){return '<option value="'+p.id+'">'+escH(p.name)+'</option>';}).join('');
+    return os?'<optgroup label="'+label+'">'+os+'</optgroup>':'';
+  }
+  var h='<div style="margin:4px 0 18px;background:var(--surface);border:1px solid #06b6d4;border-left:4px solid #06b6d4;border-radius:var(--radius-lg);padding:12px 14px">'
+    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">'
+    +'<div style="font-size:14px;font-weight:700;color:#0e7490">🔬 Análisis externos</div>'
+    +(list.length?'<span style="background:#0891b2;color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700">'+list.length+'</span>':'')
+    +'</div>'
+    +'<div style="font-size:12px;color:var(--text2);margin-bottom:8px">Productos cuyo análisis incluye ensayos <b>tercerizados</b>: qué análisis y dónde se realiza. Al guardar un ingreso de un producto del listado, el supervisor recibe el aviso 🔔 para <b>solicitar el análisis externo cuanto antes</b>; la solicitud se marca en el propio producto (🔬 EXT ✓).</div>';
+  if(isSup){
+    h+='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">'
+      +'<select id="ext-new-prod" style="flex:1;min-width:220px;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)">'
+      +'<option value="">— elegir producto del catálogo —</option>'
+      +pickOpts('PT','Productos terminados')+pickOpts('MP','Materias primas')
+      +'</select>'
+      +'<button class="btn sm pri" onclick="var s=document.getElementById(\'ext-new-prod\');if(!s||!s.value){alert(\'Elegí un producto del catálogo.\');}else{openExtReqModal(s.value);}">+ Definir análisis externo</button>'
+      +'</div>';
+  }
+  if(!list.length){
+    h+='<div style="font-size:12px;color:var(--text3)">Sin productos con análisis externos definidos.</div>';
+  }else{
+    h+=list.map(function(p){
+      var act=activeTasks().filter(function(t){return extReqForTask(t)===p&&!['done','reviewed','approved'].includes(t.status);});
+      var pendn=act.filter(function(t){return !t.extRequested;}).length;
+      return '<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 2px;border-bottom:1px solid var(--border);font-size:12px;flex-wrap:wrap">'
+        +'<div style="flex:1;min-width:180px"><b>'+escH(p.name)+'</b> <span class="u-xs3">'+(p.kind==='PT'?'PT':'MP')+'</span>'
+        +'<div style="font-size:11px;color:var(--text2);margin-top:1px">'+((p.ext||{}).items||[]).map(function(i){return escH(i.analisis)+' → <b>'+escH(i.lab)+'</b>';}).join(' · ')+'</div>'
+        +((p.ext||{}).notes?'<div style="font-size:11px;color:var(--text3);margin-top:1px">📝 '+escH(p.ext.notes)+'</div>':'')
+        +'</div>'
+        +(act.length?'<span class="u-xs3" style="flex-shrink:0" title="Ingresos activos de este producto">'+act.length+' activo'+(act.length>1?'s':'')+(pendn?' · <b style="color:#0e7490">'+pendn+' sin solicitar</b>':'')+'</span>':'')
+        +(isSup?'<span style="display:flex;gap:4px;flex-shrink:0">'
+          +'<button class="btn sm" style="font-size:10px;padding:2px 6px" title="Editar análisis externos" onclick="openExtReqModal(\''+p.id+'\')">✎</button>'
+          +'<button class="btn sm" style="font-size:10px;padding:2px 6px;color:var(--red)" title="Quitar del listado" onclick="removeExtReq(\''+p.id+'\')">🗑</button>'
+          +'</span>':'')
+        +'</div>';
+    }).join('');
+  }
+  return h+'</div>';
 }
 
 // ── DESARROLLO DE ESTÁNDAR SECUNDARIO (MP activas) ──
@@ -8496,7 +8763,7 @@ function renderDashboard(){
       return'<div class="sampler-card">'
         +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
         +'<span class="pill '+(isOk?'muestra-ok':'a-ingresar')+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
-        +stdSecBadge(t)
+        +stdSecBadge(t)+extBadge(t)
         +'<b style="font-size:13px">'+escH(t.producto)+'</b>'
         +'<span style="font-family:var(--mono);font-size:11px;color:var(--text3)">'+escH(t.lote)+'</span>'
         +(t.expectedArrival?'<span class="u-sm3">Esperado: <b>'+fmtDDMMYY(t.expectedArrival)+'</b></span>':'')
@@ -8722,7 +8989,7 @@ function renderDashboard(){
       +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;flex-wrap:wrap">'
       +'<span class="pill '+(isOk?'muestra-ok':'a-ingresar')+'" style="font-size:10px">'+statusLabel(t.status)+'</span>'
       +sampleTypeBadge(t.tipo)
-      +stdSecBadge(t)
+      +stdSecBadge(t)+extBadge(t)
       +'</div>'
       +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+' <span style="font-family:var(--mono);font-size:11px;color:var(--text3);font-weight:400">'+escH(t.lote)+'</span></div>'
       +'<div style="font-size:11px;color:var(--text2);margin-top:1px">'
@@ -8805,7 +9072,7 @@ function tRowSupLote(t){
       +assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" title="'+escH(u.name)+'" style="width:20px;height:20px;font-size:8px">'+escH(u.avInit)+'</div>':''}).join('')
       +'</div>';
   // C3 Tipo
-  row+='<div style="display:flex;align-items:center">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+'</div>';
+  row+='<div style="display:flex;align-items:center">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+extBadge(t)+'</div>';
   // C4 Ingreso
   row+='<div style="font-family:var(--mono);font-size:11px;color:var(--text2)">'+(t.created?fmtDDMMYY(t.created):'—')+'</div>';
   // C4 Aprob. límite
@@ -8866,7 +9133,7 @@ function tRowSupAnalista(t){
         +(u?'<span style="font-size:11px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(u.name.split(' ')[0])+'</span>':'')
         +'</div>';
     // C3 Tipo (first row only)
-    row+='<div style="display:flex;align-items:center">'+(isFirst?sampleTypeBadge(t.tipo)+stdSecBadge(t):'')+'</div>';
+    row+='<div style="display:flex;align-items:center">'+(isFirst?sampleTypeBadge(t.tipo)+stdSecBadge(t)+extBadge(t):'')+'</div>';
     // C4 Ingreso (first row only)
     row+='<div style="font-family:var(--mono);font-size:11px;color:var(--text2)">'+(isFirst&&t.created?fmtDDMMYY(t.created):'')+'</div>';
     // C4 Fecha programada + límite
@@ -8976,7 +9243,7 @@ function tRowAna(t,maOverride){
   var _ilrActive=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id&&!r._deleted;});
   return'<div>'
     +'<div class="trow" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr'+(showOverdueWarn?';border-left:3px solid var(--amber)':'')+'">'
-    +'<div><div class="cell-trunc">'+escH(t.producto)+'</div><div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+'<span>'+escH(t.lote)+'</span></div></div>'
+    +'<div><div class="cell-trunc">'+escH(t.producto)+'</div><div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+extBadge(t)+'<span>'+escH(t.lote)+'</span></div></div>'
     +'<div style="font-family:var(--mono);font-size:12px">'+fmtD(md)+(replanLabel?'<br>'+replanLabel:'')+'</div>'
     +'<div>'+hoursCol+'</div>'
     +'<div>'
@@ -9142,7 +9409,7 @@ function tRowAnaHist(t,ma){
   var _ilrA=interLabRequests.slice().sort(function(a,b){return(b.ts||0)-(a.ts||0);}).find(function(r){return r.taskId===t.id&&!r._deleted;});
   return'<div class="trow" onclick="openEdit('+t.id+')" style="grid-template-columns:1.8fr .8fr .55fr .9fr;cursor:pointer">'
     +'<div><div class="cell-trunc" style="font-weight:600">'+escH(t.producto)+'</div>'
-    +'<div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+'<span class="u-mono11">'+escH(t.lote)+'</span></div></div>'
+    +'<div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+extBadge(t)+'<span class="u-mono11">'+escH(t.lote)+'</span></div></div>'
     +'<div style="font-family:var(--mono);font-size:12px">'+fmtD(md)+'</div>'
     +'<div>'+(maRealH?'<span style="font-size:11px;font-weight:700;font-family:var(--mono);color:var(--green)">'+maRealH.toFixed(1)+'h</span>':'<span class="u-xs3">—</span>')+'</div>'
     +'<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">'
@@ -9267,7 +9534,7 @@ function renderPendientesList(){
     var obsHtml=t.observations&&t.observations.length?'<span title="'+escH(t.observations[t.observations.length-1].comment||'')+'" style="cursor:help;font-size:11px;color:var(--amber-text);margin-left:3px">⚑</span>':'';
     return'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:7px;display:flex;align-items:center;gap:10px">'
       +'<div style="flex:1;min-width:0">'
-      +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+obsHtml+(stdSecBadge(t)?' '+stdSecBadge(t):'')+'</div>'
+      +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+obsHtml+(stdSecBadge(t)?' '+stdSecBadge(t):'')+(extBadge(t)?' '+extBadge(t):'')+'</div>'
       +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3);margin-top:1px">'+escH(t.lote)
         +(firstDate?' · Planif: '+fmtDDMMYY(firstDate):'')
         +(t.due?' · Límite: '+dueBadge(t):'')
@@ -9327,7 +9594,7 @@ function renderPendientesResults(filtered,pc){
     var obsHtml=t.observations&&t.observations.length?'<span title="'+escH(t.observations[t.observations.length-1].comment||'')+'" style="cursor:help;font-size:11px;color:var(--amber-text);margin-left:3px">⚑</span>':'';
     return'<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:7px;display:flex;align-items:center;gap:10px">'
       +'<div style="flex:1;min-width:0">'
-      +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+obsHtml+(stdSecBadge(t)?' '+stdSecBadge(t):'')+'</div>'
+      +'<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(t.producto)+obsHtml+(stdSecBadge(t)?' '+stdSecBadge(t):'')+(extBadge(t)?' '+extBadge(t):'')+'</div>'
       +'<div style="font-size:11px;font-family:var(--mono);color:var(--text3);margin-top:1px">'+escH(t.lote)
         +(firstDate?' · Planif: '+fmtDDMMYY(firstDate):'')
         +(t.due?' · Límite: '+dueBadge(t):'')
@@ -11221,6 +11488,7 @@ function renderProductCatalogTab(){
       h+='<div style="display:flex;align-items:center;gap:6px;padding:4px 2px;border-bottom:1px solid var(--border);font-size:12px">'
         +(isSup?'<input type="checkbox" onchange="_pcSelToggle('+i+')"'+((window._pcSel||{})[p.id]?' checked':'')+' title="Seleccionar para unificar" style="width:13px;height:13px;flex-shrink:0">':'')
         +'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(p.name)+'</span>'
+        +(p.ext&&(p.ext.items||[]).length?'<span title="'+escH('Análisis externo: '+_extSummary(p))+'" style="flex-shrink:0;cursor:help;font-size:11px">🔬</span>':'')
         +(uc?'<span class="u-xs3" style="flex-shrink:0" title="Análisis activos con este producto">'+uc+' uso'+(uc>1?'s':'')+'</span>':'')
         +(isSup?'<button class="btn sm" style="font-size:10px;padding:2px 6px;flex-shrink:0" title="Renombrar (ofrece rectificar los análisis existentes)" onclick="catRenameEntry('+i+')">✎</button>'
           +'<button class="btn sm" style="font-size:10px;padding:2px 6px;color:var(--red);flex-shrink:0" title="Dar de baja del catálogo" onclick="catRemoveEntry('+i+')">🗑</button>':'')
@@ -11293,6 +11561,7 @@ function renderProductCatalogTab(){
   return '<div class="admin-wrap">'
     +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><h4 style="margin-bottom:0">📦 Catálogo maestro de productos</h4></div>'
     +'<div class="sub">Los análisis <b>PT / EE / Val / Limp</b> se nombran desde los productos terminados (una limpieza es de un producto) y las <b>MP</b> desde las materias primas (los demás tipos siguen con texto libre). El campo Producto autocompleta desde este catálogo y no admite nombres fuera de la lista. Marcá con la casilla productos <b>analíticamente equivalentes</b> (p. ej. presentaciones que solo difieren en volumen) para <b>⛓ unificarlos</b>; con <b>🗑 Vaciar</b> podés sustituir el listado completo por uno nuevo y rectificar lo existente contra él.</div>'
+    +renderExtReqSection(isSup)
     +(isSup?'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">'
       +'<input type="text" id="pc-new-name" placeholder="Nombre del producto…" style="flex:1;min-width:200px;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
       +'<select id="pc-new-kind" style="padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)"><option value="PT">Producto terminado</option><option value="MP">Materia prima</option></select>'
@@ -11622,6 +11891,11 @@ function applyUnify(){
   sels.forEach(function(p){
     if(p.id===target.id)return;
     totalTasks+=rectifyProductName(kind,p.name,target,true,true)||0;
+    // El requisito de análisis externo de una entrada fusionada pasa al destino
+    // (salvo que el destino ya tenga uno propio) — no se pierde en la unificación
+    if(p.ext&&(p.ext.items||[]).length&&!(target.ext&&(target.ext.items||[]).length)){
+      target.ext=p.ext;target._ts=Date.now();
+    }
     p._removed=true;p._removedTs=Date.now();p._ts=Date.now();
     merged.push(p.name);
   });
@@ -11642,7 +11916,10 @@ function catClearKind(kind){
   if(!isSupRole()){alert('Solo el Supervisor administra el catálogo.');return;}
   var list=activeCatalog(kind);
   if(!list.length){showToast('El catálogo de '+catKindLabel(kind)+' ya está vacío','info');return;}
-  if(!confirm('¿Vaciar el catálogo de '+catKindLabel(kind)+' ('+list.length+' entrada'+(list.length>1?'s':'')+')?\n\nLos análisis NO se modifican: conservan su nombre y van a aparecer como "no catalogados" en la rectificación, para mapearlos contra la lista nueva que cargues.\n\nQueda registrado en el Audit Trail.'))return;
+  var _extN=list.filter(function(p){return p.ext&&(p.ext.items||[]).length;}).length;
+  if(!confirm('¿Vaciar el catálogo de '+catKindLabel(kind)+' ('+list.length+' entrada'+(list.length>1?'s':'')+')?\n\nLos análisis NO se modifican: conservan su nombre y van a aparecer como "no catalogados" en la rectificación, para mapearlos contra la lista nueva que cargues.'
+    +(_extN?'\n\n⚠ '+_extN+' entrada'+(_extN>1?'s':'')+' tiene'+(_extN>1?'n':'')+' análisis externos definidos: al vaciar se pierde esa configuración y habrá que definirla de nuevo sobre la lista nueva.':'')
+    +'\n\nQueda registrado en el Audit Trail.'))return;
   list.forEach(function(p){p._removed=true;p._removedTs=Date.now();p._ts=Date.now();});
   window._pcSel={};
   auditLog('DELETE','CATALOG','bulk',{description:'Catálogo de '+catKindLabel(kind)+' vaciado ('+list.length+' entrada(s)) para sustituirlo por un listado nuevo',kind:kind,count:list.length},'');
@@ -12624,6 +12901,7 @@ function renderTaskModal(){
       +'<h3 style="margin-bottom:4px">'+escH(t.producto)+'</h3>'
       +'<div style="font-size:12px;color:var(--text3);font-family:var(--mono);margin-bottom:16px">'+escH(t.lote)+'</div>'
       +_stdSecInfoBox(t)
+      +_extInfoBox(t)
       +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px;margin-bottom:16px;font-size:12px">'
       +'<div><span class="u-fg3">Tipo </span>'+sampleTypeBadge(t.tipo)+'</div>'
       +'<div><span class="u-fg3">Estado </span><span class="pill '+t.status+'" style="font-size:10px">'+statusLabel(t.status)+'</span></div>'
@@ -12738,7 +13016,7 @@ function renderTaskModal(){
   return'<div class="modal-overlay"><div class="modal">'
     +'<h3>'+(isEdit?'Editar análisis de lote':(newTaskPrefill.suggId?'Confirmar ingreso sugerido':'Nuevo análisis de lote'))+'</h3>'
     +_reqBanner+_ilBanner+_suggBanner
-    +(isEdit?_stdSecInfoBox(t):'')
+    +(isEdit?_stdSecInfoBox(t)+_extInfoBox(t):'')
     +'<div class="form-grid">'
     +'<div class="frow"><label>Tipo de muestra'+(t.tipo==='IL'?'':' <span style="color:var(--red)">*</span>')+'</label>'+(t.tipo==='IL'?'<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 11px;border:1px solid #1d4ed8;border-radius:20px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8">🔗 IL · Inter-laboratorio</span><input type="hidden" id="f-tipo" value="IL">':renderTipoPillsHtml(t.tipo||''))+'</div>'
     +'<div class="frow"><label>Producto</label><input type="text" id="f-prod" autocomplete="off"'+(function(){var k=catKindForTipo(t.tipo||'');var l=k?('pc-dl-'+k):'';return l?' list="'+l+'"':'';})()+' value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg">'+_catDatalistsHtml()+'</div>'
@@ -14786,6 +15064,7 @@ function resolveAllCopies(opts, how){
     if(opts.freeTaskId!=null && n.freeTaskId!==opts.freeTaskId) return;
     if(opts.analystId!=null && n.analystId!==opts.analystId) return;
     if(opts.needId!=null && n.needId!==opts.needId) return;
+    if(opts.pcId!=null && n.pcId!==opts.pcId) return;
     n.status='resolved';
     n.resolvedHow=how;
     n.resolvedBy=currentUser.id;
@@ -14805,7 +15084,7 @@ function getNotifEventLabel(n){
     'free_task_declined':'Tarea única declinada',
     'free_task_rejected':'Tarea única rechazada','sampling_rejected':'Muestreo rechazado',
     'schedule_rejected':'Horario rechazado','request_managed':'Solicitud gestionada',
-    'day_released':'Día liberado',
+    'day_released':'Día liberado','ext_match':'Análisis externo requerido',
   };
   return labels[n.type]||n.type;
 }
@@ -15655,6 +15934,15 @@ function autoResolveNotifs(){
         }
         break;
       }
+      // Análisis externos: resuelto si la tarea no existe o terminó, si ya fue
+      // solicitado, o si el producto salió del listado.
+      case 'ext_match': {
+        var _exP=n.pcId?productCatalog.find(function(x){return x.id===n.pcId;}):null;
+        stale = !task || !!task.extRequested
+          || ['done','reviewed','approved'].includes(task.status)
+          || !_exP || _exP._removed || !_exP.ext || !(_exP.ext.items||[]).length;
+        break;
+      }
     }
     if(stale) n.status='resolved';
   });
@@ -15749,6 +16037,11 @@ function renderNotifPanel(){
     ?replanNotifs.filter(function(n){return (n.type==='stdsec_created'||n.type==='stdsec_sampled'||n.type==='stdsec_match')&&n.status!=='resolved';})
         .sort(function(a,b){return(b.ts||0)-(a.ts||0);})
     :[];
+  // Análisis externos: ingresos del listado pendientes de solicitar (supervisor)
+  var extLabNotifs=isSup
+    ?replanNotifs.filter(function(n){return n.type==='ext_match'&&n.status!=='resolved';})
+        .sort(function(a,b){return(b.ts||0)-(a.ts||0);})
+    :[];
   var overdueAlerts=[];
   if(isSup){
     var _oTMs2=todayMs();
@@ -15785,7 +16078,7 @@ function renderNotifPanel(){
     +(isSup?ftPendConfirm.length+mgmtPendConfirm.length+mgmtNotDoneNotifs.length:replanNotifs.filter(function(n){
       return n.type==='free_task_assigned'&&n.forUserId===uid&&n.status!=='resolved'&&isUnread(n);
     }).length)
-    +planReqNotifs.filter(isUnread).length+responseNotifBadge+samplingDoneBadge+stdSecNotifs.filter(isUnread).length+overdueAlerts.length
+    +planReqNotifs.filter(isUnread).length+responseNotifBadge+samplingDoneBadge+stdSecNotifs.filter(isUnread).length+extLabNotifs.filter(isUnread).length+overdueAlerts.length
     +mgmtOverdue.length
     +ilrNotifs.length+docsNotifs.filter(isUnread).length
     +pendSuggPanelC+suggRespPanelC+revApprNotifs.length;
@@ -16052,6 +16345,25 @@ function renderNotifPanel(){
             +'<button class="btn sm dan" onclick="showNotifPanel=false;stdSecIgnoreMatch('+n.taskId+',\''+n.needId+'\')" style="font-size:10px">✗ Falso match</button>':'')
           +'<button class="btn sm" onclick="showNotifPanel=false;currentView=\'tasks\';window.tasksTab=\'stdsec\';render()" style="font-size:10px">Ver ⭐ Estándares</button>'
           +'<button class="btn sm" onclick="markStdSecNotifSeen(\''+n.id+'\')" style="font-size:10px">✓ Visto</button>'
+          +'</div>'
+          +'</div>';
+      });
+      html+='</div>';
+    }
+
+    // ── Análisis externos (supervisor): solicitar cuanto antes ──
+    if(extLabNotifs.length>0){
+      html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:#ecfeff">'
+        +'<div style="font-size:12px;font-weight:600;color:#0e7490;margin-bottom:8px">🔬 Análisis externos para solicitar ('+extLabNotifs.length+')</div>';
+      extLabNotifs.forEach(function(n){
+        html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid #06b6d4">'
+          +'<div class="u-12b">'+escH(n.producto||'')+(n.lote?' — '+escH(n.lote):'')+'</div>'
+          +'<div style="font-size:11px;color:var(--text2);margin:3px 0">Requiere análisis externo: <b>'+escH(n.analisis||'')+'</b></div>'
+          +'<div style="font-size:10px;color:var(--text3);margin-bottom:5px">'+new Date(n.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div>'
+          +'<div style="display:flex;gap:4px;flex-wrap:wrap">'
+          +'<button class="btn sm suc" onclick="showNotifPanel=false;markExtRequested('+n.taskId+')" style="font-size:10px">✓ Marcar solicitado</button>'
+          +'<button class="btn sm" onclick="showNotifPanel=false;openEdit('+n.taskId+')" style="font-size:10px">🔍 Ver producto</button>'
+          +'<button class="btn sm" onclick="markExtNotifSeen(\''+n.id+'\')" style="font-size:10px">✓ Visto</button>'
           +'</div>'
           +'</div>';
       });
@@ -16939,6 +17251,12 @@ function saveTask(){
     if(_ssN.length){setTimeout(function(){try{showToast('⭐ '+_ssT.producto+' tiene desarrollo de estándar secundario pendiente: prever muestreo adicional y ensayos de calificación.','warn');}catch(e){}},150);}
     // Notificar al supervisor los matches nuevos de esta tarea (dedup en la necesidad)
     stdSecNeedsForTask(_ssT).forEach(function(n){_stdSecNotifyMatches(n);});
+    // Análisis externos: producto del listado → avisar al supervisor para solicitarlo
+    var _exP2=extReqForTask(_ssT);
+    if(_exP2&&!_ssT.extRequested&&!['done','reviewed','approved'].includes(_ssT.status)){
+      setTimeout(function(){try{showToast('🔬 '+_ssT.producto+' requiere análisis externo: '+_extSummary(_exP2),'warn');}catch(e){}},250);
+    }
+    _extNotifyTask(_ssT);
   })();
   saveLS('counters');
   render();
