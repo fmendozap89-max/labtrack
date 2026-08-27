@@ -936,7 +936,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082702; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082703; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -6965,8 +6965,13 @@ function extBadge(t){
   var p=extReqForTask(t);
   if(!req&&(!p||['done','reviewed','approved'].includes(t.status)))return'';
   var sum=p?_extSummary(p):'';
+  var _lnk='';
+  if(req&&req.ilrId){
+    var _r=interLabRequests.find(function(x){return x.id===req.ilrId&&!x._deleted;});
+    if(_r)_lnk=' — solicitud inter-lab: '+(_ilrIsExternal(_r)?_ilrExtStep(_r).label:_ilrStatusInfo(_r.status).label);
+  }
   var title=req
-    ?('Análisis externo solicitado'+(req.ts?' el '+new Date(req.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}):'')+(sum?': '+sum:''))
+    ?('Análisis externo solicitado'+(req.ts?' el '+new Date(req.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}):'')+(sum?': '+sum:'')+_lnk)
     :('Requiere análisis externo — solicitarlo cuanto antes: '+sum);
   return '<span title="'+escH(title)+'" style="background:'+(req?'#d1fae5':'#cffafe')+';color:'+(req?'#065f46':'#0e7490')+';border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap;cursor:help">🔬 EXT'+(req?' ✓':'')+'</span>';
 }
@@ -6983,11 +6988,18 @@ function _extInfoBox(t){
     +(notes?'<div style="font-size:11px;margin-top:2px;opacity:.85">📝 '+escH(notes)+'</div>':'')
     +(req
       ?'<div style="font-size:11px;margin-top:4px">Solicitado por '+escH((getU(req.by)||{}).name||'')+(req.ts?' el '+new Date(req.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}):'')+'.'
+        +(function(){
+          if(!req.ilrId)return'';
+          var _r=interLabRequests.find(function(x){return x.id===req.ilrId&&!x._deleted;});
+          if(!_r)return'';
+          var _st=_ilrIsExternal(_r)?_ilrExtStep(_r):_ilrStatusInfo(_r.status);
+          return ' 🔗 Solicitud inter-lab a <b>'+escH(_ilrLabName(_r.destLabId,_r.destLabName))+'</b>: '+_st.icon+' '+_st.label+' (seguimiento en Sol. Inter-lab → Enviadas).';
+        })()
         +(isSupRole()?' <button class="btn sm" onclick="unmarkExtRequested('+t.id+')" title="Quitar la marca de solicitado (p. ej. si se marcó por error). Queda en el Audit Trail." style="font-size:10px">✕ Quitar marca</button>':'')
         +'</div>'
       :'<div style="font-size:11px;margin-top:4px">'
         +(isSupRole()
-          ?'<button class="btn sm" onclick="markExtRequested('+t.id+')" style="font-size:10px;background:#0e7490;border-color:#0e7490;color:#fff">✓ Marcar solicitado</button>'
+          ?'<button class="btn sm" onclick="markExtRequested('+t.id+')" style="font-size:10px;background:#0e7490;border-color:#0e7490;color:#fff">✓ Marcar solicitado…</button>'
           :'El supervisor debe solicitar el análisis externo cuanto antes.')
         +'</div>')
     +'</div>';
@@ -7017,27 +7029,58 @@ function _extNotifySweep(p){
     if(extReqForTask(t)===p)_extNotifyTask(t);
   });
 }
-// Marcar el análisis externo como solicitado (solo supervisor; queda en la tarea)
+// Estampa "solicitado" en la tarea (marca + resolución de avisos + audit), SIN
+// guardar ni re-renderizar: el caller decide cuándo persistir para no duplicar
+// escrituras al gist (cuota ~100/h). ilrId vincula con la solicitud inter-lab.
+function _extStampCore(t,ilrId){
+  if(!t||t.extRequested)return false;
+  var p=extReqForTask(t);
+  t.extRequested={by:currentUser.id,ts:Date.now()};
+  if(ilrId)t.extRequested.ilrId=ilrId;
+  t._ts=Date.now();
+  resolveAllCopies({type:'ext_match',taskId:t.id},'requested');
+  auditLog('EDIT','TASK',t.id,{field:'extRequested',newVal:ilrId?'solicitado (inter-lab '+ilrId+')':'solicitado',
+    description:'Análisis externo solicitado: '+t.producto+' '+t.lote+(p?' ('+_extSummary(p)+')':'')+(ilrId?' — vinculado a solicitud inter-lab':'')},'');
+  return true;
+}
+// Chooser: al confirmar "solicitado", ofrecer crear la solicitud inter-lab
+// vinculada (queda con seguimiento: esperando informe → informe → revisado →
+// aprobado) o solo dejar la marca (gestión por otra vía, p. ej. mail/teléfono).
 function markExtRequested(taskId){
   if(!isSupRole()){alert('Solo el Supervisor puede marcar el análisis externo como solicitado.');return;}
   var t=tasks.find(function(x){return x.id===taskId&&!x._deleted;});
   if(!t||t.extRequested)return;
+  if(document.getElementById('extreq-choice'))return;
   var p=extReqForTask(t);
-  if(!confirm('¿Marcar el análisis externo de '+t.producto+' — '+t.lote+' como solicitado?'+(p?'\n\n'+_extSummary(p):'')))return;
-  t.extRequested={by:currentUser.id,ts:Date.now()};
-  t._ts=Date.now();
-  resolveAllCopies({type:'ext_match',taskId:t.id},'requested');
-  auditLog('EDIT','TASK',t.id,{field:'extRequested',newVal:'solicitado',
-    description:'Análisis externo solicitado: '+t.producto+' '+t.lote+(p?' ('+_extSummary(p)+')':'')},'');
+  document.body.insertAdjacentHTML('beforeend',
+    '<div class="modal-overlay" style="z-index:650" id="extreq-choice">'
+    +'<div class="modal" style="width:min(480px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:6px;border-bottom:none;padding-bottom:0">🔬 Análisis externo — '+escH(t.producto)+' '+escH(t.lote)+'</h3>'
+    +(p?'<div style="background:var(--bg2);border-radius:var(--radius);padding:6px 10px;margin-bottom:10px;font-size:12px;color:var(--text2)">'+escH(_extSummary(p))+'</div>':'')
+    +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px;line-height:1.6">Creá la <b>solicitud inter-laboratorio</b> para dejar el envío registrado con seguimiento (esperando informe → informe → revisado → aprobado), o marcá solicitado <b>sin solicitud</b> si el envío se gestiona por otra vía.</p>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">'
+    +'<button class="btn" onclick="document.getElementById(\'extreq-choice\').remove()">Cancelar</button>'
+    +'<button class="btn" onclick="_extChoiceMark('+t.id+')">✓ Marcar sin solicitud</button>'
+    +'<button class="btn pri" onclick="_extChoiceILR('+t.id+',\''+(p?p.id:'')+'\')">🔗 Crear solicitud inter-lab</button>'
+    +'</div></div></div>');
+}
+function _extChoiceMark(taskId){
+  var m=document.getElementById('extreq-choice');if(m)m.remove();
+  var t=tasks.find(function(x){return x.id===taskId&&!x._deleted;});
+  if(!_extStampCore(t,null))return;
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow extReq:',e);});
   showToast('🔬 Análisis externo marcado como solicitado','success');
+}
+function _extChoiceILR(taskId,pcId){
+  var m=document.getElementById('extreq-choice');if(m)m.remove();
+  openSolicitudModal(taskId,pcId||null);
 }
 function unmarkExtRequested(taskId){
   if(!isSupRole()){alert('Solo el Supervisor puede quitar la marca de solicitado.');return;}
   var t=tasks.find(function(x){return x.id===taskId;});
   if(!t||!t.extRequested)return;
-  if(!confirm('¿Quitar la marca de análisis externo solicitado de '+t.producto+' — '+t.lote+'?\n\nEl aviso vuelve a quedar pendiente. Queda en el Audit Trail.'))return;
+  if(!confirm('¿Quitar la marca de análisis externo solicitado de '+t.producto+' — '+t.lote+'?\n\nEl aviso vuelve a quedar pendiente. Queda en el Audit Trail.'+(t.extRequested.ilrId?'\n\nLa solicitud inter-lab vinculada NO se elimina — solo se desvincula (gestionala en Sol. Inter-lab si corresponde).':'')))return;
   delete t.extRequested;
   t.extNotified=[]; // rehabilita el aviso si el producto sigue en el listado
   t._ts=Date.now();
@@ -7070,6 +7113,7 @@ function openExtReqModal(pcId){
     +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:var(--text2);flex-wrap:wrap"><b>'+escH(p.name)+'</b><span class="u-xs3">'+catKindLabel(p.kind)+'</span></div>'
     +'<p style="font-size:12px;color:var(--text3);margin:0 0 10px">Ensayos de este producto que se tercerizan: qué análisis y dónde se realiza. Al ingresar el producto, el supervisor recibe el aviso 🔔 para solicitarlos cuanto antes.</p>'
     +'<div id="extreq-rows">'+items.map(_extRowHtml).join('')+'</div>'
+    +_extLabDatalistHtml()
     +'<button class="btn sm" onclick="_extAddRow()" style="margin-bottom:10px">+ Agregar análisis</button>'
     +'<div class="frow"><label>Notas</label><textarea id="extreq-notes" style="min-height:50px" placeholder="Ej.: coordinar retiro de muestra, demora habitual 15 días…">'+escH((p.ext||{}).notes||'')+'</textarea></div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;flex-wrap:wrap">'
@@ -7079,11 +7123,21 @@ function openExtReqModal(pcId){
     +'</div></div></div>';
   document.body.appendChild(div);
 }
+// Datalist con los laboratorios existentes (conectados + seguimiento manual):
+// el "dónde" del requisito debe ser un destino real de solicitudes inter-lab
+// para que el vínculo ext→inter-lab pueda sugerir el destino.
+function _extLabDatalistHtml(){
+  var names={};
+  labProfiles.forEach(function(l){if(l.id!==activeLabId&&l.name)names[_catNorm(l.name)]=l.name;});
+  externalLabs.forEach(function(l){if(l.name&&!names[_catNorm(l.name)])names[_catNorm(l.name)]=l.name;});
+  var list=Object.values(names).sort(function(a,b){return a.localeCompare(b,'es',{sensitivity:'base'});});
+  return '<datalist id="ext-lab-dl">'+list.map(function(n){return '<option value="'+escH(n)+'">';}).join('')+'</datalist>';
+}
 function _extRowHtml(it){
   it=it||{};
   return '<div class="extreq-row" style="display:flex;gap:6px;margin-bottom:6px;align-items:center">'
     +'<input type="text" class="extreq-an" placeholder="Análisis (ej.: Endotoxinas)" value="'+escH(it.analisis||'')+'" style="flex:1.2;min-width:0">'
-    +'<input type="text" class="extreq-lab" placeholder="Dónde se realiza" value="'+escH(it.lab||'')+'" style="flex:1;min-width:0">'
+    +'<input type="text" class="extreq-lab" autocomplete="off" list="ext-lab-dl" placeholder="Dónde se realiza (laboratorio)" value="'+escH(it.lab||'')+'" style="flex:1;min-width:0">'
     +'<button class="btn sm" title="Quitar fila" onclick="this.parentNode.remove()" style="flex-shrink:0;color:var(--red)">✕</button>'
     +'</div>';
 }
@@ -7105,6 +7159,30 @@ function saveExtReq(pcId){
   });
   if(incomplete){alert('Completá el análisis Y dónde se realiza en cada fila (o dejá la fila vacía para descartarla).');return;}
   if(!items.length){removeExtReq(pcId);return;} // sin filas = quitar el requisito
+  // El "dónde" contra los laboratorios reales: si coincide (conectado o de
+  // seguimiento manual) se adopta su grafía; si no existe, se ofrece crearlo como
+  // laboratorio de seguimiento manual — así el destino sugerido del vínculo
+  // ext→inter-lab siempre cierra. Rechazar deja el texto libre (datos legacy).
+  var _labCanon=function(n){
+    var v=_catNorm(n);
+    var pl=labProfiles.find(function(l){return l.id!==activeLabId&&_catNorm(l.name)===v;});
+    if(pl)return pl.name;
+    var el=externalLabs.find(function(l){return _catNorm(l.name)===v;});
+    return el?el.name:null;
+  };
+  var _asked={};
+  items.forEach(function(it){
+    var canon=_labCanon(it.lab);
+    if(canon){it.lab=canon;return;}
+    var key=_catNorm(it.lab);
+    if(key in _asked){it.lab=_asked[key];return;}
+    if(confirm('«'+it.lab+'» no está entre los laboratorios destino de solicitudes inter-lab.\n\n¿Crearlo como laboratorio sin conexión (seguimiento manual)? Al solicitar el análisis externo se sugerirá como destino.\n\nCancelar lo deja como texto libre, sin vínculo.')){
+      var _id='ext_'+Date.now()+'_'+Math.random().toString(36).slice(2,5);
+      externalLabs.push({id:_id,name:it.lab});
+      auditLog('CREATE','LAB',_id,{description:'Laboratorio sin conexión creado desde análisis externos: '+it.lab},'');
+    }
+    _asked[key]=it.lab;
+  });
   var notes=((document.getElementById('extreq-notes')||{}).value||'').trim();
   var isNew=!(p.ext&&(p.ext.items||[]).length);
   p.ext={items:items,notes:notes,by:currentUser.id,ts:Date.now()};
@@ -7140,14 +7218,36 @@ function removeExtReq(pcId){
   saveNow().catch(function(e){console.error('saveNow extDel:',e);});
   showToast('✓ «'+p.name+'» quitado del listado','success');
 }
+// Búsqueda unificada del picker de análisis externos: resuelve lo tipeado contra
+// PT y MP a la vez (pedido 2026-08-27: los optgroups PT-primero/MP-después
+// dificultaban encontrar las MP). El sufijo « — PT»/« — MP» de la datalist
+// desambigua nombres repetidos entre familias; sobre un producto ya definido
+// abre el modal en modo edición.
+function _extPickFromSearch(){
+  var el=document.getElementById('ext-new-prod');
+  var v=((el||{}).value||'').trim();
+  if(!v){alert('Escribí el producto (PT o MP) para definir su análisis externo.');return;}
+  var m=v.match(/^(.*?)\s+—\s+(PT|MP)$/);
+  var name=m?m[1].trim():v,kind=m?m[2]:null;
+  var cands=[];
+  ['PT','MP'].forEach(function(k){
+    if(kind&&k!==kind)return;
+    var e=catFindByName(k,name);
+    if(e)cands.push(e);
+  });
+  if(!cands.length){
+    alert('«'+name+'» no está en el catálogo'+(kind?' de '+catKindLabel(kind):' (ni PT ni MP)')+'.\n\nElegí una opción de la lista desplegable, o agregalo primero al catálogo.');
+    return;
+  }
+  if(cands.length>1){
+    alert('«'+name+'» existe como PT y como MP. Elegí en la lista la opción con el sufijo « — PT» o « — MP».');
+    return;
+  }
+  openExtReqModal(cands[0].id);
+}
 // Sección del listado en Administración → Productos (sup edita; auditor consulta)
 function renderExtReqSection(isSup){
   var list=extCatalogList();
-  function pickOpts(kind,label){
-    var os=activeCatalog(kind).filter(function(p){return !(p.ext&&(p.ext.items||[]).length);})
-      .map(function(p){return '<option value="'+p.id+'">'+escH(p.name)+'</option>';}).join('');
-    return os?'<optgroup label="'+label+'">'+os+'</optgroup>':'';
-  }
   var h='<div style="margin:4px 0 18px;background:var(--surface);border:1px solid #06b6d4;border-left:4px solid #06b6d4;border-radius:var(--radius-lg);padding:12px 14px">'
     +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">'
     +'<div style="font-size:14px;font-weight:700;color:#0e7490">🔬 Análisis externos</div>'
@@ -7155,12 +7255,15 @@ function renderExtReqSection(isSup){
     +'</div>'
     +'<div style="font-size:12px;color:var(--text2);margin-bottom:8px">Productos cuyo análisis incluye ensayos <b>tercerizados</b>: qué análisis y dónde se realiza. Al guardar un ingreso de un producto del listado, el supervisor recibe el aviso 🔔 para <b>solicitar el análisis externo cuanto antes</b>; la solicitud se marca en el propio producto (🔬 EXT ✓).</div>';
   if(isSup){
+    // Un solo buscador sobre PT+MP mezclados (orden alfabético entre familias):
+    // la datalist matchea por subcadena en ambas a la vez.
+    var _all=[];
+    ['PT','MP'].forEach(function(k){activeCatalog(k).forEach(function(p){_all.push(p);});});
+    _all.sort(function(a,b){return (a.name||'').localeCompare(b.name||'','es',{sensitivity:'base'});});
     h+='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">'
-      +'<select id="ext-new-prod" style="flex:1;min-width:220px;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)">'
-      +'<option value="">— elegir producto del catálogo —</option>'
-      +pickOpts('PT','Productos terminados')+pickOpts('MP','Materias primas')
-      +'</select>'
-      +'<button class="btn sm pri" onclick="var s=document.getElementById(\'ext-new-prod\');if(!s||!s.value){alert(\'Elegí un producto del catálogo.\');}else{openExtReqModal(s.value);}">+ Definir análisis externo</button>'
+      +'<input id="ext-new-prod" type="text" autocomplete="off" list="ext-dl-prod" placeholder="Escribí para buscar en PT y MP…" style="flex:1;min-width:220px;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)" onkeydown="if(event.key===\'Enter\')_extPickFromSearch()">'
+      +'<datalist id="ext-dl-prod">'+_all.map(function(p){return '<option value="'+escH(p.name+' — '+p.kind)+'">';}).join('')+'</datalist>'
+      +'<button class="btn sm pri" onclick="_extPickFromSearch()">+ Definir análisis externo</button>'
       +'</div>';
   }
   if(!list.length){
@@ -10747,14 +10850,14 @@ function renderSolicitudes(){
           :'<span class="pill '+si.cls+'" style="font-size:10px">'+si.icon+' '+escH(si.label)+'</span>'+(req.status==='docs_enviados'?'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-left:4px;animation:pulse 1.2s infinite"></span>':'');
         return'<div class="trow" style="grid-template-columns:'+_colEnv+';cursor:default'+(isClosed?';opacity:.7':'')+'">'
           +'<div>'+prodLote+'</div>'
-          +'<div style="font-size:11px">'+escH(destName)+(ext?' <span style="font-size:9px;color:var(--text3)">(externo)</span>':'')+'</div>'
+          +'<div style="font-size:11px">'+escH(destName)+(ext?' <span style="font-size:9px;color:var(--text3)">(seguimiento manual)</span>':'')+'</div>'
           +'<div style="font-size:11px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escH(req.analisis||'')+'">'+escH((req.analisis||'').slice(0,40))+'</div>'
           +'<div style="font-size:11px;font-family:var(--mono)">'+sentDate+'</div>'
           +'<div style="font-size:11px;font-family:var(--mono)">'+limitDate+'</div>'
           +'<div>'+statusCell+'</div>'
           +'<div style="font-size:11px">'+escH(assignedName)+'</div>'
           +'<div onclick="event.stopPropagation()" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">'
-          +(ext&&(isSup||isRev)?'<button class="btn sm pri" onclick="event.stopPropagation();_openExtTrackModal(\''+req.id+'\')" title="Seguimiento del laboratorio externo">📋 Seguimiento</button>':'')
+          +(ext&&(isSup||isRev)?'<button class="btn sm pri" onclick="event.stopPropagation();_openExtTrackModal(\''+req.id+'\')" title="Seguimiento manual — laboratorio sin conexión a LabTrack">📋 Seguimiento</button>':'')
           +(!ext&&(isSup||isRev)?'<button class="btn sm" onclick="event.stopPropagation();_showILRDetails(\''+req.id+'\')" title="Ver detalles de seguimiento">🔍 Detalles</button>':'')
           +(canComplete?'<button class="btn sm suc" onclick="event.stopPropagation();_markILRCompleto(\''+req.id+'\')" title="Confirmar recepción y cerrar">✓ Confirmar recepción</button>':'')
           +(canDelete?'<button class="btn sm u-fg3" onclick="event.stopPropagation();_deleteILR(\''+req.id+'\')" title="Eliminar solicitud">🗑</button>':'')
@@ -11161,7 +11264,7 @@ async function _showILRDetails(reqId){
     detEl.innerHTML='<div style="font-size:12px;color:var(--text3);text-align:center;padding:8px 0">'
       +(req.status==='pendiente'?'La solicitud aún no fue recibida por el laboratorio destino.'
         :destLab?'Sin información de tarea local en destino.'
-        :'Laboratorio externo — los detalles no están disponibles automáticamente.')
+        :'Laboratorio sin conexión a LabTrack — los detalles no llegan automáticamente (usá 📋 Seguimiento).')
       +'</div>';
     return;
   }
@@ -11255,7 +11358,7 @@ function _openExtTrackModal(reqId){
   div.id='ext-track-modal';
   div.innerHTML='<div class="modal-overlay" style="z-index:600">'
     +'<div class="modal" style="width:min(420px,calc(100vw - 32px))">'
-    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">Seguimiento — laboratorio externo</h3>'
+    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">Seguimiento manual — laboratorio sin conexión</h3>'
     +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(prod)+(req.lote?' — Lote: <span class="u-mono">'+escH(req.lote)+'</span>':'')+' → <b>'+escH(destName)+'</b></p>'
     +'<label style="font-size:11px;font-weight:600;color:var(--text2)">📅 Fecha estimada de informe <span style="color:var(--text3);font-weight:400">(para detectar atrasos)</span></label>'
     +'<input type="date" id="et-est" value="'+(req.extEstReportDate||req.dueDate||'')+'" style="'+_inp+'">'
@@ -11315,7 +11418,10 @@ async function _doSolicitudStatusUpdate(req, newStatus, extra){
   render();
 }
 
-function openSolicitudModal(taskId){
+// extPcId (opcional): id de catálogo cuando la solicitud nace del aviso de
+// análisis externo — precarga análisis/destino y al guardar estampa 🔬 EXT ✓
+// vinculado a la solicitud (t.extRequested.ilrId).
+function openSolicitudModal(taskId,extPcId){
   var isSup=isSupRole(),isRev=isReviewerRole(),uid=currentUser.id;
   var t=taskId?tasks.find(function(x){return x.id===taskId;}):null;
   if(t&&t.tipo==='IL'){alert('Las tareas inter-lab recibidas no pueden generar nuevas solicitudes inter-lab.');return;}
@@ -11340,8 +11446,11 @@ function openSolicitudModal(taskId){
 
   // Solo labs con gistId+token: sin ellos la solicitud sería inentregable (el
   // receptor matchea por gistId y la notificación necesita escribir en su gist)
-  var partnerOpts=labProfiles.filter(function(l){return l.id!==activeLabId&&l.gistId&&l.token;}).map(function(l){return'<option value="lab:'+escH(l.id)+'">'+escH(l.name)+' (interno)</option>';}).join('');
-  var extOpts=externalLabs.map(function(l){return'<option value="ext:'+escH(l.id)+'">'+escH(l.name)+'</option>';}).join('');
+  // Etiquetas por CONECTIVIDAD, no "interno/externo": «externo» queda reservado
+  // para el análisis externo del producto (ensayo tercerizado) — evita el doble
+  // sentido y la trampa de leer "(interno)" como "se hace acá".
+  var partnerOpts=labProfiles.filter(function(l){return l.id!==activeLabId&&l.gistId&&l.token;}).map(function(l){return'<option value="lab:'+escH(l.id)+'">'+escH(l.name)+' (conectado — usa LabTrack)</option>';}).join('');
+  var extOpts=externalLabs.map(function(l){return'<option value="ext:'+escH(l.id)+'">'+escH(l.name)+' (seguimiento manual)</option>';}).join('');
   var destOpts='<option value="">Seleccionar destino…</option>'+partnerOpts+extOpts;
 
   // Product/lot display — read-only, sourced from task
@@ -11369,12 +11478,34 @@ function openSolicitudModal(taskId){
     +'<div class="frow"><label>Análisis solicitados</label><textarea id="sol-analisis" placeholder="Describa los análisis requeridos…" style="height:70px"></textarea></div>'
     +'<div class="frow"><label>Fecha límite</label><input type="date" id="sol-due" value="'+today()+'"></div>'
     +'<div class="frow"><label>Comentarios</label><textarea id="sol-comments" style="height:50px"></textarea></div>'
+    +'<input type="hidden" id="sol-ext-pcid" value="'+escH(extPcId||'')+'">'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">'
     +'<button class="btn" onclick="document.getElementById(\'solicitud-modal\').remove()">Cancelar</button>'
     +'<button class="btn pri" onclick="_saveSolicitud('+(t?t.id:'null')+')">Enviar solicitud</button>'
     +'</div>'
     +'</div></div>';
   document.body.insertAdjacentHTML('beforeend',html);
+  // Precarga desde el requisito de análisis externo del catálogo
+  if(extPcId){
+    var _p=productCatalog.find(function(x){return x.id===extPcId&&!x._removed;});
+    var _its=_p&&_p.ext?(_p.ext.items||[]):[];
+    if(_its.length){
+      var _an=document.getElementById('sol-analisis');
+      if(_an&&!_an.value)_an.value=_its.map(function(i){return i.analisis;}).join('\n');
+      // Destino sugerido: el "dónde" del catálogo contra los laboratorios
+      // existentes — conectados primero, después seguimiento manual — por
+      // nombre normalizado (igualdad o contención)
+      var _ln=_catNorm(_its[0].lab||'');
+      if(_ln){
+        var _nm=function(l){var n=_catNorm(l.name);return n===_ln||n.indexOf(_ln)>=0||_ln.indexOf(n)>=0;};
+        var _ds=document.getElementById('sol-destino');
+        var _pl=labProfiles.filter(function(l){return l.id!==activeLabId&&l.gistId&&l.token;}).find(_nm);
+        var _el=_pl?null:externalLabs.find(_nm);
+        if(_ds&&_pl)_ds.value='lab:'+_pl.id;
+        else if(_ds&&_el)_ds.value='ext:'+_el.id;
+      }
+    }
+  }
 }
 
 function _solTaskChange(){
@@ -11445,6 +11576,17 @@ async function _saveSolicitud(taskId){
     createdByName:currentUser.name
   };
   interLabRequests.push(req);
+  // Vínculo con el análisis externo del producto: si la solicitud nace del aviso
+  // 🔬 (sol-ext-pcid) se estampa directo; si no, y el producto lo tiene pendiente,
+  // se pregunta — la solicitud puede ser por otro motivo. Antes del saveLS/saveNow
+  // para que UNA escritura lleve solicitud + marca (cuota de gist).
+  var _extPcEl=document.getElementById('sol-ext-pcid');
+  var _fromExt=!!(_extPcEl&&_extPcEl.value);
+  if(isSupRole()&&!t.extRequested&&extReqForTask(t)){
+    if(_fromExt||confirm('Este producto tiene análisis externo pendiente de solicitar ('+_extSummary(extReqForTask(t))+').\n\n¿Esta solicitud corresponde a ese análisis externo? Quedará marcado 🔬 EXT ✓ vinculado a la solicitud.')){
+      _extStampCore(t,req.id);
+    }
+  }
   saveLS();saveNow().catch(function(e){console.error('_saveSolicitud:',e);});
 
   // Push notification to internal partner if possible
@@ -11489,7 +11631,7 @@ function renderAdminModule(){
   var tb='<div class="tab-bar">'
     +_at('usuarios','👥 Usuarios','Alta, edición, roles, contraseñas y colores de los usuarios')
     +_at('productos','📦 Productos','Catálogo maestro de productos terminados y materias primas, y rectificación de nombres')
-    +_at('labs','🏭 Laboratorios','Sincronización GitHub, laboratorios internos y externos, limpieza inter-lab')
+    +_at('labs','🏭 Laboratorios','Sincronización GitHub, laboratorios conectados y sin conexión, limpieza inter-lab')
     +_at('sistema','⚙ Sistema','Guía de usuario, tipos de muestra y reinicio de datos')
     +_at('audit','🔍 Audit Trail','Registro de todas las acciones del sistema')
     +'</div>';
@@ -11500,6 +11642,17 @@ function renderAdminModule(){
 function renderProductCatalogTab(){
   if(!canViewSup())return '<div class="empty">Acceso restringido</div>';
   var isSup=isSupRole();
+  // Sub-pestañas: el listado de análisis externos crece y empujaba el catálogo
+  // fuera de la vista — cada sección en su propia pestaña.
+  if(typeof window._pcTab==='undefined')window._pcTab='catalogo';
+  var _extCnt=extCatalogList().length;
+  var _pcTabBar='<div class="tab-bar" style="margin-bottom:14px;max-width:440px">'
+    +'<div class="tab'+(window._pcTab==='catalogo'?' active':'')+'" onclick="window._pcTab=\'catalogo\';render()">📦 Catálogo</div>'
+    +'<div class="tab'+(window._pcTab==='ext'?' active':'')+'" onclick="window._pcTab=\'ext\';render()">🔬 Análisis externos'+(_extCnt?' ('+_extCnt+')':'')+'</div>'
+    +'</div>';
+  if(window._pcTab==='ext'){
+    return '<div class="admin-wrap">'+_pcTabBar+renderExtReqSection(isSup)+'</div>';
+  }
   var q=_catNorm(window._pcSearch||'');
   // Uso por nombre normalizado (análisis activos, cualquier estado)
   var useCount={};
@@ -11595,9 +11748,9 @@ function renderProductCatalogTab(){
     fixHtml+='<div style="font-size:11px;color:var(--text3)">Escribí al menos 2 caracteres para buscar.</div>';
   }
   return '<div class="admin-wrap">'
+    +_pcTabBar
     +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><h4 style="margin-bottom:0">📦 Catálogo maestro de productos</h4></div>'
     +'<div class="sub">Los análisis <b>PT / EE / Val / Limp</b> se nombran desde los productos terminados (una limpieza es de un producto) y las <b>MP</b> desde las materias primas (los demás tipos siguen con texto libre). El campo Producto autocompleta desde este catálogo y no admite nombres fuera de la lista. Marcá con la casilla productos <b>analíticamente equivalentes</b> (p. ej. presentaciones que solo difieren en volumen) para <b>⛓ unificarlos</b>; con <b>🗑 Vaciar</b> podés sustituir el listado completo por uno nuevo y rectificar lo existente contra él.</div>'
-    +renderExtReqSection(isSup)
     +(isSup?'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">'
       +'<input type="text" id="pc-new-name" placeholder="Nombre del producto…" style="flex:1;min-width:200px;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
       +'<select id="pc-new-kind" style="padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)"><option value="PT">Producto terminado</option><option value="MP">Materia prima</option></select>'
@@ -12200,8 +12353,8 @@ function renderAdmin(){
   if(_tab==='labs'){
   html+=(function(){
       var eh='<div style="margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px">'
-        +'<div style="font-weight:700;margin-bottom:4px">🏭 Laboratorios externos</div>'
-        +'<div style="font-size:12px;color:var(--text2);margin-bottom:12px">Laboratorios no configurados en el sistema pero usados como destino en solicitudes inter-lab.</div>';
+        +'<div style="font-weight:700;margin-bottom:4px">🏭 Laboratorios sin conexión (seguimiento manual)</div>'
+        +'<div style="font-size:12px;color:var(--text2);margin-bottom:12px">Laboratorios que no usan LabTrack pero reciben solicitudes inter-lab: sus solicitudes se siguen a mano (esperando informe → informe → revisado → aprobado).</div>';
       if(externalLabs.length){
         eh+='<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">';
         externalLabs.forEach(function(lab){
@@ -12213,11 +12366,11 @@ function renderAdmin(){
         });
         eh+='</div>';
       } else {
-        eh+='<div style="font-size:12px;color:var(--text3);margin-bottom:10px">No hay laboratorios externos configurados.</div>';
+        eh+='<div style="font-size:12px;color:var(--text3);margin-bottom:10px">No hay laboratorios sin conexión configurados.</div>';
       }
       eh+='<div style="display:flex;gap:8px;align-items:flex-end">'
         +'<div style="flex:1"><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Nombre del laboratorio</label>'
-        +'<input type="text" id="new-extlab-name" placeholder="Ej: Lab Externo ANMAT" style="font-size:12px;padding:6px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);width:100%"></div>'
+        +'<input type="text" id="new-extlab-name" placeholder="Ej: ANMAT" style="font-size:12px;padding:6px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);width:100%"></div>'
         +'<button class="btn sm pri" onclick="adminAddExternalLab()" style="height:31px">+ Agregar</button>'
         +'</div>'
         +'<div id="extlab-msg" style="font-size:12px;min-height:16px;margin-top:6px;color:var(--red)"></div>'
@@ -12264,7 +12417,7 @@ function adminAddExternalLab(){
 }
 
 function adminDeleteExternalLab(labId){
-  if(!confirm('¿Eliminar este laboratorio externo?'))return;
+  if(!confirm('¿Eliminar este laboratorio sin conexión?\n\nLas solicitudes ya enviadas a él no se borran.'))return;
   _regDeletion('externalLabs',labId); // sin registro, el merge lo resucitaría
   externalLabs=externalLabs.filter(function(l){return l.id!==labId;});
   saveLS();saveNow().catch(function(e){console.error('adminDeleteExternalLab:',e);});
@@ -16397,7 +16550,7 @@ function renderNotifPanel(){
           +'<div style="font-size:11px;color:var(--text2);margin:3px 0">Requiere análisis externo: <b>'+escH(n.analisis||'')+'</b></div>'
           +'<div style="font-size:10px;color:var(--text3);margin-bottom:5px">'+new Date(n.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div>'
           +'<div style="display:flex;gap:4px;flex-wrap:wrap">'
-          +'<button class="btn sm suc" onclick="showNotifPanel=false;markExtRequested('+n.taskId+')" style="font-size:10px">✓ Marcar solicitado</button>'
+          +'<button class="btn sm suc" onclick="showNotifPanel=false;markExtRequested('+n.taskId+')" style="font-size:10px">✓ Marcar solicitado…</button>'
           +'<button class="btn sm" onclick="showNotifPanel=false;openEdit('+n.taskId+')" style="font-size:10px">🔍 Ver producto</button>'
           +'<button class="btn sm" onclick="markExtNotifSeen(\''+n.id+'\')" style="font-size:10px">✓ Visto</button>'
           +'</div>'
