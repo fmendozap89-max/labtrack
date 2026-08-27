@@ -936,7 +936,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082701; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082702; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -7187,21 +7187,43 @@ function renderExtReqSection(isSup){
 
 // ── DESARROLLO DE ESTÁNDAR SECUNDARIO (MP activas) ──
 // Normalización para matching de nombres libres: minúsculas, sin acentos, sin
-// puntuación. LAXO a propósito: un falso positivo se descarta con un clic; un
-// falso negativo (aviso que no salta) es el peor caso.
+// puntuación. Fallback LAXO a propósito para datos no catalogados: un falso
+// positivo se descarta con un clic; un falso negativo (aviso que no salta) es
+// el peor caso.
 function _normProd(s){
   return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
 }
-// Necesidad ↔ tarea MP: match si un nombre contiene al otro, o si todas las
-// palabras del más corto están en el más largo ("Dipirona" ↔ "Dipirona MP").
+// Entrada del catálogo de MP por nombre exacto normalizado. Igual que
+// catFindByName('MP',…) pero sin el sort de activeCatalog: corre en el camino
+// caliente del render (badge ⭐ por fila de listado).
+function _stdSecCatEntry(name){
+  var n=_catNorm(name);
+  if(!n)return null;
+  for(var i=0;i<productCatalog.length;i++){
+    var p=productCatalog[i];
+    if(!p._removed&&p.kind==='MP'&&_catNorm(p.name)===n)return p;
+  }
+  return null;
+}
+// Necesidad ↔ tarea MP. Listado maestro primero: si la necesidad y el ingreso
+// resuelven a una entrada del catálogo de MP, matchean solo si es LA MISMA
+// (evita falsos positivos entre MP de nombre parecido, p. ej. «Dipirona» vs
+// «Dipirona sódica»). Fallback laxo (contención o palabras compartidas) para
+// necesidades viejas sin pcId o ingresos con nombres no catalogados.
 function stdSecMatchesTask(need,t){
   if(!t||t._deleted||t.tipo!=='MP')return false;
   // Aplica hasta "Completado p/ revisar": mientras el análisis de aprobación esté
   // abierto se pueden sumar los ensayos extra de calificación como estándar.
   if(['done','reviewed','approved'].includes(t.status))return false;
   if((t.stdSecIgnore||[]).indexOf(need.id)>=0)return false; // descartado manualmente
-  var a=_normProd(need.producto),b=_normProd(t.producto);
+  var _ne=(need.pcId?productCatalog.find(function(p){return p.id===need.pcId&&!p._removed;}):null)
+    ||_stdSecCatEntry(need.producto);
+  var _te=_stdSecCatEntry(t.producto);
+  if(_ne&&_te)return _ne.id===_te.id;
+  // _ne.name y no need.producto: si la MP se rectificó en el catálogo, el pcId
+  // sigue a la entrada renombrada y el nombre guardado puede quedar viejo.
+  var a=_normProd(_ne?_ne.name:need.producto),b=_normProd(t.producto);
   if(!a||!b)return false;
   if(b.indexOf(a)>=0||a.indexOf(b)>=0)return true;
   var wa=a.split(' '),wb=b.split(' ');
@@ -7276,7 +7298,7 @@ function renderStdSecModal(){
     +'<button onclick="showStdSecModal=false;render()" style="border:none;background:none;font-size:18px;cursor:pointer">✕</button></div>'
     +'<div class="modal-body">'
     +'<p style="font-size:12px;color:var(--text3);margin:0 0 14px">Cuando ingrese esta materia prima activa, el aviso indicará muestrear cantidad adicional para análisis complementarios y fraccionamiento como estándar secundario.</p>'
-    +'<div class="frow"><label>Materia prima *</label><input id="ssn-producto" type="text" placeholder="Nombre de la MP (como figura en los ingresos)"></div>'
+    +'<div class="frow"><label>Materia prima *</label><input id="ssn-producto" type="text" autocomplete="off" list="pc-dl-MP" placeholder="Escribí para buscar en el listado maestro de MP…">'+_catDatalistsHtml()+'</div>'
     +'<div class="frow"><label>Fecha límite deseada</label><input id="ssn-due" type="date" title="Ej.: vencimiento del estándar actual"></div>'
     +'<div class="frow"><label>Motivo / Notas</label><textarea id="ssn-notes" style="min-height:60px" placeholder="Ej.: estándar actual vence 10/2026, queda ~200 mg…"></textarea></div>'
     +'</div>'
@@ -7290,9 +7312,23 @@ function submitStdSecNeed(){
   if(isAuditorRole()){alert('Modo auditor: solo lectura.');return;}
   var prod=((document.getElementById('ssn-producto')||{}).value||'').trim();
   if(!prod){alert('Indicá el nombre de la materia prima.');return;}
+  // Listado maestro de MP (estricto, como en los ingresos): la necesidad se registra
+  // sobre una MP del catálogo — nombre canónico + pcId para matching sin ambigüedades.
+  var _cm=catFindByName('MP',prod);
+  if(!_cm){
+    if(isSupRole()){
+      if(!confirm('«'+prod+'» no está en el listado maestro de materias primas.\n\n¿Agregarlo al catálogo y continuar?'))return;
+      _cm=addCatalogProduct('MP',prod,true);
+      if(!_cm)return;
+    } else {
+      alert('«'+prod+'» no está en el listado maestro de materias primas.\n\nElegí una MP de la lista, o pedile al supervisor que la agregue (Administración → Productos).');
+      return;
+    }
+  }
+  prod=_cm.name; // grafía canónica del catálogo
   var need={
     id:'ssn'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
-    producto:prod,
+    producto:prod,pcId:_cm.id,
     due:((document.getElementById('ssn-due')||{}).value||''),
     notes:((document.getElementById('ssn-notes')||{}).value||'').trim(),
     createdBy:currentUser.id,createdByName:currentUser.name,
