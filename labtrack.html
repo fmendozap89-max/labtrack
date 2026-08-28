@@ -388,6 +388,7 @@ let productSuggestions=[]; // sugerencias de ingreso por no-supervisores: {id,pr
 // {id:'ssn...',producto,notes,due,createdBy,createdByName,ts,status,sampledBy,sampledByName,sampledTs,sampledTaskId,closedBy,closedTs,_ts,_removed,_removedTs}
 let stdSecNeeds=[];
 let showStdSecModal=false;
+let editStdSecNeedId=null; // id de la necesidad en edición (null = alta)
 let nextSuggId=1;
 let showSuggModal=false;
 let newTaskPrefill={}; // {suggId,producto,lote,due,priority,notes} — prefill when creating from suggestion
@@ -936,7 +937,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082703; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082704; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -7392,22 +7393,34 @@ function removeStdSecDevMark(taskId){
 }
 function openStdSecModal(){
   if(isAuditorRole()){alert('Modo auditor: solo lectura. No es posible ejecutar acciones que modifican datos.');return;}
+  editStdSecNeedId=null;
   showStdSecModal=true;render();
 }
+// Edición de una necesidad abierta (MP, fecha límite, notas) — SOLO supervisor,
+// p. ej. extender la fecha límite o corregir datos mal cargados.
+function openStdSecEditModal(id){
+  if(!isSupRole()){alert('Solo el Supervisor puede editar una necesidad de estándar secundario.');return;}
+  var n=stdSecNeeds.find(function(x){return x.id===id;});
+  if(!n||n._removed)return;
+  editStdSecNeedId=id;showStdSecModal=true;render();
+}
 function renderStdSecModal(){
+  var _edit=editStdSecNeedId?stdSecNeeds.find(function(x){return x.id===editStdSecNeedId;}):null;
   return '<div class="modal-overlay">'
     +'<div class="modal" style="width:440px">'
-    +'<div class="modal-hdr"><b>⭐ Registrar necesidad de estándar secundario</b>'
+    +'<div class="modal-hdr"><b>'+(_edit?'✎ Editar necesidad de estándar secundario':'⭐ Registrar necesidad de estándar secundario')+'</b>'
     +'<button onclick="showStdSecModal=false;render()" style="border:none;background:none;font-size:18px;cursor:pointer">✕</button></div>'
     +'<div class="modal-body">'
-    +'<p style="font-size:12px;color:var(--text3);margin:0 0 14px">Cuando ingrese esta materia prima activa, el aviso indicará muestrear cantidad adicional para análisis complementarios y fraccionamiento como estándar secundario.</p>'
-    +'<div class="frow"><label>Materia prima *</label><input id="ssn-producto" type="text" autocomplete="off" list="pc-dl-MP" placeholder="Escribí para buscar en el listado maestro de MP…">'+_catDatalistsHtml()+'</div>'
-    +'<div class="frow"><label>Fecha límite deseada</label><input id="ssn-due" type="date" title="Ej.: vencimiento del estándar actual"></div>'
-    +'<div class="frow"><label>Motivo / Notas</label><textarea id="ssn-notes" style="min-height:60px" placeholder="Ej.: estándar actual vence 10/2026, queda ~200 mg…"></textarea></div>'
+    +(_edit
+      ?'<p style="font-size:12px;color:var(--text3);margin:0 0 14px">Los cambios quedan en el Audit Trail. Si se cambia la materia prima, los avisos de ingresos ya emitidos se recalculan.</p>'
+      :'<p style="font-size:12px;color:var(--text3);margin:0 0 14px">Cuando ingrese esta materia prima activa, el aviso indicará muestrear cantidad adicional para análisis complementarios y fraccionamiento como estándar secundario.</p>')
+    +'<div class="frow"><label>Materia prima *</label><input id="ssn-producto" type="text" autocomplete="off" list="pc-dl-MP" value="'+(_edit?escH(_edit.producto||''):'')+'" placeholder="Escribí para buscar en el listado maestro de MP…">'+_catDatalistsHtml()+'</div>'
+    +'<div class="frow"><label>Fecha límite deseada</label><input id="ssn-due" type="date" value="'+(_edit?escH(_edit.due||''):'')+'" title="Ej.: vencimiento del estándar actual"></div>'
+    +'<div class="frow"><label>Motivo / Notas</label><textarea id="ssn-notes" style="min-height:60px" placeholder="Ej.: estándar actual vence 10/2026, queda ~200 mg…">'+(_edit?escH(_edit.notes||''):'')+'</textarea></div>'
     +'</div>'
     +'<div class="modal-ftr">'
     +'<button class="btn" onclick="showStdSecModal=false;render()">Cancelar</button>'
-    +'<button class="btn pri" onclick="submitStdSecNeed()">⭐ Registrar</button>'
+    +'<button class="btn pri" onclick="submitStdSecNeed()">'+(_edit?'💾 Guardar cambios':'⭐ Registrar')+'</button>'
     +'</div>'
     +'</div></div>';
 }
@@ -7429,6 +7442,37 @@ function submitStdSecNeed(){
     }
   }
   prod=_cm.name; // grafía canónica del catálogo
+  // ── Modo edición (solo supervisor): actualizar la necesidad existente ──
+  if(editStdSecNeedId){
+    if(!isSupRole()){alert('Solo el Supervisor puede editar una necesidad de estándar secundario.');editStdSecNeedId=null;return;}
+    var _en=stdSecNeeds.find(function(x){return x.id===editStdSecNeedId;});
+    editStdSecNeedId=null;
+    if(!_en||_en._removed){showStdSecModal=false;render();return;}
+    var _due=((document.getElementById('ssn-due')||{}).value||'');
+    var _nts=((document.getElementById('ssn-notes')||{}).value||'').trim();
+    var _prodChanged=_en.pcId!==_cm.id;
+    if(!_prodChanged&&_en.producto===prod&&(_en.due||'')===_due&&(_en.notes||'')===_nts){
+      showStdSecModal=false;render();return; // sin cambios
+    }
+    var _old={producto:_en.producto,due:_en.due||'',notes:_en.notes||''};
+    _en.producto=prod;_en.pcId=_cm.id;_en.due=_due;_en.notes=_nts;_en._ts=Date.now();
+    if(_prodChanged){
+      // La MP cambió: los avisos de match emitidos para la MP anterior quedan
+      // obsoletos; se limpia el dedup y se re-notifican los matches actuales.
+      resolveAllCopies({type:'stdsec_match',needId:_en.id},'obsolete');
+      _en.notifiedPairs=[];
+    }
+    auditLog('EDIT','STDSEC',_en.id,{oldVal:_old,newVal:{producto:prod,due:_due,notes:_nts},
+      description:'Necesidad de estándar secundario editada: '+prod
+        +(_prodChanged?' (antes: '+_old.producto+')':'')
+        +((_old.due||'')!==_due?' · límite '+(_due?fmtDDMMYY(_due):'sin fecha')+(_old.due?' (antes '+fmtDDMMYY(_old.due)+')':''):'')},'');
+    _stdSecNotifyMatches(_en);
+    showStdSecModal=false;
+    saveLS();render();
+    saveNow().catch(function(e){console.error('saveNow stdsec edit:',e);});
+    showToast('✓ Necesidad de estándar actualizada','success');
+    return;
+  }
   var need={
     id:'ssn'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
     producto:prod,pcId:_cm.id,
@@ -7561,12 +7605,14 @@ function renderStdSecSection(isSup){
     html+=open.map(function(n){
       var pend=n.status==='pendiente';
       var matches=stdSecTasksForNeed(n);
-      var overdue=pend&&n.due&&n.due<today();
+      // Días hasta la fecha límite (solo pendientes): <0 vencida, 0–7 por vencer
+      var _dl=pend&&n.due?Math.round((new Date(n.due+'T12:00:00').getTime()-todayMs())/86400000):null;
+      var overdue=_dl!==null&&_dl<0,nearDue=_dl!==null&&_dl>=0&&_dl<=7;
       return '<div style="background:var(--surface);border:1px solid '+(pend?'#f59e0b':'var(--border)')+';border-left:4px solid '+(pend?'#f59e0b':'#8b5cf6')+';border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:8px">'
         +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">'
         +'<b style="font-size:13px">'+escH(n.producto)+'</b>'
         +'<span style="background:'+(pend?'#fef3c7':'#ede9fe')+';color:'+(pend?'#92400e':'#5b21b6')+';border-radius:4px;padding:1px 8px;font-size:10px;font-weight:700">'+(pend?'⏳ Pendiente de muestreo':'🧪 Muestreado — falta fraccionar')+'</span>'
-        +(n.due?'<span style="font-size:11px;color:'+(overdue?'var(--red)':'var(--text2)')+'">Límite: <b class="u-mono">'+fmtDDMMYY(n.due)+'</b>'+(overdue?' ⚠':'')+'</span>':'')
+        +(n.due?'<span style="font-size:11px;color:'+(overdue?'var(--red)':nearDue?'var(--amber-text)':'var(--text2)')+'">Límite: <b class="u-mono">'+fmtDDMMYY(n.due)+'</b>'+(overdue?' ⚠ vencida':nearDue?(_dl===0?' ⚠ vence HOY':' · vence en '+_dl+' d'):'')+'</span>':'')
         +'</div>'
         +(n.notes?'<div style="font-size:11px;color:var(--text2);background:var(--bg);border-radius:4px;padding:5px 8px;margin-bottom:6px">'+escH(n.notes)+'</div>':'')
         +'<div class="u-xs3">Registrado por '+escH(n.createdByName||'')+' · '+new Date(n.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'})
@@ -7587,6 +7633,7 @@ function renderStdSecSection(isSup){
           ?'<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'
             +(n.status==='muestreado'?'<button class="btn sm suc" onclick="stdSecClose(\''+n.id+'\')" style="font-size:11px">✓ Cerrar (fraccionado y en uso)</button>':'')
             +(pend?'<button class="btn sm" onclick="stdSecClose(\''+n.id+'\')" style="font-size:11px" title="Cerrar sin registrar muestreo (p. ej. resuelto por otra vía)">✓ Cerrar</button>':'')
+            +'<button class="btn sm" onclick="openStdSecEditModal(\''+n.id+'\')" style="font-size:11px" title="Editar MP, fecha límite o notas (queda en el Audit Trail)">✎ Editar</button>'
             +'<button class="btn sm dan" onclick="stdSecDelete(\''+n.id+'\')" style="font-size:11px">🗑 Eliminar</button>'
             +'</div>':'')
         +'</div>';
@@ -16226,6 +16273,16 @@ function renderNotifPanel(){
     ?replanNotifs.filter(function(n){return (n.type==='stdsec_created'||n.type==='stdsec_sampled'||n.type==='stdsec_match')&&n.status!=='resolved';})
         .sort(function(a,b){return(b.ts||0)-(a.ts||0);})
     :[];
+  // Estándar secundario: fecha límite próxima (≤7 días) o vencida en necesidades aún
+  // sin muestrear. Derivado en render (como los análisis atrasados, sin escribir al
+  // estado); el margen de 7 días da tiempo a muestrear un ingreso antiguo si no se
+  // prevé un ingreso nuevo de la MP. Desaparece al muestrear, cerrar o mover el límite.
+  var stdSecDueAlerts=isSup
+    ?openStdSecNeeds().filter(function(n){return n.status==='pendiente'&&n.due;})
+        .map(function(n){return {need:n,daysLeft:Math.round((new Date(n.due+'T12:00:00').getTime()-todayMs())/86400000)};})
+        .filter(function(x){return x.daysLeft<=7;})
+        .sort(function(a,b){return a.daysLeft-b.daysLeft;})
+    :[];
   // Análisis externos: ingresos del listado pendientes de solicitar (supervisor)
   var extLabNotifs=isSup
     ?replanNotifs.filter(function(n){return n.type==='ext_match'&&n.status!=='resolved';})
@@ -16267,7 +16324,7 @@ function renderNotifPanel(){
     +(isSup?ftPendConfirm.length+mgmtPendConfirm.length+mgmtNotDoneNotifs.length:replanNotifs.filter(function(n){
       return n.type==='free_task_assigned'&&n.forUserId===uid&&n.status!=='resolved'&&isUnread(n);
     }).length)
-    +planReqNotifs.filter(isUnread).length+responseNotifBadge+samplingDoneBadge+stdSecNotifs.filter(isUnread).length+extLabNotifs.filter(isUnread).length+overdueAlerts.length
+    +planReqNotifs.filter(isUnread).length+responseNotifBadge+samplingDoneBadge+stdSecNotifs.filter(isUnread).length+stdSecDueAlerts.length+extLabNotifs.filter(isUnread).length+overdueAlerts.length
     +mgmtOverdue.length
     +ilrNotifs.length+docsNotifs.filter(isUnread).length
     +pendSuggPanelC+suggRespPanelC+revApprNotifs.length;
@@ -16514,6 +16571,34 @@ function renderNotifPanel(){
 
   // ── Muestreos completados (supervisor) ──
   if(isSup){
+    // ── Estándar secundario: fecha límite próxima o vencida — acción requerida ──
+    if(stdSecDueAlerts.length>0){
+      html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:#fef3c7">'
+        +'<div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:8px">⭐ Estándares secundarios — fecha límite ('+stdSecDueAlerts.length+')</div>';
+      stdSecDueAlerts.forEach(function(x){
+        var n=x.need,dl=x.daysLeft;
+        var matches=stdSecTasksForNeed(n);
+        html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid '+(dl<0?'var(--red)':'var(--amber)')+'">'
+          +'<div class="u-12b">'+escH(n.producto)+'</div>'
+          +'<div style="font-size:11px;font-weight:600;color:'+(dl<0?'var(--red)':'var(--amber-text)')+';margin:3px 0">'
+          +(dl<0?'⚠ Fecha límite vencida hace '+(-dl)+' día'+(dl===-1?'':'s')
+            :dl===0?'⚠ La fecha límite vence HOY'
+            :'⏳ Vence en '+dl+' día'+(dl===1?'':'s'))
+          +' · límite '+fmtDDMMYY(n.due)+' · sin muestrear</div>'
+          +'<div style="font-size:11px;color:var(--text2);margin-bottom:5px">'
+          +(matches.length
+            ?'Hay '+matches.length+' ingreso'+(matches.length>1?'s':'')+' activo'+(matches.length>1?'s':'')+' de esta MP — coordinar el muestreo adicional.'
+            :'Sin ingresos activos de esta MP: si no se prevé un ingreso, considerar muestrear un lote antiguo (p. ej. retenido) para el desarrollo.')
+          +'</div>'
+          +'<div style="display:flex;gap:4px;flex-wrap:wrap">'
+          +'<button class="btn sm" onclick="showNotifPanel=false;currentView=\'tasks\';window.tasksTab=\'stdsec\';render()" style="font-size:10px">Ver ⭐ Estándares</button>'
+          +'<button class="btn sm" onclick="showNotifPanel=false;openStdSecEditModal(\''+n.id+'\')" style="font-size:10px">✎ Editar / extender límite</button>'
+          +'</div>'
+          +'</div>';
+      });
+      html+='</div>';
+    }
+
     // ── Estándar secundario (supervisor): necesidades registradas y muestreos extra ──
     if(stdSecNotifs.length>0){
       html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:#fffbeb">'
