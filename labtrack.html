@@ -476,6 +476,9 @@ let workdayConfig={weekdays:{1:true,2:true,3:true,4:true,5:true,0:false,6:false}
 // Cierre del día: declaración de horas totales por analista|día y desvíos aceptados por el supervisor
 let dayDeclarations=[]; // {analystId,date,hours,ts,_ts}
 let hourDevAcks=[];     // {analystId,date,by,byName,reason,revoked?,ts,_ts}
+// Duplicados: grupos producto+lote marcados "no es duplicado" por el supervisor.
+// key = firma de miembros ('S3|T12'): si el grupo cambia (entra otro ingreso igual), re-avisa.
+let dupAcks=[];         // {key,by,byName,ts,_ts}
 let mgmtTasks=[];
 let editingMgmt=null;
 let showMgmtModal=false;
@@ -635,7 +638,7 @@ function getSnapshot(){
     freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,stdSecNeeds,productCatalog,customTipos,
     customTipos_ts:(customTipos_ts||0),
     users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{}),...(u._ts?{_ts:u._ts}:{}),...(u._mustChangePwd?{_mustChangePwd:true}:{})})),
-    passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,dayDeclarations,hourDevAcks,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
+    passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,dayDeclarations,hourDevAcks,dupAcks,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
     // El audit trail vive en su propio archivo (labtrack_audit.json) — duplicarlo acá
     // engordaba el state hasta el límite de 1 MB de la API (que trunca y rompe el sync)
     auditTrail:[],
@@ -713,6 +716,9 @@ function applySnapshot(json){
     var _ddCutYMD=tsToYMD(Date.now()-180*24*60*60*1000);
     dayDeclarations=(Array.isArray(d.dayDeclarations)?d.dayDeclarations:[]).filter(function(x){return (x.date||'')>=_ddCutYMD;});
     hourDevAcks=(Array.isArray(d.hourDevAcks)?d.hourDevAcks:[]).filter(function(x){return (x.date||'')>=_ddCutYMD;});
+    // Duplicados aceptados: retención 180 días (los ingresos aprobados se archivan a los
+    // 45, así que un ack más viejo ya no tiene grupo vivo que silenciar)
+    dupAcks=(Array.isArray(d.dupAcks)?d.dupAcks:[]).filter(function(x){return (x.ts||0)>=Date.now()-180*24*60*60*1000;});
     USERS.forEach(u=>{if(!passwords[u.id])passwords[u.id]=_DEFAULT_PWD_HASH||'labtrack123';});
     // El state ya no transporta el audit (vive en labtrack_audit.json y se carga en
     // cada pull/boot): si viene vacío, CONSERVAR el audit en memoria — no pisarlo.
@@ -937,7 +943,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082704; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082901; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -6567,6 +6573,90 @@ function renderRevision(){
 }
 
 // ── MÓDULO SUGERENCIAS ──
+// ══════════════════════════════════════════════════════════════
+// DETECCIÓN DE INGRESOS DUPLICADOS
+// Mismo producto (nombre normalizado) + mismo lote (normalizado) + tipo equivalente.
+// PT y Val son EQUIVALENTES (analizar la validación de proceso incluye el análisis
+// del PT); EE, Limp, MP y demás tipos solo matchean contra su mismo tipo.
+// El aviso al ingresar/sugerir NUNCA bloquea; el supervisor resuelve los grupos
+// en Análisis → Ingresos ("Posibles duplicados") o los acepta con supDupAck.
+// ══════════════════════════════════════════════════════════════
+// Lote: solo alfanumérico en mayúsculas — "AMX-2271/26", "amx 2271/26" y "AMX2271.26"
+// son el mismo lote. Agresivo a propósito: acá un falso positivo es solo un aviso.
+function _dupNormLote(l){return (l||'').toUpperCase().replace(/[^A-Z0-9]/g,'');}
+function _dupTipoClass(tipo){return (tipo==='PT'||tipo==='Val')?'PT~Val':(tipo||'');}
+function _dupKeyOf(producto,lote,tipo){return _dupTipoClass(tipo)+'|'+_catNorm(producto)+'|'+_dupNormLote(lote);}
+// Candidatos que colisionan con (producto,lote,tipo): ingresos activos no archivados
+// (el archivo de aprobadas a 45 días acota la ventana) + sugerencias pendientes.
+function findDupCandidates(producto,lote,tipo,opts){
+  opts=opts||{};
+  if(!_catNorm(producto)||!_dupNormLote(lote))return[];
+  var key=_dupKeyOf(producto,lote,tipo);
+  var out=[];
+  activeTasks().forEach(function(t){
+    if(opts.excludeTaskId!=null&&t.id===opts.excludeTaskId)return;
+    if(_dupKeyOf(t.producto,t.lote,t.tipo)!==key)return;
+    out.push({kind:'task',ref:t,equiv:(t.tipo||'')!==(tipo||'')});
+  });
+  productSuggestions.forEach(function(s){
+    if(s.status!=='pending')return;
+    if(opts.excludeSuggId!=null&&s.id===opts.excludeSuggId)return;
+    if(_dupKeyOf(s.producto,s.lote,s.tipo)!==key)return;
+    out.push({kind:'sugg',ref:s,equiv:(s.tipo||'')!==(tipo||'')});
+  });
+  return out;
+}
+function _dupWarnText(cands){
+  return cands.map(function(c){
+    var r=c.ref;
+    var st=c.kind==='task'?statusLabel(r.status):'sugerencia pendiente de '+(r.suggestedByName||'');
+    return '· '+r.producto+' — lote '+r.lote+' ['+(r.tipo||'—')+'] ('+st+')';
+  }).join('\n');
+}
+function _dupConfirmMsg(cands,accion){
+  var hasEquiv=cands.some(function(c){return c.equiv;});
+  return '⚠ Posible ingreso duplicado — ya existe:\n\n'+_dupWarnText(cands)
+    +(hasEquiv?'\n\nPT y Val se consideran el mismo análisis (la validación incluye el análisis del PT).':'')
+    +'\n\nEl supervisor verá el grupo en Análisis → Ingresos.\n\n¿'+accion+' igual?';
+}
+// Grupos de posibles duplicados para el supervisor: ≥2 miembros con la misma clave,
+// excluyendo los grupos cuya firma exacta ya fue aceptada ("no es duplicado").
+function dupGroups(){
+  var map={};
+  activeTasks().forEach(function(t){
+    if(!_catNorm(t.producto)||!_dupNormLote(t.lote))return;
+    var k=_dupKeyOf(t.producto,t.lote,t.tipo);
+    (map[k]=map[k]||[]).push({kind:'task',ref:t});
+  });
+  productSuggestions.forEach(function(s){
+    if(s.status!=='pending')return;
+    if(!_catNorm(s.producto)||!_dupNormLote(s.lote))return;
+    var k=_dupKeyOf(s.producto,s.lote,s.tipo);
+    (map[k]=map[k]||[]).push({kind:'sugg',ref:s});
+  });
+  var out=[];
+  Object.keys(map).forEach(function(k){
+    var members=map[k];
+    if(members.length<2)return;
+    var sig=members.map(function(m){return(m.kind==='task'?'T':'S')+m.ref.id;}).sort().join('|');
+    if(dupAcks.some(function(a){return a.key===sig&&!a.revoked;}))return;
+    out.push({key:k,sig:sig,members:members});
+  });
+  return out;
+}
+function supDupAck(sig){
+  if(!isSupRole()){alert('Solo el Supervisor puede marcar un grupo como "no es duplicado".');return;}
+  var g=dupGroups().find(function(x){return x.sig===sig;});
+  var label=g?(g.members[0].ref.producto+' — lote '+g.members[0].ref.lote):sig;
+  if(!confirm('¿Marcar como "No es duplicado"?\n\n'+label+'\n\nEl aviso dejará de mostrarse. Si aparece OTRO ingreso con el mismo producto y lote, se volverá a avisar.'))return;
+  var ex=dupAcks.find(function(a){return a.key===sig;});
+  if(ex){ex.revoked=false;ex.by=currentUser.id;ex.byName=currentUser.name;ex.ts=Date.now();ex._ts=Date.now();}
+  else dupAcks.push({key:sig,by:currentUser.id,byName:currentUser.name,ts:Date.now(),_ts:Date.now()});
+  auditLog('RESOLVE','DUP',sig,{description:'Posible duplicado aceptado como "no es duplicado": '+label,members:sig},'');
+  saveLS();render();
+  saveNow().catch(function(e){console.error(e);});
+}
+
 function renderSugerencias(){
   var isSup=canViewSup(); // auditor: vista de gestión del supervisor (solo lectura)
   var uid=currentUser.id;
@@ -6587,6 +6677,51 @@ function renderSugerencias(){
       +' style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
       +(window.suggSearch?'<button class="btn sm" onclick="window.suggSearch=\'\';render()">✕ Limpiar</button>':'')
       +'</div>';
+
+    // ── Posibles duplicados: herramienta de detección del supervisor ──
+    var _dg=dupGroups();
+    if(q)_dg=_dg.filter(function(g){var r=g.members[0].ref;return (r.producto||'').toLowerCase().includes(q)||(r.lote||'').toLowerCase().includes(q);});
+    if(_dg.length){
+      html+='<div style="margin-bottom:24px">'
+        +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
+        +'<div style="font-size:14px;font-weight:700;color:var(--amber-text)">⚠ Posibles duplicados</div>'
+        +'<span style="background:var(--amber-text);color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700">'+_dg.length+'</span>'
+        +'</div>'
+        +'<div style="font-size:11px;color:var(--text3);margin-bottom:10px">Ingresos activos y sugerencias pendientes con el mismo producto y lote. PT y Val se consideran el mismo análisis (la validación incluye el PT); EE, Limp y MP solo matchean entre sí.</div>';
+      html+=_dg.map(function(g){
+        var r0=g.members[0].ref;
+        var hasEquiv=g.members.some(function(m){return (m.ref.tipo||'')!==(r0.tipo||'');});
+        return '<div style="background:var(--amber-bg);border:1px solid var(--amber-text);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:8px">'
+          +'<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px">'
+          +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:13px">'+escH(r0.producto)+'</b>'
+          +'<span style="font-size:11px;font-family:var(--mono);color:var(--text2)">Lote: '+escH(r0.lote)+'</span>'
+          +(hasEquiv?'<span style="font-size:10px;background:#ede9fe;color:#7c3aed;border:1px solid #8b5cf6;border-radius:4px;padding:1px 6px;font-weight:600" title="Tipos distintos pero equivalentes: analizar la validación de proceso incluye el análisis del PT">PT ≈ Val</span>':'')
+          +'</div>'
+          +(isSupRole()?'<button class="btn sm" onclick="supDupAck(\''+g.sig+'\')" title="Dejar de avisar por este grupo. Si aparece otro ingreso igual, vuelve a avisar.">✓ No es duplicado</button>':'')
+          +'</div>'
+          +'<div style="display:flex;flex-direction:column;gap:6px">'
+          +g.members.map(function(m){
+            var r=m.ref,left='',btns='';
+            if(m.kind==='task'){
+              left='<span class="pill '+r.status+'" style="font-size:10px">'+statusLabel(r.status)+'</span>'
+                +(r.created?'<span style="font-size:11px;color:var(--text2)">Ingreso: '+fmtDF(r.created)+'</span>':'');
+              if(isSupRole())btns='<button class="btn sm" onclick="openEdit('+r.id+')">✎ Abrir</button>';
+            } else {
+              left='<span style="font-size:10px;background:var(--blue-bg);color:var(--blue-text);border-radius:10px;padding:2px 8px;font-weight:700">💡 Sugerencia</span>'
+                +'<span style="font-size:11px;color:var(--text2)">'+escH(r.suggestedByName||'')+' · '+new Date(r.suggestedTs).toLocaleDateString('es',{day:'2-digit',month:'2-digit'})+'</span>';
+              if(isSupRole())btns='<button class="btn sm pri" onclick="openNewTaskFromSuggestion('+r.id+')">✍ Revisar</button>'
+                +'<button class="btn sm dan" onclick="rejectSuggestion('+r.id+')">✗ Rechazar</button>';
+            }
+            return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:8px 10px">'
+              +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'+sampleTypeBadge(r.tipo)+left+'</div>'
+              +'<div style="display:flex;gap:6px">'+btns+'</div>'
+              +'</div>';
+          }).join('')
+          +'</div>'
+          +'</div>';
+      }).join('');
+      html+='</div>';
+    }
 
     // Estándares secundarios: viven en su pestaña propia (⭐ Estándares del módulo Análisis)
 
@@ -6816,6 +6951,9 @@ function submitSuggestion(){
     if(_sm)prod=_sm.name;
     else if(!confirm('«'+prod+'» no está en el catálogo de '+catKindLabel(_sk)+'.\n\nPodés enviarla igual: si el supervisor la acepta, decidirá si lo agrega al catálogo.\n\n¿Enviar la sugerencia?'))return;
   }
+  // Duplicados: avisar sin bloquear (mismo producto+lote, tipo equivalente PT≈Val)
+  var _sdups=findDupCandidates(prod,lote,tipo,{});
+  if(_sdups.length&&!confirm(_dupConfirmMsg(_sdups,'Enviar la sugerencia')))return;
   var sug={id:nextSuggId++,producto:prod,lote:lote,
     tipo:tipo,
     priority:(document.getElementById('sug-priority')||{value:'Normal'}).value||'Normal',
@@ -8018,6 +8156,15 @@ function mergeSnapshot(local, remote) {
       });
       merged[key]=Object.values(m2);
     });
+
+    // ── Duplicados aceptados por el supervisor: por firma de grupo, gana _ts ──
+    var daMap={};
+    (R.dupAcks||[]).forEach(function(x){daMap[x.key||'']=x;});
+    (L.dupAcks||[]).forEach(function(x){
+      var rx=daMap[x.key||''];
+      if(!rx||(x._ts||0)>(rx._ts||0))daMap[x.key||'']=x;
+    });
+    merged.dupAcks=Object.values(daMap);
 
     // ── Candado de versión: monotónico, gana el mayor ──
     merged.minAppBuild    = Math.max(L.minAppBuild||0,    R.minAppBuild||0);
@@ -9652,7 +9799,8 @@ function renderTasksModule(){
   // "Análisis", no "Mis análisis", para no sugerir que solo son los suyos.
   var _verTodos=_isSup||isReviewerRole();
   var _tabAnalisis=_tt('analisis',_verTodos?'🔬 Análisis':'🔬 Mis análisis',_verTodos?'Listado completo de análisis y lotes':'Todos los análisis asignados a vos, incluidos los históricos');
-  var _tabIngresos=_tt('ingresos','💡 Ingresos'+(_ingCnt?' ('+_ingCnt+')':''),_isSup?'Sugerencias de ingreso enviadas por el equipo':'Sugerir ingreso de productos y ver respuestas del supervisor');
+  var _dupCnt=_isSup?dupGroups().length:0;
+  var _tabIngresos=_tt('ingresos','💡 Ingresos'+(_ingCnt?' ('+_ingCnt+')':'')+(_dupCnt?' ⚠'+_dupCnt:''),_isSup?'Sugerencias de ingreso enviadas por el equipo'+(_dupCnt?' · hay posibles ingresos duplicados para revisar':''):'Sugerir ingreso de productos y ver respuestas del supervisor');
   // Estándares secundarios: pestaña propia para no enterrar los ingresos pendientes
   var _ssnCnt=openStdSecNeeds().length;
   var _tabStdSec=_tt('stdsec','⭐ Estándares'+(_ssnCnt?' ('+_ssnCnt+')':''),'Necesidades de desarrollo de estándar secundario y sus ingresos matcheados');
@@ -17227,6 +17375,14 @@ function saveTask(){
       }
       prod=_catMatch.name; // nombre canónico del catálogo (unifica mayúsculas/variantes)
     }
+  }
+  // Duplicados: aviso NO bloqueante — solo en alta nueva o si cambió producto/lote/tipo.
+  // Al confirmar una sugerencia se excluye la sugerencia origen (matchearía consigo misma).
+  var _dupChanged=!_t0edit||prod!==(_t0edit.producto||'')||lote!==(_t0edit.lote||'')||tipo!==(_t0edit.tipo||'');
+  if(_dupChanged){
+    var _tdups=findDupCandidates(prod,lote,tipo,{excludeTaskId:editingTask,
+      excludeSuggId:(newTaskPrefill&&newTaskPrefill.suggId!=null)?newTaskPrefill.suggId:null});
+    if(_tdups.length&&!confirm(_dupConfirmMsg(_tdups,'Guardar')))return;
   }
   const _expectedArrivalEl=document.getElementById('f-expected-arrival');
   const _arrivalNotesEl=document.getElementById('f-arrival-notes');
