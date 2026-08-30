@@ -943,7 +943,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082901; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026082902; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -7111,7 +7111,9 @@ function extBadge(t){
   }
   var title=req
     ?('Análisis externo solicitado'+(req.ts?' el '+new Date(req.ts).toLocaleDateString('es',{day:'2-digit',month:'2-digit',year:'numeric'}):'')+(sum?': '+sum:'')+_lnk)
-    :('Requiere análisis externo — solicitarlo cuanto antes: '+sum);
+    :(_extPhasePre(t)
+      ?('Requiere análisis externo — se solicita al ingresar la muestra: '+sum)
+      :('Requiere análisis externo — solicitarlo cuanto antes: '+sum));
   return '<span title="'+escH(title)+'" style="background:'+(req?'#d1fae5':'#cffafe')+';color:'+(req?'#065f46':'#0e7490')+';border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap;cursor:help">🔬 EXT'+(req?' ✓':'')+'</span>';
 }
 // Recuadro para el detalle/edición del producto: requisito + estado de la solicitud
@@ -7137,18 +7139,24 @@ function _extInfoBox(t){
         +(isSupRole()?' <button class="btn sm" onclick="unmarkExtRequested('+t.id+')" title="Quitar la marca de solicitado (p. ej. si se marcó por error). Queda en el Audit Trail." style="font-size:10px">✕ Quitar marca</button>':'')
         +'</div>'
       :'<div style="font-size:11px;margin-top:4px">'
-        +(isSupRole()
-          ?'<button class="btn sm" onclick="markExtRequested('+t.id+')" style="font-size:10px;background:#0e7490;border-color:#0e7490;color:#fff">✓ Marcar solicitado…</button>'
-          :'El supervisor debe solicitar el análisis externo cuanto antes.')
+        +(_extPhasePre(t)
+          ?'La muestra aún no ingresó — sin muestra no se puede solicitar. El aviso para solicitarlo llega al confirmar la recepción.'
+          :(isSupRole()
+            ?'<button class="btn sm" onclick="markExtRequested('+t.id+')" style="font-size:10px;background:#0e7490;border-color:#0e7490;color:#fff">✓ Marcar solicitado…</button>'
+            :'El supervisor debe solicitar el análisis externo cuanto antes.'))
         +'</div>')
     +'</div>';
 }
-// Aviso al supervisor: ingreso de un producto del listado. Dedup por tarea
-// (t.extNotified guarda el id de catálogo ya avisado) — no repite entre guardados/
-// dispositivos. Se dispara en puntos de acción (guardar tarea, definir el requisito),
-// nunca en render.
+// Aviso al supervisor: producto del listado INGRESADO al laboratorio. Sin muestra no
+// se puede solicitar el análisis externo, así que "a ingresar"/"muestra OK" no avisan:
+// el aviso se dispara al confirmar la recepción (o al crear/importar ya ingresado).
+// Dedup por tarea (t.extNotified guarda el id de catálogo ya avisado) — no repite
+// entre guardados/dispositivos; el demote a "a ingresar" lo resetea (re-aviso al
+// re-ingreso). Se dispara en puntos de acción, nunca en render.
+function _extPhasePre(t){return t.status==='a-ingresar'||t.status==='muestra-ok';}
 function _extNotifyTask(t){
   if(!t||t._deleted)return;
+  if(_extPhasePre(t))return;
   if(['done','reviewed','approved'].includes(t.status))return;
   if(t.extRequested)return;
   var p=extReqForTask(t);
@@ -7189,6 +7197,7 @@ function markExtRequested(taskId){
   if(!isSupRole()){alert('Solo el Supervisor puede marcar el análisis externo como solicitado.');return;}
   var t=tasks.find(function(x){return x.id===taskId&&!x._deleted;});
   if(!t||t.extRequested)return;
+  if(_extPhasePre(t)){alert('La muestra aún no ingresó al laboratorio — sin muestra no se puede solicitar el análisis externo.\n\nAl confirmar la recepción vas a recibir el aviso 🔔 para solicitarlo.');return;}
   if(document.getElementById('extreq-choice'))return;
   var p=extReqForTask(t);
   document.body.insertAdjacentHTML('beforeend',
@@ -7329,7 +7338,8 @@ function saveExtReq(pcId){
   auditLog(isNew?'CREATE':'EDIT','CATALOG',p.id,{field:'extAnalysis',newVal:_extSummary(p),
     description:'Requisito de análisis externo '+(isNew?'definido':'actualizado')+': '+p.name+' — '+_extSummary(p)},'');
   var m=document.getElementById('extreq-modal');if(m)m.remove();
-  // Avisar por los ingresos activos que ya matchean (solicitar cuanto antes)
+  // Avisar por los ingresos activos YA INGRESADOS que matchean (los "a ingresar"
+  // avisan recién al confirmar la recepción — sin muestra no se puede solicitar)
   _extNotifySweep(p);
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow extSave:',e);});
@@ -7337,7 +7347,7 @@ function saveExtReq(pcId){
   var _m=activeTasks().filter(function(t){return extReqForTask(t)===p&&!['done','reviewed','approved'].includes(t.status);});
   if(_m.length){
     setTimeout(function(){alert('🔬 Hay '+_m.length+' ingreso'+(_m.length>1?'s':'')+' activo'+(_m.length>1?'s':'')+' de este producto:\n\n'
-      +_m.map(function(t){return '· '+t.producto+' — '+t.lote+' ('+statusLabel(t.status)+')'+(t.extRequested?' — ya solicitado':'');}).join('\n')
+      +_m.map(function(t){return '· '+t.producto+' — '+t.lote+' ('+statusLabel(t.status)+')'+(t.extRequested?' — ya solicitado':(_extPhasePre(t)?' — avisará al ingresar la muestra':''));}).join('\n')
       +'\n\nSi corresponde, solicitá el análisis externo cuanto antes (avisos en la campana 🔔).');},100);
   }
 }
@@ -12698,6 +12708,10 @@ function supForceTaskStatus(){
         delete t.reviewedBy;delete t.reviewedByName;delete t.reviewedTs;delete t.reviewedDate;delete t.reviewComment;
       }
       if(t._integrityHash)stampIntegrity(t);
+      // Análisis externos: retroceso a "a ingresar" resetea el dedup (re-aviso al
+      // re-ingreso); avance a un estado ingresado dispara el aviso si corresponde.
+      if(_extPhasePre(t)&&!t.extRequested&&(t.extNotified||[]).length){t.extNotified=[];}
+      _extNotifyTask(t);
       auditLog('SUPERVISOR_FORCE_STATUS','TASK',tid,{
         field:'status',oldVal:prev,newVal:target,lote:t.lote,
         description:'Mantenimiento — estado fijado por supervisor: '+t.producto+' '+t.lote
@@ -13970,6 +13984,9 @@ function confirmImport(){
       return task;
     }).filter(Boolean);
     tasks=tasks.concat(newTasks);
+    // Análisis externos: los importados que ya nacen ingresados avisan acá
+    // (los "a ingresar" avisan al confirmar la recepción de la muestra)
+    newTasks.forEach(function(t){_extNotifyTask(t);});
     if(duplicates&&duplicates.length>0&&newTasks.length>0)alert('Importacion completada. '+newTasks.length+' registro(s) importados. '+duplicates.length+' duplicado(s) omitido(s).');
     pastePreview=[];
     showImportModal=false;
@@ -15557,6 +15574,12 @@ function confirmSampleReceived(){
     description:'Muestra recibida: '+t.producto+' '+t.lote,
     expectedArrival:t.expectedArrival||'',
     oldCreated:oldCreated,arrivedDate:receivedDate},'Muestra recibida en laboratorio');
+  // Análisis externos: la muestra recién ingresó — ahora sí se puede (y debe) solicitar
+  _extNotifyTask(t);
+  var _exPr=extReqForTask(t);
+  if(_exPr&&!t.extRequested){
+    setTimeout(function(){try{showToast('🔬 '+t.producto+' requiere análisis externo: '+_extSummary(_exPr)+' — solicitarlo cuanto antes (aviso en la campana 🔔).','warn');}catch(e){}},200);
+  }
   showReceiveModal=false;receiveTaskId=null;
   saveLS();render();
   saveNow().catch(function(e){console.error('saveNow confirmSampleReceived:',e);});
@@ -16319,11 +16342,14 @@ function autoResolveNotifs(){
         break;
       }
       // Análisis externos: resuelto si la tarea no existe o terminó, si ya fue
-      // solicitado, o si el producto salió del listado.
+      // solicitado, si el producto salió del listado, o si la tarea volvió a
+      // "a ingresar" (sin muestra no se solicita; el dedup se resetea en el demote
+      // y el aviso renace al re-ingresar).
       case 'ext_match': {
         var _exP=n.pcId?productCatalog.find(function(x){return x.id===n.pcId;}):null;
         stale = !task || !!task.extRequested
           || ['done','reviewed','approved'].includes(task.status)
+          || _extPhasePre(task)
           || !_exP || _exP._removed || !_exP.ext || !(_exP.ext.items||[]).length;
         break;
       }
@@ -16778,12 +16804,16 @@ function renderNotifPanel(){
       html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);background:#ecfeff">'
         +'<div style="font-size:12px;font-weight:600;color:#0e7490;margin-bottom:8px">🔬 Análisis externos para solicitar ('+extLabNotifs.length+')</div>';
       extLabNotifs.forEach(function(n){
+        // El botón de solicitar sale del estado VIVO de la tarea: si volvió a
+        // "a ingresar" (muestreo rechazado / demote) no se puede solicitar sin muestra.
+        var _extT=tasks.find(function(x){return x.id===n.taskId&&!x._deleted;});
+        var _extIn=_extT&&!_extPhasePre(_extT);
         html+='<div style="background:var(--surface);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;border-left:3px solid #06b6d4">'
           +'<div class="u-12b">'+escH(n.producto||'')+(n.lote?' — '+escH(n.lote):'')+'</div>'
           +'<div style="font-size:11px;color:var(--text2);margin:3px 0">Requiere análisis externo: <b>'+escH(n.analisis||'')+'</b></div>'
           +'<div style="font-size:10px;color:var(--text3);margin-bottom:5px">'+new Date(n.ts).toLocaleString('es',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</div>'
           +'<div style="display:flex;gap:4px;flex-wrap:wrap">'
-          +'<button class="btn sm suc" onclick="showNotifPanel=false;markExtRequested('+n.taskId+')" style="font-size:10px">✓ Marcar solicitado…</button>'
+          +(_extIn?'<button class="btn sm suc" onclick="showNotifPanel=false;markExtRequested('+n.taskId+')" style="font-size:10px">✓ Marcar solicitado…</button>':'')
           +'<button class="btn sm" onclick="showNotifPanel=false;openEdit('+n.taskId+')" style="font-size:10px">🔍 Ver producto</button>'
           +'<button class="btn sm" onclick="markExtNotifSeen(\''+n.id+'\')" style="font-size:10px">✓ Visto</button>'
           +'</div>'
@@ -17681,10 +17711,19 @@ function saveTask(){
     if(_ssN.length){setTimeout(function(){try{showToast('⭐ '+_ssT.producto+' tiene desarrollo de estándar secundario pendiente: prever muestreo adicional y ensayos de calificación.','warn');}catch(e){}},150);}
     // Notificar al supervisor los matches nuevos de esta tarea (dedup en la necesidad)
     stdSecNeedsForTask(_ssT).forEach(function(n){_stdSecNotifyMatches(n);});
-    // Análisis externos: producto del listado → avisar al supervisor para solicitarlo
+    // Análisis externos: si la tarea volvió a "a ingresar" (demote), resetear el
+    // dedup para que el aviso renazca en el próximo ingreso de la muestra.
+    if(_extPhasePre(_ssT)&&!_ssT.extRequested&&(_ssT.extNotified||[]).length){
+      _ssT.extNotified=[];_ssT._ts=Date.now();
+    }
+    // Producto del listado → avisar al supervisor para solicitarlo. Fase "a ingresar":
+    // solo toast informativo (el aviso real llega al confirmar la recepción).
     var _exP2=extReqForTask(_ssT);
     if(_exP2&&!_ssT.extRequested&&!['done','reviewed','approved'].includes(_ssT.status)){
-      setTimeout(function(){try{showToast('🔬 '+_ssT.producto+' requiere análisis externo: '+_extSummary(_exP2),'warn');}catch(e){}},250);
+      var _exMsg=_extPhasePre(_ssT)
+        ?('🔬 '+_ssT.producto+' requiere análisis externo — el aviso para solicitarlo llegará al ingresar la muestra.')
+        :('🔬 '+_ssT.producto+' requiere análisis externo: '+_extSummary(_exP2));
+      setTimeout(function(){try{showToast(_exMsg,'warn');}catch(e){}},250);
     }
     _extNotifyTask(_ssT);
   })();
