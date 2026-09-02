@@ -571,6 +571,7 @@ var _AUD_SAFE_FNS=new Set([
   'copyPendientes','exportPendientesXLSX','copyRevision','exportRevisionXLSX','copyAprobados',
   'doExportAprobados','copyHistorial','exportAuditCSV','copyMgmtList',
   'exportMgmtListXLSX','copyFreeTasks','exportFreeTasksXLSX','exportAusenciasXLSX',
+  'exportBIXLSX','pickBIFolder',
   // tokens neutrales que aparecen dentro de handlers legítimos
   'stopPropagation','preventDefault','if','confirm','alert','prompt',
   'Number','String','parseInt','parseFloat','encodeURIComponent','setItem','getItem','max','min'
@@ -943,7 +944,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026082902; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026090101; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -2289,8 +2290,7 @@ async function adminUnlockLabConfig(){
   if(!labConfigPwd){_labConfigUnlocked=true;render();return;}
   var v=prompt('Contraseña de configuración de laboratorios:');
   if(v===null)return;
-  var h=await hashPassword(v);
-  if(h===labConfigPwd){_labConfigUnlocked=true;render();}
+  if(await verifyPassword(v,labConfigPwd)){_labConfigUnlocked=true;render();}
   else{alert('Contraseña incorrecta.');}
 }
 function adminLockLabConfig(){_labConfigUnlocked=false;render();}
@@ -2299,7 +2299,7 @@ async function adminSetLabConfigPwd(){
   if(labConfigPwd){
     var old=prompt('Contraseña actual:');
     if(old===null)return;
-    if(await hashPassword(old)!==labConfigPwd){alert('Contraseña actual incorrecta.');return;}
+    if(!(await verifyPassword(old,labConfigPwd))){alert('Contraseña actual incorrecta.');return;}
   }
   var n1=prompt('Nueva contraseña (dejá vacío para quitar la contraseña):');
   if(n1===null)return;
@@ -2310,7 +2310,7 @@ async function adminSetLabConfigPwd(){
     var n2=prompt('Confirmá la nueva contraseña:');
     if(n2===null)return;
     if(n1!==n2){alert('Las contraseñas no coinciden.');return;}
-    labConfigPwd=await hashPassword(n1);
+    labConfigPwd=await hashPasswordSalted(n1);
     _labConfigUnlocked=true;
   }
   labConfigPwd_ts=Date.now();
@@ -6004,28 +6004,57 @@ function render(){
 }
 
 // ── LOGIN ──
+async function _sha256Hex(s){
+  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(buf)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+}
 async function hashPassword(plain){
-  const enc=new TextEncoder();
-  const buf=await crypto.subtle.digest('SHA-256',enc.encode(plain));
-  const hex=Array.from(new Uint8Array(buf)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
-  return '$sha256$'+hex;
+  return '$sha256$'+(await _sha256Hex(plain));
+}
+// Hash salado por usuario: $sha256s$<salt>$<hex>, con hex = SHA256(salt+'$'+SHA256(plain)).
+// La doble vuelta permite salar un hash $sha256$ legado sin conocer la contraseña.
+function _randSalt(){
+  var a=new Uint8Array(16);crypto.getRandomValues(a);
+  return Array.from(a).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+}
+async function _wrapSalted(innerHex,salt){
+  salt=salt||_randSalt();
+  return '$sha256s$'+salt+'$'+(await _sha256Hex(salt+'$'+innerHex));
+}
+async function hashPasswordSalted(plain){
+  return _wrapSalted(await _sha256Hex(plain));
+}
+// Verificación única: soporta salado ($sha256s$), legado sin sal ($sha256$) y texto plano.
+async function verifyPassword(plain,stored){
+  if(typeof stored!=='string'||!stored)return false;
+  if(stored.startsWith('$sha256s$')){
+    var p=stored.split('$'); // ['','sha256s',salt,hex]
+    if(p.length<4||!p[2])return false;
+    return (await _wrapSalted(await _sha256Hex(plain),p[2]))===stored;
+  }
+  if(stored.startsWith('$sha256$'))return (await hashPassword(plain))===stored;
+  return plain===stored;
 }
 // Hash del password default, precalculado para poder sembrar hasheado en applySnapshot (sync)
 let _DEFAULT_PWD_HASH=null;
 hashPassword('labtrack123').then(function(h){_DEFAULT_PWD_HASH=h;}).catch(function(){});
-// Migración: hashear en reposo cualquier contraseña que haya quedado en texto plano.
-// doLogin compara por hash cuando el valor tiene prefijo $sha256$, así que es transparente.
+// Migración en reposo: texto plano → hash salado; hash $sha256$ legado → salado (doble vuelta).
+// verifyPassword soporta los tres formatos, así que es transparente para el login.
 async function _migratePlainPasswords(){
   var changed=false;
   var ids=Object.keys(passwords||{});
   for(var i=0;i<ids.length;i++){
     var uid=ids[i],v=passwords[uid];
-    if(typeof v==='string'&&v&&!v.startsWith('$sha256$')){
-      passwords[uid]=await hashPassword(v);
-      if(!passwords_ts)passwords_ts={};
-      passwords_ts[uid]=Date.now();
-      changed=true;
-    }
+    if(typeof v!=='string'||!v||v.startsWith('$sha256s$'))continue;
+    passwords[uid]=v.startsWith('$sha256$')?(await _wrapSalted(v.slice(8))):(await hashPasswordSalted(v));
+    if(!passwords_ts)passwords_ts={};
+    passwords_ts[uid]=Date.now();
+    changed=true;
+  }
+  if(typeof labConfigPwd==='string'&&labConfigPwd&&!labConfigPwd.startsWith('$sha256s$')){
+    labConfigPwd=labConfigPwd.startsWith('$sha256$')?(await _wrapSalted(labConfigPwd.slice(8))):(await hashPasswordSalted(labConfigPwd));
+    labConfigPwd_ts=Date.now();
+    changed=true;
   }
   if(changed){saveLS();saveNow().catch(function(e){console.error('pwd-migrate:',e);});}
 }
@@ -6063,6 +6092,7 @@ function renderLogin(){
       +'<input type="password" id="login-pwd" autocomplete="current-password" placeholder="••••••••"'
       +' onkeydown="if(event.key===\'Enter\')doLogin()"'
       +' style="width:100%;padding:11px 12px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:15px;margin-top:5px;box-sizing:border-box">'
+      +'<div style="font-size:10.5px;color:var(--text3);margin-top:6px;line-height:1.35">Clave de uso interno del LCC: no utilice su contraseña corporativa ni una que use en otros servicios.</div>'
       +'</div>'
       +errHtml
       +'<button class="btn pri" onclick="doLogin()" style="width:100%;margin-top:4px;padding:12px;font-size:15px;border-radius:var(--radius)">Ingresar</button>'
@@ -6311,20 +6341,8 @@ async function doLogin(){
     loginError='Cuenta bloqueada por intentos fallidos. Esperá 15 minutos.';render();return;
   }
   const stored=passwords[uid]||'';
-  let ok=false;
-  if(stored.startsWith('$sha256$')){
-    ok=(await hashPassword(v))===stored;
-  } else {
-    ok=(v===stored);
-    if(ok){
-      hashPassword(v).then(function(h){
-        passwords[uid]=h;
-        if(!passwords_ts)passwords_ts={};
-        passwords_ts[uid]=Date.now();
-        saveLS();saveNow().catch(function(e){console.error('pwd-upgrade:',e);});
-      });
-    }
-  }
+  // Formatos legados (texto plano / $sha256$ sin sal) los migra _migratePlainPasswords tras el login
+  let ok=await verifyPassword(v,stored);
   if(ok){
     currentUser=uMap[uid];
     loginStep=1;loginError='';selectedLoginUser=null;
@@ -7964,6 +7982,8 @@ function renderInformes(){
     +'<button class="btn sm" onclick="copyInformeTable()" title="Copiar la tabla al portapapeles (pegar en Excel)">📋 Copiar</button>'
     +'<button class="btn sm" onclick="exportInformeXLSX()" title="Descargar esta tabla tal como se ve (respeta filtros)">↓ Excel</button>'
     +'<button class="btn sm" onclick="exportXLSX()" title="Reporte general de análisis + resumen por analista">↓ Reporte general</button>'
+    +'<button class="btn sm" onclick="exportBIXLSX()" title="Datos planos para el dashboard (historia completa + observaciones por analista). Se guarda directo en la carpeta BI elegida.">📊 Export BI</button>'
+    +'<button class="btn sm" onclick="pickBIFolder()" title="Elegir carpeta donde guardar el Export BI (ideal: la carpeta de SharePoint sincronizada con OneDrive)">📁</button>'
     +'</div>'
     +'</div>'
     +'<div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-lg)">'
@@ -8409,9 +8429,7 @@ function requireSignature(action, label, callback) {
     if(!pwd) { errEl.textContent='Ingresá tu contraseña'; errEl.style.display='block'; return; }
     const uid = currentUser.id;
     const stored = passwords[uid]||'';
-    let ok = false;
-    if(stored.startsWith('$sha256')) { ok = (await hashPassword(pwd)) === stored; }
-    else { ok = (pwd === stored); }
+    let ok = await verifyPassword(pwd, stored);
     if(!ok) { errEl.textContent='Contraseña incorrecta'; errEl.style.display='block'; return; }
     overlay.remove();
     callback(reason);
@@ -12946,7 +12964,7 @@ function saveUserRole(uid){
 async function saveUserPwd(uid){
   const v=document.getElementById('upwd-'+uid)?.value;
   if(!v||v.length<4){alert('La contraseña debe tener al menos 4 caracteres.');return;}
-  const h=await hashPassword(v);
+  const h=await hashPasswordSalted(v);
   passwords[uid]=h;
   if(!passwords_ts)passwords_ts={};
   passwords_ts[uid]=Date.now();
@@ -12993,7 +13011,7 @@ async function addUser(){
   const uid='U'+nextUid++;
   const newUser={id:uid,name:name.trim(),role,_mustChangePwd:true,_ts:Date.now()};
   USERS.push(newUser);
-  const h=await hashPassword(pwd);
+  const h=await hashPasswordSalted(pwd);
   passwords[uid]=h;
   if(!passwords_ts)passwords_ts={};
   passwords_ts[uid]=0; // marca como "nunca cambiada por el usuario"
@@ -14090,6 +14108,181 @@ function exportXLSX(){
   if(!isSupRole()&&!isReviewerRole()&&!isAuditorRole()){showToast('Solo supervisores, revisores y auditores pueden exportar.','warn');return;}
   if(window.XLSX){doExportXLSX();}
   else{const s=document.createElement('script');s.src='https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';s.onload=doExportXLSX;document.head.appendChild(s);}
+}
+
+// ── EXPORT BI ─────────────────────────────────────────────────
+// Datos planos para dashboard externo (Excel en SharePoint / Power BI): estado
+// vivo + archivo histórico completo (labtrack_archive.json), regenerado ENTERO
+// en cada export — no acumula localmente, la historia viene del archivo.
+// Guardado directo en una carpeta local elegida una vez (File System Access
+// API, Edge/Chrome; el handle persiste en IndexedDB — localStorage no puede
+// serializar handles). Si esa carpeta es un SharePoint sincronizado con
+// OneDrive, el archivo sube solo y SharePoint versiona. Fallback: descarga.
+var BI_FILE_NAME='labtrack_bi.xlsx';
+function _biIdb(mode,key,val){
+  return new Promise(function(res){
+    if(!window.indexedDB)return res(null);
+    try{
+      var rq=indexedDB.open('labtrack_bi',1);
+      rq.onupgradeneeded=function(){rq.result.createObjectStore('kv');};
+      rq.onerror=function(){res(null);};
+      rq.onsuccess=function(){
+        var db=rq.result;
+        try{
+          var st=db.transaction('kv',mode==='get'?'readonly':'readwrite').objectStore('kv');
+          var op=mode==='get'?st.get(key):st.put(val,key);
+          op.onsuccess=function(){res(mode==='get'?(op.result||null):true);db.close();};
+          op.onerror=function(){res(null);db.close();};
+        }catch(e){res(null);try{db.close();}catch(e2){}}
+      };
+    }catch(e){res(null);}
+  });
+}
+async function pickBIFolder(){
+  if(!isSupRole()&&!isReviewerRole()&&!isAuditorRole()){showToast('Solo supervisores, revisores y auditores pueden exportar.','warn');return;}
+  if(!window.showDirectoryPicker){showToast('Este navegador no permite guardar en carpeta fija (usá Edge o Chrome). El Export BI se descarga a Descargas.','warn');return;}
+  try{
+    var h=await window.showDirectoryPicker({mode:'readwrite'});
+    await _biIdb('set','dir',h);
+    showToast('Carpeta BI: «'+h.name+'» — los próximos Export BI se guardan ahí.','success');
+  }catch(e){/* picker cancelado */}
+}
+// Resuelve la carpeta destino. Llamar DENTRO del gesto de usuario: el picker y
+// requestPermission exigen activación; el fetch del archivo histórico va después.
+async function _biEnsureDir(){
+  if(!window.showDirectoryPicker)return null;
+  var h=await _biIdb('get','dir');
+  if(!h){
+    try{h=await window.showDirectoryPicker({mode:'readwrite'});await _biIdb('set','dir',h);}
+    catch(e){return null;}
+  }
+  try{
+    var p=await h.queryPermission({mode:'readwrite'});
+    if(p!=='granted')p=await h.requestPermission({mode:'readwrite'});
+    return p==='granted'?h:null;
+  }catch(e){return null;}
+}
+function _biSheet(rows){
+  // Variante de xlsxSheet que conserva números como t:'n' — el dashboard suma
+  // horas y promedia lapsos; con todo-texto (xlsxSheet) SUMIFS daría 0.
+  var ws={};
+  if(!rows||!rows.length){ws['!ref']='A1';ws['A1']={v:'',t:'s'};return ws;}
+  var hdr=Object.keys(rows[0]);
+  var enc=XLSX.utils.encode_cell;
+  hdr.forEach(function(h,c){ws[enc({r:0,c:c})]={v:h,t:'s'};});
+  rows.forEach(function(row,ri){
+    hdr.forEach(function(h,c){
+      var v=row[h];
+      ws[enc({r:ri+1,c:c})]=(typeof v==='number'&&isFinite(v))?{v:v,t:'n'}:{v:v==null?'':String(v),t:'s'};
+    });
+  });
+  ws['!ref']=XLSX.utils.encode_range({s:{r:0,c:0},e:{r:rows.length,c:hdr.length-1}});
+  return ws;
+}
+function exportBIXLSX(){
+  if(!isSupRole()&&!isReviewerRole()&&!isAuditorRole()){showToast('Solo supervisores, revisores y auditores pueden exportar.','warn');return;}
+  var dirP=_biEnsureDir(); // primero: consume el gesto de usuario
+  _lazyXLSX(function(){dirP.then(function(dir){_doExportBI(dir);});});
+}
+async function _doExportBI(dir){
+  try{
+    var arch=[];try{arch=(await loadArchivedTasks())||[];}catch(e){}
+    var live=activeTasks();
+    var liveIds={};live.forEach(function(t){liveIds[t.id]=1;});
+    var all=live.concat(arch.filter(function(t){return !liveIds[t.id]&&!t._deleted;}));
+    function ym(s){return s?String(s).slice(0,7):'';}
+    function lapse(a,b){if(!a||!b)return null;var d=Math.round((new Date(b)-new Date(a))/864e5);return Math.max(0,d);}
+    var rowsA=[],rowsAn=[],rowsObs=[];
+    all.forEach(function(t){
+      var assigns=(t.assignments||[]).filter(function(a){return !a._removed;});
+      var fIngreso=t.created||'',fVenc=t.due||'';
+      var fInicio=assigns.length?assigns.reduce(function(mn,a){return(!mn||a.date<mn)?a.date:mn;},null):'';
+      var fCompl=t.completedTs?tsToYMD(t.completedTs):(t.confirmedTs?tsToYMD(t.confirmedTs):'');
+      var fRev=t.reviewedDate||'',fApr=t.approvedDate||'';
+      var fCierre=fApr||fRev||fCompl||'';
+      // Demora/En_plazo SOLO con cierre real (a diferencia de Informes, que
+      // muestra 0 para abiertos): un promedio de demoras no debe contar abiertos.
+      var demora=(fVenc&&fCierre)?lapse(fVenc,fCierre):null;
+      var horas=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
+      var anaNames=[];assigns.forEach(function(a){var n=getU(a.analyst).name;if(anaNames.indexOf(n)<0)anaNames.push(n);});
+      var archived=!liveIds[t.id];
+      rowsA.push({
+        ID:t.id,Producto:t.producto,Lote:t.lote,Tipo:t.tipo||'',
+        Estado:statusLabel(t.status),Prioridad:t.priority||'Normal',
+        Analistas:anaNames.join(', '),Revisor:_reviewerName(t),Aprobador:_approverName(t),
+        F_Ingreso:fIngreso,F_Vencimiento:fVenc,F_Inicio:fInicio||'',F_Completado:fCompl,
+        F_Revision:fRev,F_Aprobacion:fApr,
+        Mes_Ingreso:ym(fIngreso),Mes_Cierre:ym(fCierre),
+        D_Ingreso_Inicio:lapse(fIngreso,fInicio),
+        D_Inicio_Completado:lapse(fInicio,fCompl),
+        D_Completado_Revision:lapse(fCompl,fRev),
+        D_Revision_Aprobacion:lapse(fRev,fApr),
+        D_Total:lapse(fIngreso,fCierre||fInicio||fIngreso),
+        Demora_dias:demora,
+        En_plazo:(fVenc&&fCierre)?(demora>0?'No':'Sí'):'',
+        Horas:horas||null,Observaciones:(t.observations||[]).length,
+        STD:t.stdSecDev?'Sí':'No',Archivado:archived?'Sí':'No'
+      });
+      // Por analista: carga (días asignados) y horas por producto
+      var byAna={};
+      assigns.forEach(function(a){
+        var k=a.analyst;
+        if(!byAna[k])byAna[k]={h:0,d:0,first:null};
+        byAna[k].h+=(a.realHours||0);byAna[k].d++;
+        if(!byAna[k].first||a.date<byAna[k].first)byAna[k].first=a.date;
+      });
+      Object.keys(byAna).forEach(function(aid){
+        var b=byAna[aid];
+        rowsAn.push({ID:t.id,Producto:t.producto,Lote:t.lote,Tipo:t.tipo||'',
+          Estado:statusLabel(t.status),Analista:getU(aid).name,
+          F_Primer_dia:b.first||'',Mes:ym(b.first),Mes_Cierre:ym(fCierre),
+          Dias:b.d,Horas:b.h||null,Archivado:archived?'Sí':'No'});
+      });
+      // Observaciones: dirigida → solo ese analista; general → todos los activos
+      (t.observations||[]).forEach(function(o){
+        var targets=o.targetAnalyst?[o.targetAnalyst]:Object.keys(byAna);
+        if(!targets.length)targets=[null];
+        var f=o.ts?tsToYMD(o.ts):'';
+        targets.forEach(function(aid){
+          rowsObs.push({ID:t.id,Producto:t.producto,Lote:t.lote,Tipo:t.tipo||'',
+            F_Observacion:f,Mes:ym(f),Analista:aid?getU(aid).name:'—',
+            Dirigida:o.targetAnalyst?'Sí':'No',Autor:o.byName||'',Rol_Autor:o.byRole||'',
+            Comentario:(o.comment||'').replace(/\s+/g,' ').trim().slice(0,300)});
+        });
+      });
+    });
+    var meta=[
+      {Campo:'Generado',Valor:today()},
+      {Campo:'Generado_por',Valor:currentUser?currentUser.name:''},
+      {Campo:'Analisis_total',Valor:rowsA.length},
+      {Campo:'Analisis_archivo',Valor:rowsA.length-live.length},
+      {Campo:'Observaciones',Valor:rowsObs.length},
+      {Campo:'App_build',Valor:String(APP_BUILD)},
+      {Campo:'Nota',Valor:'Foto completa en cada export (estado vivo + archivo histórico). Fechas ISO YYYY-MM-DD. Demora/En_plazo solo para análisis con cierre. Observación general cuenta para todos los analistas del producto (columna Dirigida distingue).'}
+    ];
+    // Nómina actual de analistas — el dashboard arma sus bloques por analista
+    // desde acá (sin configuración manual; ex-analistas quedan solo en los datos)
+    var equipo=(typeof ANALYSTS!=='undefined'?ANALYSTS:[]).map(function(a){return {Analista:a.name,ID:a.id};});
+    var wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,_biSheet(rowsA),'Analisis');
+    XLSX.utils.book_append_sheet(wb,_biSheet(rowsAn),'Analistas');
+    XLSX.utils.book_append_sheet(wb,_biSheet(rowsObs),'Observaciones');
+    XLSX.utils.book_append_sheet(wb,_biSheet(equipo),'Equipo');
+    XLSX.utils.book_append_sheet(wb,_biSheet(meta),'Meta');
+    if(dir){
+      try{
+        var out=XLSX.write(wb,{bookType:'xlsx',type:'array'});
+        var fh=await dir.getFileHandle(BI_FILE_NAME,{create:true});
+        var w=await fh.createWritable();
+        await w.write(new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+        await w.close();
+        showToast('Export BI guardado en «'+dir.name+'» — '+rowsA.length+' análisis, '+rowsObs.length+' observaciones.','success');
+        return;
+      }catch(e){console.warn('exportBI escritura directa:',e);}
+    }
+    xlsxDownload(wb,BI_FILE_NAME);
+    showToast('Export BI descargado — '+rowsA.length+' análisis. Guardalo en la carpeta BI de SharePoint.','success');
+  }catch(e){console.warn('exportBI:',e);alert('Error al generar el Export BI.');}
 }
 
 // ── EXPORT / COPY HELPERS ──
@@ -15836,17 +16029,10 @@ async function doChangePwd(){
   const msg=document.getElementById('cp-msg');
   if(nw.length<4){msg.style.color='var(--red)';msg.textContent='Mínimo 4 caracteres.';return;}
   if(nw!==rep){msg.style.color='var(--red)';msg.textContent='Las contraseñas no coinciden.';return;}
-  // Verificar contraseña actual soportando tanto texto plano como hash SHA-256
   const stored=passwords[currentUser.id]||'';
-  let oldOk=false;
-  if(stored.startsWith('$sha256$')){
-    oldOk=(await hashPassword(old))===stored;
-  } else {
-    oldOk=(old===stored);
-  }
+  const oldOk=await verifyPassword(old,stored);
   if(!oldOk){msg.style.color='var(--red)';msg.textContent='Contraseña actual incorrecta.';return;}
-  // Guardar nueva contraseña como hash SHA-256
-  const newHash=await hashPassword(nw);
+  const newHash=await hashPasswordSalted(nw);
   passwords[currentUser.id]=newHash;
   if(!passwords_ts)passwords_ts={};
   passwords_ts[currentUser.id]=Date.now();
