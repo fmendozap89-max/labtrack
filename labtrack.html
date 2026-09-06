@@ -600,7 +600,7 @@ function isStaffRole(){return currentUser&&currentUser.role==='staff';}
 function isSamplerRole(){return currentUser&&currentUser.role==='sampler';}
 // Usuarios asignables al ANÁLISIS de productos: analistas + revisores (los revisores
 // colaboran con análisis cuando se requiere). ANALYSTS se mantiene para capacidad/personal.
-function assignableAnalysts(){return USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer';}).sort(function(a,b){return a.name.localeCompare(b.name,'es');});}
+function assignableAnalysts(){return USERS.filter(function(u){return (u.role==='analyst'||u.role==='reviewer')&&!u.disabled;}).sort(function(a,b){return a.name.localeCompare(b.name,'es');});}
 // ¿El usuario participa como analista (asignado) en esta tarea?
 function _userIsAssignee(t,uid){return (t.assignments||[]).some(function(a){return a.analyst===uid&&!a._removed;});}
 // Analista objetivo de la observación activa (la más reciente). null = todos los asignados.
@@ -609,10 +609,12 @@ function _obsActiveTarget(t){var obs=t&&t.observations;if(!obs||!obs.length)retu
 function _analystSeesObs(t,uid){var tgt=_obsActiveTarget(t);return !tgt||tgt===uid;}
 
 function rebuildDerived(){
-  ANALYSTS=USERS.filter(u=>u.role==='analyst').sort((a,b)=>a.name.localeCompare(b.name,'es'));
-  SAMPLERS=USERS.filter(u=>u.role==='sampler').sort((a,b)=>a.name.localeCompare(b.name,'es'));
+  // Usuarios DESHABILITADOS (u.disabled): no ingresan ni se asignan, pero siguen en USERS/uMap
+  // para que su historial (asignaciones, horas, informes) conserve nombre y avatar.
+  ANALYSTS=USERS.filter(u=>u.role==='analyst'&&!u.disabled).sort((a,b)=>a.name.localeCompare(b.name,'es'));
+  SAMPLERS=USERS.filter(u=>u.role==='sampler'&&!u.disabled).sort((a,b)=>a.name.localeCompare(b.name,'es'));
   // Todos los usuarios con agenda (calendario, horarios, ausencias)
-  CAL_USERS=USERS.filter(u=>['analyst','reviewer','sampler','staff'].includes(u.role)).sort((a,b)=>a.name.localeCompare(b.name,'es'));
+  CAL_USERS=USERS.filter(u=>['analyst','reviewer','sampler','staff'].includes(u.role)&&!u.disabled).sort((a,b)=>a.name.localeCompare(b.name,'es'));
   uMap={};
   USERS.forEach((u,i)=>{
     var _ai=u.avColor!=null?u.avColor:stableAvIdx(u.id);
@@ -623,7 +625,17 @@ function rebuildDerived(){
     u.chipTxt=AV_CHIP[_ai%AV_CHIP.length].txt;
     uMap[u.id]=u;
   });
+  // Sesión abierta de un usuario que fue deshabilitado desde otro dispositivo: cerrar
+  // (diferido: rebuildDerived corre dentro de applySnapshot/merge, no re-entrar en render).
+  if(currentUser&&uMap[currentUser.id]&&uMap[currentUser.id].disabled){
+    setTimeout(function(){
+      if(!currentUser)return;
+      try{showToast('Su usuario fue deshabilitado. Se cerró la sesión.','warn');}catch(e){}
+      logout();
+    },0);
+  }
 }
+function isUserActive(u){return !!u&&!u.disabled;}
 
 // SK object removed — persistence via GitHub Gist
 function getSnapshot(){
@@ -638,7 +650,7 @@ function getSnapshot(){
     tasks,nextId,nextUid,nextNotifId,nextAbsId,nextMgmtId,
     freeTasks,nextFreeTaskId,productSuggestions,nextSuggId,stdSecNeeds,productCatalog,customTipos,
     customTipos_ts:(customTipos_ts||0),
-    users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{}),...(u._ts?{_ts:u._ts}:{}),...(u._mustChangePwd?{_mustChangePwd:true}:{})})),
+    users:USERS.map(u=>({id:u.id,name:u.name,role:u.role,...(u.avColor!=null?{avColor:u.avColor}:{}),...(u._ts?{_ts:u._ts}:{}),...(u.disabled?{disabled:true,disabledTs:u.disabledTs||0}:{})})),
     passwords,passwords_ts:(passwords_ts||{}),replanNotifs,absences,absences_ts:(absences_ts||{}),workdayConfig,dayDeclarations,hourDevAcks,dupAcks,mgmtTasks,mgmtCategories,analystSchedules,scheduleRequests,nextSchedReqId,absenceTypesDef,
     // El audit trail vive en su propio archivo (labtrack_audit.json) — duplicarlo acá
     // engordaba el state hasta el límite de 1 MB de la API (que trunca y rompe el sync)
@@ -944,7 +956,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026090101; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026090601; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -2431,7 +2443,7 @@ function _restoreSession(){
       return;
     }
     var u=USERS.find(function(x){return x.id===obj.uid;});
-    if(!u)return;
+    if(!u||u.disabled){localStorage.removeItem('lt9-session');return;}
     currentUser=u;
     // Only restore lastView if the role has permission for it
     var savedView=localStorage.getItem('lt9-lastView')||'';
@@ -3292,6 +3304,7 @@ function checkAbsenceConflicts(){
 
   // ── Analysis task conflicts ──
   tasks.forEach(t=>{
+    if(t._deleted)return;
     (t.assignments||[]).forEach(a=>{
       if(a._removed||!a.date)return;
       const absent=isAbsent(a.analyst,a.date);
@@ -4203,6 +4216,7 @@ function getNotifBadge(){
   var confC=0;
   if(isSup){
     tasks.forEach(function(t){
+      if(t._deleted)return;
       // Confirmación por porción: incluir tareas en curso con porciones ya completadas.
       if(t.status!=='pending-confirm'&&t.status!=='progress')return;
       var pend=(t.assignments||[]).filter(function(a){return !a._removed&&a._pendingConfirm===true&&!a._supervisorConfirmed;});
@@ -4252,6 +4266,7 @@ function getNotifBadge(){
   if(isSup){
     var _oTMs=todayMs();
     tasks.forEach(function(t){
+      if(t._deleted)return; // anulados: sus porciones no cuentan (causa de atrasos "fantasma" sin producto visible)
       if(t.status!=='pending'&&t.status!=='scheduled'&&t.status!=='progress')return;
       (t.assignments||[]).filter(function(a){return !a._removed;}).forEach(function(a){
         if(!a.date)return;
@@ -4389,7 +4404,7 @@ function renderFreeTasksTable(isSup){
     html+='<select onchange="window.ftFilterAnalyst=this.value;render()" style="padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;background:var(--surface)">'
       +'<option value="">Todos los usuarios</option>'
       // Misma población que el modal de asignación (no solo analistas)
-      +USERS.filter(function(u){return['analyst','staff','reviewer','sampler'].includes(u.role);}).sort(function(a,b){return a.name.localeCompare(b.name,'es');}).map(function(a){return'<option value="'+a.id+'"'+(fa===a.id?' selected':'')+'>'+escH(a.name)+'</option>';}).join('')
+      +USERS.filter(function(u){return['analyst','staff','reviewer','sampler'].includes(u.role)&&!u.disabled;}).sort(function(a,b){return a.name.localeCompare(b.name,'es');}).map(function(a){return'<option value="'+a.id+'"'+(fa===a.id?' selected':'')+'>'+escH(a.name)+'</option>';}).join('')
       +'</select>';
   }
   // Month filter
@@ -6099,7 +6114,7 @@ function renderLogin(){
       +'<button class="btn" onclick="backStep()" style="width:100%;margin-top:8px;padding:8px;font-size:13px;border-radius:var(--radius);background:transparent;color:var(--text2);border:none">← Elegir otro usuario</button>'
       +'</div></div>';
   }
-  const groups=roleOrder.map(function(r){return {role:r,users:USERS.filter(function(u){return u.role===r;}).sort(function(a,b){return a.name.localeCompare(b.name,'es');})};}).filter(function(g){return g.users.length>0;});
+  const groups=roleOrder.map(function(r){return {role:r,users:USERS.filter(function(u){return u.role===r&&!u.disabled;}).sort(function(a,b){return a.name.localeCompare(b.name,'es');})};}).filter(function(g){return g.users.length>0;});
   let grid='<div style="width:100%">';
   groups.forEach(function(g){
     const col=roleColor(g.role);
@@ -6223,6 +6238,7 @@ function renderLogin(){
 
 function loginPickUser(uid){
   selectedLoginUser=USERS.find(function(u){return u.id===uid;})||null;
+  if(selectedLoginUser&&selectedLoginUser.disabled){selectedLoginUser=null;loginError='Usuario deshabilitado. Consulte al supervisor.';render();return;}
   loginError='';loginStep=2;
   render();
   setTimeout(function(){var p=document.getElementById('login-pwd');if(p)p.focus();},60);
@@ -6336,6 +6352,10 @@ async function doLogin(){
   if(!selectedLoginUser){loginError='Seleccioná un usuario.';render();return;}
   const v=(document.getElementById('login-pwd')||{}).value||'';
   const uid=selectedLoginUser.id||selectedLoginUser;
+  // Usuario deshabilitado por el supervisor (puede haber cambiado tras el pull)
+  if(uMap[uid]&&uMap[uid].disabled){
+    loginError='Usuario deshabilitado. Consulte al supervisor.';selectedLoginUser=null;loginStep=1;render();return;
+  }
   // Seguridad: bloqueo de cuenta por intentos fallidos
   if(checkLoginLockout(uid)){
     loginError='Cuenta bloqueada por intentos fallidos. Esperá 15 minutos.';render();return;
@@ -6352,15 +6372,10 @@ async function doLogin(){
     _migratePlainPasswords().catch(function(e){console.warn('pwd-migrate:',e);});
     // Archivado de aprobados viejos (no-op si no hay candidatos o rol sin escritura)
     setTimeout(function(){archiveOldApproved().catch(function(e){console.warn('archive:',e);});},4000);
-    // Forzar cambio de contraseña si nunca fue cambiada (default)
-    if(currentUser._mustChangePwd){
-      try{localStorage.setItem('lt9-session',JSON.stringify({uid:uid,ts:Date.now()}));}catch(e){}
-      render();
-      setTimeout(function(){showChangePwd=true;render();},200);
-    } else {
-      try{localStorage.setItem('lt9-session',JSON.stringify({uid:uid,ts:Date.now()}));}catch(e){}
-      render();
-    }
+    // La contraseña asignada por el supervisor es definitiva: no se fuerza el cambio en el
+    // primer ingreso (decisión 2026-09-06). El usuario puede cambiarla cuando quiera desde su menú.
+    try{localStorage.setItem('lt9-session',JSON.stringify({uid:uid,ts:Date.now()}));}catch(e){}
+    render();
   } else {
     recordLoginFailure(uid,(uMap[uid]||{}).name||uid);
     auditLog('LOGIN_FAIL','USER',uid,{description:'Intento fallido de login: '+(uMap[uid]?uMap[uid].name:uid)},'');
@@ -7183,7 +7198,7 @@ function _extNotifyTask(t){
   if(t.extNotified.indexOf(p.id)>=0)return;
   t.extNotified.push(p.id);
   t._ts=Date.now();
-  var _sup=USERS.find(function(u){return u.role==='supervisor';});
+  var _sup=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
   replanNotifs.push({id:newNotifId(),type:'ext_match',pcId:p.id,taskId:t.id,
     producto:t.producto,lote:t.lote,analisis:_extSummary(p),
     forUserId:_sup?_sup.id:'',status:'pending',ts:Date.now(),_ts:Date.now()});
@@ -7650,7 +7665,7 @@ function submitStdSecNeed(){
   stdSecNeeds.push(need);
   // Notificar al supervisor (salvo que la registre él mismo)
   if(!isSupRole()){
-    var _sup=USERS.find(function(u){return u.role==='supervisor';});
+    var _sup=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
     replanNotifs.push({id:newNotifId(),type:'stdsec_created',needId:need.id,
       producto:prod,fromUserId:currentUser.id,fromName:currentUser.name,
       forUserId:_sup?_sup.id:'',status:'pending',ts:Date.now(),_ts:Date.now()});
@@ -7704,7 +7719,7 @@ function stdSecDelete(id){
 // tarea), nunca en render.
 function _stdSecNotifyMatches(need){
   if(!need||need._removed||need.status==='cerrado')return;
-  var _sup=USERS.find(function(u){return u.role==='supervisor';});
+  var _sup=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
   if(!need.notifiedPairs)need.notifiedPairs=[];
   var _new=stdSecTasksForNeed(need).filter(function(t){return need.notifiedPairs.indexOf(t.id)<0&&!t.stdSecDev;});
   if(!_new.length)return;
@@ -8372,6 +8387,7 @@ function quickActivateDay(dateStr, analystId) {
   // Collect all analysts assigned to tasks or mgmt on this day
   var affectedAnalysts = new Set();
   tasks.forEach(function(t){
+    if(t._deleted)return;
     (t.assignments||[]).forEach(function(a){
       if(!a._removed&&a.date===dateStr) affectedAnalysts.add(a.analyst);
     });
@@ -8723,6 +8739,15 @@ function softDeleteTask(id, reason) {
   t._deletedTs = Date.now();
   t._deletedReason = reason;
   t._ts = Date.now();
+  // Porciones activas SIN horas quedan quitadas de la planificación (tombstone mínimo):
+  // un producto anulado no debe seguir contando como trabajo pendiente de nadie
+  // (incidente 2026-09-06: la alerta de atraso apuntaba a un análisis anulado que
+  // ninguna vista mostraba). Las porciones con horas se conservan como registro.
+  (t.assignments||[]).forEach(function(a){
+    if(a._removed)return;
+    if((a.realHours>0)||(a.sessions&&a.sessions.length>0)||a._completedBySup)return;
+    a._removed=true;a._removedTs=Date.now();a._removedBy=currentUser.id;a._removeReason='task_deleted';a._ts=Date.now();
+  });
   // Resolver todas las notificaciones pendientes del producto eliminado
   // (sin esto quedaban bloqueadas apuntando a una tarea que ya no se muestra)
   replanNotifs.forEach(function(n){
@@ -10585,6 +10610,7 @@ function renderCalMonth(sup){
 
       // Muestreos realizados en este día
       tasks.forEach(function(t){
+        if(t._deleted)return;
         (t.samplerAssignments||[]).filter(function(sa){
           return sa.done&&sa.realArrivalDate===dateStr&&rows.some(function(r){return r.id===sa.sampler;});
         }).forEach(function(sa){
@@ -11372,7 +11398,7 @@ async function _openRcvUpdateModal(reqId, fromLabJson){
   if(!req){alert('No se pudo cargar la solicitud. Recargue la vista.');return;}
   window._rcvUpdateCtx.req=req;
 
-  var ANALYSTS_LOCAL=USERS.filter(function(u){return u.role==='analyst'||u.role==='reviewer';});
+  var ANALYSTS_LOCAL=assignableAnalysts();
   var analystOpts='<option value="">Sin asignar</option>'+ANALYSTS_LOCAL.map(function(a){return'<option value="'+escH(a.id)+'"'+(req.assignedToId===a.id?' selected':'')+'>'+escH(a.name)+'</option>';}).join('');
   var statusOpts=['pendiente','en_proceso','docs_enviados'].map(function(s){var si=_ilrStatusInfo(s);return'<option value="'+s+'"'+(req.status===s?' selected':'')+'>'+si.icon+' '+si.label+'</option>';}).join('');
 
@@ -12368,7 +12394,7 @@ function renderAdmin(){
   if(_tab==='usuarios'){
   html+='<div class="admin-wrap">'
     +'<h4>Usuarios del sistema</h4>'
-    +'<div class="sub" style="margin-bottom:10px">Editá nombre, contraseña y rol. Los cambios de rol toman efecto en el próximo inicio de sesión.</div>'
+    +'<div class="sub" style="margin-bottom:10px">Editá nombre, contraseña y rol. Los cambios de rol toman efecto en el próximo inicio de sesión. La contraseña que asigna el supervisor es definitiva (no se exige cambiarla al primer ingreso). Un usuario <b>deshabilitado</b> no puede ingresar ni ser asignado; conserva su historial y puede reincorporarse.</div>'
     +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">'
     +'<input id="srch-admin" type="text" placeholder="Buscar por nombre o rol…" value="'+escH(window.adminSearch||'')+'"'
     +' oninput="_srch(\'adminSearch\',this.value,\'srch-admin\')"'
@@ -12377,7 +12403,7 @@ function renderAdmin(){
     +'</div>'
 
     // Column headers
-    +'<div style="display:grid;grid-template-columns:100px 1fr 130px 180px 160px 80px;gap:8px;align-items:center;padding:0 10px 6px;border-bottom:2px solid var(--border)">'
+    +'<div style="display:grid;grid-template-columns:100px 1fr 130px 180px 160px 124px;gap:8px;align-items:center;padding:0 10px 6px;border-bottom:2px solid var(--border)">'
     +'<div style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--text3)">Color</div>'
     +'<div style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--text3)">Nombre</div>'
     +'<div style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--text3)">Rol actual</div>'
@@ -12387,7 +12413,8 @@ function renderAdmin(){
     +'</div>'
 
     // User rows
-    +[...USERS].sort(function(a,b){return a.name.localeCompare(b.name,'es');}).filter(function(u){return !_aq||u.name.toLowerCase().includes(_aq)||roleLabel(u.role).toLowerCase().includes(_aq);}).map(function(u){
+    // Habilitados primero (alfabético); deshabilitados al final
+    +[...USERS].sort(function(a,b){return (a.disabled?1:0)-(b.disabled?1:0)||a.name.localeCompare(b.name,'es');}).filter(function(u){return !_aq||u.name.toLowerCase().includes(_aq)||roleLabel(u.role).toLowerCase().includes(_aq)||(u.disabled&&'deshabilitado'.includes(_aq));}).map(function(u){
       // Build color picker dropdown — cuadro de color como trigger
       var AV_NAMES=['Azul','Esmeralda','Dorado','Rojo','Violeta','Naranja','Rosa','Cian','Índigo'];
       var AV_BG=['#b8d4f8','#a8e8d0','#f5d478','#f5a8a8','#d0b0f8','#f5c480','#f5a8d4','#b0e0e8','#b8b4f5'];
@@ -12400,7 +12427,7 @@ function renderAdmin(){
           +(active?'box-shadow:0 0 0 2px #fff,0 0 0 3.5px #444;':'box-shadow:0 0 0 1px rgba(0,0,0,.12);')
           +'" onmouseenter="this.style.transform=\'scale(1.15)\'" onmouseleave="this.style.transform=\'scale(1)\'"></div>';
       }).join('');
-      return '<div style="display:grid;grid-template-columns:56px 1fr 130px 180px 160px 80px;gap:8px;align-items:center;padding:10px;border-bottom:1px solid var(--border);border-radius:var(--radius)">'
+      return '<div style="display:grid;grid-template-columns:56px 1fr 130px 180px 160px 124px;gap:8px;align-items:center;padding:10px;border-bottom:1px solid var(--border);border-radius:var(--radius)'+(u.disabled?';opacity:.55;background:var(--bg2)':'')+'">'
         // Avatar — clic abre el color picker
         +'<div style="position:relative;display:inline-block">'
         +'<div class="av '+u.av+'" onclick="toggleColorPicker(\''+panelId+'\')" title="Cambiar color" style="width:34px;height:34px;font-size:13px;cursor:pointer;user-select:none">'+escH(u.avInit)+'</div>'
@@ -12413,7 +12440,9 @@ function renderAdmin(){
         +' style="font-size:13px;padding:6px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);width:100%"'
         +' onkeydown="if(event.key===\'Enter\')saveUserName(\''+u.id+'\')">'
         // Role badge
-        +'<div><span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:10px;'+roleBadgeStyle(u.role)+'">'+escH(roleLabel(u.role))+'</span></div>'
+        +'<div><span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:10px;'+roleBadgeStyle(u.role)+'">'+escH(roleLabel(u.role))+'</span>'
+        +(u.disabled?'<div style="font-size:10px;font-weight:700;color:var(--red);margin-top:3px" title="Deshabilitado'+(u.disabledTs?' el '+new Date(u.disabledTs).toLocaleDateString('es'):'')+'">⏸ Deshabilitado</div>':'')
+        +'</div>'
         // Role selector
         +'<select id="urole-'+u.id+'" onchange="saveUserRole(\''+u.id+'\')"'
         +' style="font-size:12px;padding:6px 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);width:100%">'
@@ -12429,7 +12458,12 @@ function renderAdmin(){
         // Actions
         +'<div style="display:flex;gap:4px;justify-content:flex-end">'
         +'<button class="btn sm" onclick="saveUserName(\''+u.id+'\')">Guardar</button>'
-        +(u.id!==currentUser.id?'<button class="btn sm dan" onclick="deleteUser(\''+u.id+'\')">🗑</button>':'')
+        +(u.id!==currentUser.id
+          ?(u.disabled
+            ?'<button class="btn sm suc" onclick="toggleUserDisabled(\''+u.id+'\')" title="Habilitar (reincorporar)">▶</button>'
+            :'<button class="btn sm" onclick="toggleUserDisabled(\''+u.id+'\')" title="Deshabilitar (dejó de trabajar en el laboratorio)" style="color:var(--amber-text);border-color:var(--amber)">⏸</button>')
+          :'')
+        +(u.id!==currentUser.id?'<button class="btn sm dan" onclick="deleteUser(\''+u.id+'\')" title="Eliminar definitivamente">🗑</button>':'')
         +'</div>'
         +'</div>';
     }).join('')
@@ -12946,15 +12980,26 @@ function saveUserRole(uid){
   const newRole=document.getElementById('urole-'+uid)?.value;
   if(!newRole)return;
   const oldRole=u.role;
+  if(newRole===oldRole)return;
   u.role=newRole;
-  // If changing away from supervisor, warn if this is the only one
-  if(oldRole==='supervisor'&&USERS.filter(function(x){return x.role==='supervisor';}).length===0){
-    alert('No puede haber cero supervisores. Se restauró el rol.');
+  // If changing away from supervisor, warn if this is the only one (habilitado)
+  if(oldRole==='supervisor'&&_activeSupervisorsCount()===0){
+    alert('No puede haber cero supervisores habilitados. Se restauró el rol.');
     u.role=oldRole;rebuildDerived();saveLS();render();return;
   }
+  // Rol que ya no analiza: sus días planificados sin horas quedarían invisibles para el
+  // selector de analistas. Ofrecer quitarlos de la planificación (no bloquea el cambio).
+  var _detRole=0;
+  if(newRole!=='analyst'&&newRole!=='reviewer'){
+    var _pendRole=_userPendingPortionsCount(uid);
+    if(_pendRole>0&&confirm(u.name+' tiene '+_pendRole+' día'+(_pendRole!==1?'s':'')+' de análisis planificado'+(_pendRole!==1?'s':'')+' sin horas.\n\n¿Quitarlos de la planificación? (Cancelar = conservarlos; los verá en el modal del producto)')){
+      _detRole=_detachUserPendingPortions(uid,'role_change');
+    }
+  }
   u._ts=Date.now();
-  auditLog('EDIT','USER',uid,{field:'role',oldRole:oldRole,newRole:newRole,description:'Cambio de rol'},'Cambio administrativo');
+  auditLog('EDIT','USER',uid,{field:'role',oldRole:oldRole,newRole:newRole,description:'Cambio de rol',detachedPortions:_detRole},'Cambio administrativo');
   rebuildDerived();saveLS();render();
+  saveNow().catch(function(e){console.error('saveNow saveUserRole:',e);});
   const roleLabels={supervisor:'Supervisor',auditor:'Auditor',reviewer:'Revisor',analyst:'Analista',sampler:'Muestreador',staff:'Personal'};
   const msg=document.getElementById('new-user-msg');
   if(msg){msg.style.color='var(--green)';msg.textContent='Rol de '+escH(u.name)+' cambiado a '+roleLabels[newRole]+'. Efectivo al próximo login.';
@@ -12968,9 +13013,7 @@ async function saveUserPwd(uid){
   passwords[uid]=h;
   if(!passwords_ts)passwords_ts={};
   passwords_ts[uid]=Date.now();
-  // Limpiar flag de primer-login si existía
   const u=USERS.find(function(x){return x.id===uid;});
-  if(u){u._mustChangePwd=false;u._ts=Date.now();}
   auditLog('EDIT','USER',uid,{description:'Contraseña restablecida por supervisor para: '+(u?u.name:uid)},'Restablecimiento administrativo de contraseña');
   document.getElementById('upwd-'+uid).value='';
   saveLS();saveNow().catch(function(e){console.error('saveNow saveUserPwd:',e);});
@@ -12989,11 +13032,80 @@ function saveGuideUrl(){
   render();
 }
 
+// Quita de la planificación las porciones (analista|día) ACTIVAS y SIN horas de un usuario
+// (baja, deshabilitación o cambio de rol): tombstone mínimo + coherencia de estado del
+// producto. Las porciones con horas se conservan como registro histórico.
+// Devuelve la cantidad de días quitados.
+function _detachUserPendingPortions(uid,reason){
+  var n=0,now=Date.now();
+  activeTasks().forEach(function(t){
+    var touched=false;
+    (t.assignments||[]).forEach(function(a){
+      if(a._removed||a.analyst!==uid)return;
+      if((a.realHours>0)||(a.sessions&&a.sessions.length>0)||a._completedBySup)return;
+      a._removed=true;a._removedTs=now;a._removedBy=currentUser.id;a._removeReason=reason;a._ts=now;
+      n++;touched=true;
+    });
+    if(!touched)return;
+    var active=(t.assignments||[]).filter(function(a){return !a._removed;});
+    if(!active.length){
+      if(t.status==='scheduled'||t.status==='progress'||t.status==='pending-confirm')t.status='pending';
+    } else {
+      _tryAdvanceToPendingConfirm(t);
+      _tryAdvanceToDone(t);
+    }
+    t._ts=now;
+  });
+  return n;
+}
+function _userPendingPortionsCount(uid){
+  var n=0;
+  activeTasks().forEach(function(t){
+    (t.assignments||[]).forEach(function(a){
+      if(a._removed||a.analyst!==uid)return;
+      if((a.realHours>0)||(a.sessions&&a.sessions.length>0)||a._completedBySup)return;
+      n++;
+    });
+  });
+  return n;
+}
+function _activeSupervisorsCount(){return USERS.filter(function(x){return x.role==='supervisor'&&!x.disabled;}).length;}
+// Deshabilitar / habilitar usuario (alternativa a la eliminación para quien deja el laboratorio):
+// no ingresa ni se asigna; conserva nombre, historial y contraseña para una reincorporación.
+function toggleUserDisabled(uid){
+  if(!isSupRole()){alert('Solo el supervisor puede habilitar o deshabilitar usuarios.');return;}
+  var u=USERS.find(function(x){return x.id===uid;});if(!u)return;
+  if(u.id===currentUser.id){alert('No puede deshabilitar su propio usuario.');return;}
+  if(!u.disabled){
+    if(u.role==='supervisor'&&_activeSupervisorsCount()<=1){alert('Debe quedar al menos un supervisor habilitado.');return;}
+    var pend=_userPendingPortionsCount(uid);
+    var q='¿Deshabilitar a '+u.name+'?\n\nNo podrá ingresar ni ser asignado a nuevos análisis. Su historial se conserva y puede volver a habilitarlo cuando quiera.'
+      +(pend>0?'\n\nTiene '+pend+' día'+(pend!==1?'s':'')+' de análisis planificado'+(pend!==1?'s':'')+' sin horas: se quitarán de la planificación.':'');
+    if(!confirm(q))return;
+    var removed=pend>0?_detachUserPendingPortions(uid,'user_disabled'):0;
+    u.disabled=true;u.disabledTs=Date.now();u._ts=Date.now();
+    auditLog('EDIT','USER',uid,{field:'disabled',oldVal:false,newVal:true,description:'Usuario deshabilitado: '+u.name,detachedPortions:removed},'Baja operativa');
+    showToast('⏸ '+u.name+' deshabilitado.'+(removed?' Se quitaron '+removed+' día'+(removed!==1?'s':'')+' de la planificación.':''),'warn');
+  } else {
+    if(!confirm('¿Habilitar nuevamente a '+u.name+'? Podrá ingresar con su contraseña actual.'))return;
+    u.disabled=false;delete u.disabledTs;u._ts=Date.now();
+    auditLog('EDIT','USER',uid,{field:'disabled',oldVal:true,newVal:false,description:'Usuario habilitado: '+u.name},'Reincorporación');
+    showToast('✓ '+u.name+' habilitado.','success');
+  }
+  rebuildDerived();
+  saveLS();saveNow().catch(function(e){console.error('saveNow toggleUserDisabled:',e);});
+  render();
+}
 function deleteUser(uid){
   const u=uMap[uid];if(!u)return;
   if(!isSupRole()){alert('Solo el supervisor puede eliminar usuarios.');return;}
-  if(!confirm('¿Eliminar a '+u.name+'? Sus tareas asignadas quedarán sin ese analista.'))return;
-  auditLog('DELETE','USER',uid,{description:'Eliminación de usuario: '+u.name,role:u.role},'Eliminación administrativa');
+  if(u.id===currentUser.id){alert('No puede eliminar su propio usuario.');return;}
+  if(u.role==='supervisor'&&!u.disabled&&_activeSupervisorsCount()<=1){alert('Debe quedar al menos un supervisor habilitado.');return;}
+  var _pendDel=_userPendingPortionsCount(uid);
+  if(!confirm('¿Eliminar a '+u.name+'?\n\nSi solo dejó de trabajar en el laboratorio, prefiera «Deshabilitar»: conserva su historial y permite reincorporarlo.'
+    +(_pendDel>0?'\n\nTiene '+_pendDel+' día'+(_pendDel!==1?'s':'')+' de análisis planificado'+(_pendDel!==1?'s':'')+' sin horas: se quitarán de la planificación.':'')))return;
+  var _detDel=_pendDel>0?_detachUserPendingPortions(uid,'user_deleted'):0;
+  auditLog('DELETE','USER',uid,{description:'Eliminación de usuario: '+u.name,role:u.role,detachedPortions:_detDel},'Eliminación administrativa');
   _regDeletion('users',uid); // sin registro, el merge lo resucitaría desde otro dispositivo
   USERS=USERS.filter(x=>x.id!==uid);
   delete passwords[uid];
@@ -13009,16 +13121,19 @@ async function addUser(){
   if(name.trim().length<2){msg.style.color='var(--red)';msg.textContent='El nombre debe tener al menos 2 caracteres.';return;}
   if(pwd.length<4){msg.style.color='var(--red)';msg.textContent='La contraseña debe tener al menos 4 caracteres.';return;}
   const uid='U'+nextUid++;
-  const newUser={id:uid,name:name.trim(),role,_mustChangePwd:true,_ts:Date.now()};
+  // La contraseña asignada por el supervisor es definitiva (sin cambio forzado al primer ingreso)
+  const newUser={id:uid,name:name.trim(),role,_ts:Date.now()};
   USERS.push(newUser);
   const h=await hashPasswordSalted(pwd);
   passwords[uid]=h;
   if(!passwords_ts)passwords_ts={};
-  passwords_ts[uid]=0; // marca como "nunca cambiada por el usuario"
+  // _ts real: con 0 el merge (que compara por >) descartaba la clave recién creada frente
+  // a un remoto sin entrada y el usuario quedaba con la clave por defecto.
+  passwords_ts[uid]=Date.now();
   auditLog('CREATE','USER',uid,{description:'Nuevo usuario creado: '+name.trim(),role:role},'Alta administrativa');
   rebuildDerived();
   saveLS();saveNow().catch(function(e){console.error('saveNow addUser:',e);});
-  msg.style.color='var(--green)';msg.textContent=name.trim()+' fue creado correctamente. Deberá cambiar su contraseña en el primer ingreso.';
+  msg.style.color='var(--green)';msg.textContent=name.trim()+' fue creado correctamente. Ya puede ingresar con la contraseña asignada.';
   document.getElementById('nu-name').value='';
   document.getElementById('nu-pwd').value='';
   setTimeout(()=>{const m=document.getElementById('new-user-msg');if(m)m.textContent='';render();},2000);
@@ -14886,7 +15001,7 @@ function _doDayClose(){
   if(sum>decl+1e-9){alert('La suma asignada ('+_fmtH(sum)+'h) supera el total declarado ('+_fmtH(decl)+'h).');return;}
   var applied=0,skipped=[];
   var releaseCands=[];
-  var supU=USERS.find(function(u){return u.role==='supervisor';});
+  var supU=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
   entries.forEach(function(e){
     var r=e.row;
     if(r.kind==='analisis'){
@@ -15009,7 +15124,7 @@ function _doReleaseBatch(){
   var cands=window._dcRelCands||[];
   var mot=((document.getElementById('rb-motivo')||{}).value||'').trim()||'Finalizó antes';
   var any=false;
-  var sup=USERS.find(function(u){return u.role==='supervisor';});
+  var sup=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
   cands.forEach(function(c,i){
     var cb=document.getElementById('rb-'+i);
     if(!cb||!cb.checked)return;
@@ -15084,7 +15199,7 @@ function markDone(id,assignDate){
         }
       });
       // Notificar al Supervisor
-      var reviewerUsers=USERS.filter(function(u){return u.role==='supervisor'||u.role==='reviewer';});
+      var reviewerUsers=USERS.filter(function(u){return (u.role==='supervisor'||u.role==='reviewer')&&!u.disabled;});
       reviewerUsers.forEach(function(rv){
         replanNotifs.push({
           id:newNotifId(),type:'resubmit',taskId:id,
@@ -15168,7 +15283,7 @@ function markDone(id,assignDate){
         }
         auditLog('STATUS_CHANGE','TASK',tid,{field:'status',oldVal:prevStatus,newVal:t.status,description:t.producto+' '+t.lote+' — completado por '+currentUser.name+(t.status==='progress'?' (parcial — otros analistas pendientes)':''),hours:hVal,comment:completeCmt||''},'Completado con '+hVal+'h');
         // Push supervisor notification for completion (dedup: remove stale copies first)
-        var sup=USERS.find(function(u){return u.role==='supervisor';});
+        var sup=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
         if(sup){
           replanNotifs=replanNotifs.filter(function(n){
             return !(n.type==='completed'&&n.taskId===tid&&n.analystId===currentUser.id&&n.status!=='resolved');
@@ -15859,7 +15974,7 @@ function confirmSampling(){
   t.status='muestra-ok';
   t._ts=Date.now();
   // Crear notificación al supervisor
-  var supUser=USERS.find(function(u){return u.role==='supervisor';});
+  var supUser=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
   replanNotifs.push({
     id:newNotifId(),
     type:'sampling_done',
@@ -15878,7 +15993,7 @@ function confirmSampling(){
   // Estándar secundario: registrar el muestreo adicional en las necesidades matcheadas
   if(_stdSecTaken){
     sa.stdSecSampled=true;
-    var _supU2=USERS.find(function(u){return u.role==='supervisor';});
+    var _supU2=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
     stdSecNeedsForTask(t).filter(function(n){return n.status==='pendiente';}).forEach(function(n){
       n.status='muestreado';
       n.sampledBy=currentUser.id;n.sampledByName=currentUser.name;
@@ -16036,8 +16151,6 @@ async function doChangePwd(){
   passwords[currentUser.id]=newHash;
   if(!passwords_ts)passwords_ts={};
   passwords_ts[currentUser.id]=Date.now();
-  // Limpiar flag de contraseña pendiente de cambio
-  if(currentUser._mustChangePwd){currentUser._mustChangePwd=false;const u=USERS.find(function(x){return x.id===currentUser.id;});if(u)u._mustChangePwd=false;}
   auditLog('EDIT','USER',currentUser.id,{description:'Cambio de contraseña: '+currentUser.name},'Cambio de contraseña propio');
   saveLS();saveNow().catch(function(e){console.error('saveNow changePwd:',e);});
   showChangePwd=false;render();
@@ -16144,7 +16257,7 @@ function releaseAssignmentDay(taskId, date, motivo, opts){
   t._ts=Date.now();
   _recalcStatusAfterAssignment(t,false);
   if(!opts.noNotif){
-    var sup=USERS.find(function(u){return u.role==='supervisor';});
+    var sup=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
     replanNotifs.push({id:newNotifId(),type:'day_released',
       taskId:t.id,analystId:currentUser.id,forUserId:sup?sup.id:'',
       fromName:currentUser.name,producto:t.producto,lote:t.lote,
@@ -16196,7 +16309,7 @@ function _offerReleaseRemainingDays(taskId, dates){
       _tryAdvanceToPendingConfirm(tt);
       if(tt.status==='pending-confirm'){tt.completedBy=currentUser.id;tt.completedTs=Date.now();}
       // Aviso consolidado al supervisor (un solo mensaje con todos los días)
-      var sup=USERS.find(function(u){return u.role==='supervisor';});
+      var sup=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
       replanNotifs.push({id:newNotifId(),type:'day_released',taskId:tid,analystId:currentUser.id,
         forUserId:sup?sup.id:'',fromName:currentUser.name,producto:tt.producto,lote:tt.lote,
         dates:released,reason:mot,context:'finished_early',status:'pending',ts:Date.now()});
@@ -16231,7 +16344,7 @@ function submitReplan(isSup){
     });
   } else {
     // Analista: crear solicitud pendiente
-    var _replanSup=USERS.find(function(u){return u.role==='supervisor';});
+    var _replanSup=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
     replanNotifs.push({
       id:newNotifId(),type:'replan',taskId:replanTaskId,analystId:replanAnalystId,
       forUserId:_replanSup?_replanSup.id:'',
@@ -16390,7 +16503,7 @@ function declineFreeTaskById(ftId){
   if(!ft){showToast('La actividad ya no existe.','warn');return;}
   ft.status='declined';ft.declinedBy=currentUser.id;ft.declinedTs=Date.now();ft.declineReason=reason||'';
   replanNotifs.filter(function(n){return n.type==='free_task_assigned'&&n.freeTaskId===ftId&&n.status==='pending';}).forEach(function(n){n.status='resolved';});
-  var supUser=USERS.find(function(u){return u.role==='supervisor';});
+  var supUser=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
   replanNotifs.push({id:newNotifId(),type:'free_task_declined',
     freeTaskId:ftId,analystId:currentUser.id,analystName:currentUser.name,
     forUserId:supUser?supUser.id:'',
@@ -16407,7 +16520,7 @@ function declineFreeTask(notifId){
   var ft=freeTasks.find(function(x){return x.id===n.freeTaskId;});
   if(ft){ft.status='declined';ft.declinedBy=currentUser.id;ft.declinedTs=Date.now();ft.declineReason=reason||'';}
   resolveAllCopies({type:'free_task_assigned',freeTaskId:n.freeTaskId,analystId:currentUser.id},'rejected');
-  var supUser=USERS.find(function(u){return u.role==='supervisor';});
+  var supUser=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
   replanNotifs.push({id:newNotifId(),type:'free_task_declined',
     freeTaskId:n.freeTaskId,analystId:currentUser.id,analystName:currentUser.name,
     forUserId:supUser?supUser.id:'',
@@ -16564,6 +16677,7 @@ function renderNotifPanel(){
   var confirmPend=[];
   if(isSup){
     tasks.forEach(function(t){
+      if(t._deleted)return;
       // Confirmación por porción: incluir tareas en curso con porciones ya completadas.
       if(t.status!=='pending-confirm'&&t.status!=='progress') return;
       var pending=(t.assignments||[]).filter(function(a){
@@ -16652,6 +16766,7 @@ function renderNotifPanel(){
   if(isSup){
     var _oTMs2=todayMs();
     tasks.forEach(function(t){
+      if(t._deleted)return; // anulados: sus porciones no cuentan (causa de atrasos "fantasma" sin producto visible)
       if(t.status!=='pending'&&t.status!=='scheduled'&&t.status!=='progress')return;
       (t.assignments||[]).filter(function(a){return !a._removed;}).forEach(function(a){
         if(!a.date)return;
@@ -18003,7 +18118,7 @@ function renderFreeTaskModal(){
   const isSup=isSupRole();
   // Supervisor can assign to any analyst/staff; others assign to themselves
   const targetOptions=isSup
-    ?USERS.filter(function(u){return['analyst','staff','reviewer','sampler'].includes(u.role);})
+    ?USERS.filter(function(u){return['analyst','staff','reviewer','sampler'].includes(u.role)&&!u.disabled;})
       .sort(function(a,b){return a.name.localeCompare(b.name,'es');})
     :[];
   const roleDisplayName=function(r){return r==='analyst'?'Analista':r==='staff'?'Personal':r==='sampler'?'Muestreador':'Revisor';};
@@ -18098,7 +18213,7 @@ function saveFreeTask(){
       });
     } else if(!isSup2){
       // Analyst created own free task — notify supervisor
-      var sup4=USERS.find(function(u){return u.role==='supervisor';});
+      var sup4=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
       if(sup4){
         replanNotifs.push({
           id:newNotifId(),
@@ -18289,7 +18404,7 @@ function confirmFreeTaskAsAnalyst(ftId){
       ft2.completedBy=currentUser.id;
       ft2.completedTs=Date.now();
       ft2._ts=Date.now();
-      var sup3=USERS.find(function(u){return u.role==='supervisor';});
+      var sup3=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
       if(sup3){
         replanNotifs.push({id:newNotifId(),type:'free_task_completed',
           freeTaskId:fid,forUserId:sup3.id,
@@ -18326,7 +18441,7 @@ function requestPlanification(taskId){
     var comment=(document.getElementById('rplan-mot')||{}).value||'';
     document.body.removeChild(motDiv);
     if(comment===null)return;
-  var _planSup=USERS.find(function(u){return u.role==='supervisor';});
+  var _planSup=USERS.find(function(u){return u.role==='supervisor'&&!u.disabled;});
   replanNotifs.push({
     id:newNotifId(),
     type:'planification_request',
