@@ -956,7 +956,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026090604; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026090605; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -2526,11 +2526,23 @@ async function archiveOldApproved(){
 async function loadArchivedTasks(){
   if(window._archTasks)return window._archTasks;
   if(!GIST_CONFIG.configured)return (window._archTasks=[]);
+  var path='/'+GIST_CONFIG.gistId;
   try{
-    var gist=await _gistFetch('GET','/'+GIST_CONFIG.gistId);
-    var raw=gist?await _gistFileContent(gist,GIST_FILE_ARCHIVE):'[]';
+    // OJO: la sync periódica deja un ETag para esta ruta; si el gist no cambió, la API
+    // responde 304 y _gistFetch devuelve null. Antes eso se interpretaba como "sin archivo"
+    // y el archivo quedaba VACÍO toda la sesión (calendario y conciliación sin productos
+    // archivados, 2026-09-06). Sin ETag el GET trae el contenido completo.
+    delete _gistETags[path];
+    var gist=await _gistFetch('GET',path);
+    if(!gist)throw new Error('respuesta vacía del gist (304 sin contenido)');
+    var raw=await _gistFileContent(gist,GIST_FILE_ARCHIVE);
     window._archTasks=JSON.parse(raw||'[]');
-  }catch(e){console.warn('loadArchivedTasks:',e);window._archTasks=[];}
+  }catch(e){
+    // No cachear el fallo como "archivo vacío": permitir reintento pasado 1 minuto
+    console.warn('loadArchivedTasks:',e);
+    window._archTasks=null;window._archRetryAt=Date.now()+60000;
+    return [];
+  }
   return window._archTasks;
 }
 // Toggle de "incluir archivados" para listas (Aprobados, Informes)
@@ -3144,6 +3156,7 @@ function _hoursTaskPool(){
 // bastante viejas para tener productos archivados; al llegar, re-renderiza.
 function _ensureArchForHours(minDate){
   if(window._archTasks||window._archHoursLoading)return false;
+  if(window._archRetryAt&&Date.now()<window._archRetryAt)return false; // fallo reciente: reintento diferido
   if(minDate&&minDate>=_relDate(-(ARCHIVE_APPROVED_AFTER_DAYS-15)))return false; // nada archivado tan reciente
   window._archHoursLoading=true;
   loadArchivedTasks().then(function(){window._archHoursLoading=false;render();}).catch(function(){window._archHoursLoading=false;});
