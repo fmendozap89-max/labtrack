@@ -956,7 +956,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026090602; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026090603; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -3128,20 +3128,41 @@ function _ftDayHours(ft){
   var h=ft.realHours||ft.hours||0;
   return h>0?h:0;
 }
+// Productos para el cómputo de HORAS: estado vivo + archivo histórico (si ya está cargado).
+// Los aprobados hace más de ARCHIVE_APPROVED_AFTER_DAYS días se mueven a labtrack_archive.json
+// y sus horas desaparecían de la conciliación: semanas ya conciliadas volvían a marcar
+// "no coincide"/"sin registro" (reporte de Fabricio 2026-09-06). Las horas son un dato de
+// gestión histórico y deben seguir contando aunque el producto esté archivado.
+function _hoursTaskPool(){
+  var live=activeTasks();
+  var arch=window._archTasks;
+  if(!arch||!arch.length)return live;
+  var ids={};live.forEach(function(t){ids[t.id]=1;});
+  return live.concat(arch.filter(function(t){return t&&!t._deleted&&!ids[t.id];}));
+}
+// Dispara la carga del archivo (una vez, GET) cuando una vista de horas muestra fechas lo
+// bastante viejas para tener productos archivados; al llegar, re-renderiza.
+function _ensureArchForHours(minDate){
+  if(window._archTasks||window._archHoursLoading)return false;
+  if(minDate&&minDate>=_relDate(-(ARCHIVE_APPROVED_AFTER_DAYS-15)))return false; // nada archivado tan reciente
+  window._archHoursLoading=true;
+  loadArchivedTasks().then(function(){window._archHoursLoading=false;render();}).catch(function(){window._archHoursLoading=false;});
+  return true;
+}
 // Horas registradas por analista y día, sumando las 4 fuentes y filtrando tombstones.
 // Atribución por día PLANIFICADO: análisis → día de la porción (a.date); gestión → occDate
 // de la ocurrencia; tareas únicas → ft.date; muestreo → realArrivalDate.
 function dayHoursFor(analystId,dateStr){
   var res={analisis:0,gestion:0,libres:0,muestreo:0,total:0,items:[]};
-  activeTasks().forEach(function(t){
+  _hoursTaskPool().forEach(function(t){
     (t.assignments||[]).forEach(function(a){
       if(a._removed||a.analyst!==analystId||a.date!==dateStr)return;
       var h=(a.sessions&&a.sessions.length)?a.sessions.reduce(function(s,x){return s+(x.hours||0);},0):(a.realHours||0);
-      if(h>0){res.analisis+=h;res.items.push({kind:'analisis',label:t.producto+' — '+t.lote,hours:h,taskId:t.id,approx:(a.sessions||[]).some(function(s){return s.approx;})});}
+      if(h>0){res.analisis+=h;res.items.push({kind:'analisis',label:t.producto+' — '+t.lote,hours:h,taskId:t.id,archived:!!t._archived,approx:(a.sessions||[]).some(function(s){return s.approx;})});}
     });
     (t.samplerAssignments||[]).forEach(function(sa){
       if(sa.sampler!==analystId||!sa.done||sa.realArrivalDate!==dateStr||!(sa.hours>0))return;
-      res.muestreo+=sa.hours;res.items.push({kind:'muestreo',label:'Muestreo: '+t.producto+' — '+t.lote,hours:sa.hours,taskId:t.id,saId:sa.id});
+      res.muestreo+=sa.hours;res.items.push({kind:'muestreo',label:'Muestreo: '+t.producto+' — '+t.lote,hours:sa.hours,taskId:t.id,saId:sa.id,archived:!!t._archived});
     });
   });
   mgmtTasks.forEach(function(mt){
@@ -3169,7 +3190,7 @@ function _gridDayTotals(rowIds,dates){
   var set={};
   rowIds.forEach(function(id){dates.forEach(function(d){set[id+'|'+d]=0;});});
   function add(id,d,h){var k=id+'|'+d;if(k in set)set[k]+=h;}
-  activeTasks().forEach(function(t){
+  _hoursTaskPool().forEach(function(t){
     (t.assignments||[]).forEach(function(a){
       if(a._removed)return;
       var h=(a.sessions&&a.sessions.length)?a.sessions.reduce(function(s,x){return s+(x.hours||0);},0):(a.realHours||0);
@@ -3416,6 +3437,8 @@ function _devCellStyle(st,ack){
 function renderHoursRecon(){
   var wd=getCalDates('week',reconWeekOffset);
   var todayStr=today();
+  // Semanas viejas: incluir horas de productos archivados (carga única del archivo, luego re-render)
+  var _archLoading=_ensureArchForHours(wd[0])||!!window._archHoursLoading;
   var rows=_reconRows(wd);
   var totals=_gridDayTotals(rows.map(function(r){return r.id;}),wd);
   var netH=getWorkdayNetHours(),tolH=getWorkdayTolHours();
@@ -3428,6 +3451,7 @@ function renderHoursRecon(){
     +'<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-left:10px;cursor:pointer"><input type="checkbox" '+(reconOnlyDev?'checked':'')+' onchange="reconOnlyDev=this.checked;render()" style="width:14px;height:14px">Solo desvíos</label>'
     +'<span style="margin-left:auto;font-size:11px;color:var(--text2)">Jornada ref. <b class="u-mono">'+_fmtH(netH)+'h</b> · Desvío: <b class="u-mono">&gt;'+_fmtH(getWorkdayMaxHours())+'h</b>/día o <b class="u-mono">±'+_fmtH(tolH)+'h</b> vs declarado</span>'
     +'</div>'
+    +(_archLoading?'<div style="font-size:11px;color:var(--amber-text);margin-bottom:8px">⏳ Cargando el archivo histórico para incluir las horas de productos archivados…</div>':(window._archTasks&&window._archTasks.length?'<div style="font-size:10px;color:var(--text3);margin-bottom:8px">📦 Incluye las horas de '+window._archTasks.length+' productos del archivo histórico.</div>':''))
     +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Es desvío cuando el día supera el máximo diario o cuando las actividades registradas se apartan más de la tolerancia del total <b>declarado por el analista</b> en su cierre. Si el analista no cerró el día (registró cada actividad por separado, o son datos previos al cierre), la referencia es la <b>jornada de '+_fmtH(netH)+' h</b>. Clic en una celda para ver el desglose, corregir horas o aceptar el desvío.</div>';
   var devRows=rows.map(function(u){
     var cells=wd.map(function(d){
@@ -3479,6 +3503,10 @@ function renderHoursRecon(){
 // Desglose de un analista|día: fuentes registradas, pendientes del día, corrección y aceptación de desvío
 function openDayReconModal(analystId,dateStr){
   var u=getU(analystId);
+  // Día viejo con archivo aún no cargado: cargarlo y reabrir el modal con las horas completas
+  if(_ensureArchForHours(dateStr)){
+    loadArchivedTasks().then(function(){var m=document.getElementById('dayrecon-modal');if(m)m.remove();openDayReconModal(analystId,dateStr);});
+  }
   var dh=dayHoursFor(analystId,dateStr);
   var dev=dayDevStatus(analystId,dateStr,dh.total);
   var isSup=isSupRole();
@@ -3491,12 +3519,13 @@ function openDayReconModal(analystId,dateStr){
     else if(it.kind==='gestion'&&isSup)act='<button class="btn sm" style="font-size:10px" title="Corregir con desglose de fases" onclick="document.getElementById(\'dayrecon-modal\').remove();openMgmtComplModal('+it.mgmtId+',\''+it.occDate+'\')">✎</button>';
     else if(it.kind==='muestreo')act='<button class="btn sm" style="font-size:10px" onclick="document.getElementById(\'dayrecon-modal\').remove();openEdit('+it.taskId+')">🔍 Ver</button>';
     // El supervisor corrige las horas acá mismo: input por ítem + «Guardar correcciones»
-    var hoursHtml=isSup
+    // (los ítems de productos ARCHIVADOS son solo lectura: el archivo no se edita)
+    var hoursHtml=(isSup&&!it.archived)
       ?'<input type="number" id="drh-'+i+'" min="0.25" max="24" step="0.25" value="'+it.hours+'" style="width:60px;text-align:center;font-family:var(--mono);font-weight:700;padding:4px 3px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);flex-shrink:0" title="Horas registradas — editá para corregir"><span style="font-size:11px;color:var(--text3)">h</span>'
       :'<b class="u-mono" style="font-size:12px;flex-shrink:0">'+_fmtH(it.hours)+'h</b>';
     return '<div style="display:flex;align-items:center;gap:8px;padding:6px 9px;background:var(--bg);border-radius:var(--radius);margin-bottom:4px;font-size:12px">'
       +'<span style="flex-shrink:0">'+(kindIcon[it.kind]||'•')+'</span>'
-      +'<div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(it.label)+(it.approx?' <span title="Registrado como parte de un grupo — detalle aproximado" style="color:var(--text3)">≈</span>':'')+(it.pendConf?' <span style="font-size:9px;color:var(--amber-text)">⏳</span>':'')+'</div>'
+      +'<div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(it.label)+(it.archived?' <span title="Producto en archivo histórico — horas de solo lectura" style="font-size:10px">📦</span>':'')+(it.approx?' <span title="Registrado como parte de un grupo — detalle aproximado" style="color:var(--text3)">≈</span>':'')+(it.pendConf?' <span style="font-size:9px;color:var(--amber-text)">⏳</span>':'')+'</div>'
       +hoursHtml+act
       +'</div>';
   }).join(''):'<div style="font-size:12px;color:var(--text3);padding:8px 0">Sin horas registradas atribuidas a este día.</div>';
@@ -3556,7 +3585,7 @@ function openDayReconModal(analystId,dateStr){
     +itemsHtml+pendHtml+ackHtml
     +'<div class="modal-btns" style="margin-top:12px">'
     +'<button class="btn" data-esc onclick="document.getElementById(\'dayrecon-modal\').remove()">Cerrar</button>'
-    +(isSup&&(dh.items.length||dev.declared!=null)?'<button class="btn pri" onclick="saveDayReconEdits()" title="Aplica las horas editadas (ítems y declaración). Corrección de dedicación pura: no modifica estados del producto, confirmaciones ni notificaciones — queda auditada">💾 Guardar correcciones</button>':'')
+    +(isSup&&(dh.items.some(function(x){return !x.archived;})||dev.declared!=null)?'<button class="btn pri" onclick="saveDayReconEdits()" title="Aplica las horas editadas (ítems y declaración). Corrección de dedicación pura: no modifica estados del producto, confirmaciones ni notificaciones — queda auditada">💾 Guardar correcciones</button>':'')
     +'</div></div></div>';
   document.body.appendChild(div);
 }
@@ -10354,6 +10383,7 @@ function renderCalWeek(sup){
   const rows=getCalRows(sup,wd);
   // Σ horas por día: solo supervisor/auditor (no revisor) y desactivable desde la toolbar
   const _showSigma=canViewSup()&&localStorage.getItem('lt9-calSigma')!=='0';
+  if(_showSigma)_ensureArchForHours(wd[0]); // semanas viejas: Σ incluye horas de productos archivados
   const _sigTotals=_showSigma?_gridDayTotals(rows.map(r=>r.id),wd):null;
   const canAssign=isSupRole();
   var rfHtml=(sup||isReviewerRole())?renderCalRoleFilter():'';
