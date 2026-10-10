@@ -149,9 +149,12 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 .a-mini{background:var(--bg);border-radius:var(--radius);padding:6px 8px}
 .a-mini .al{color:var(--text3)}
 .modal-overlay{position:fixed;inset:0;background:rgba(15,12,10,.4);display:flex;align-items:flex-start;justify-content:center;padding-top:24px;z-index:200;backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
-.modal{background:var(--surface);border-radius:var(--radius-lg);border:1px solid var(--border);padding:24px;width:min(500px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow-y:auto;box-shadow:var(--shadow-lg)}
+.modal{background:var(--surface);border-radius:var(--radius-lg);border:1px solid var(--border);padding:24px;width:min(500px,calc(100vw - 32px));max-height:calc(100vh - 48px);max-height:calc(100dvh - 48px);overflow-y:auto;overscroll-behavior:contain;box-shadow:var(--shadow-lg)}
 .modal h3{font-size:14px;font-weight:600;margin-bottom:16px;letter-spacing:-.01em}
-.modal-btns{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.modal-btns{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:16px}
+/* Pie de modal fijo al scroll: en tablet/celular los modales largos (historial del producto)
+   ocultaban Cerrar/Guardar debajo de la barra del navegador — el pie queda siempre visible */
+.modal>.modal-btns{position:sticky;bottom:-24px;margin-bottom:-24px;padding:10px 0 24px;background:var(--surface);border-top:1px solid var(--border);z-index:2}
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
 .form-full{grid-column:1/-1}
 .analysts-check{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:4px}
@@ -260,7 +263,10 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
   .login-card{padding:22px 16px;}
   /* Modal → bottom sheet */
   .modal-overlay{padding:0;align-items:flex-end;}
-  .modal{width:100%!important;max-height:92dvh;max-height:92vh;border-radius:var(--radius-lg) var(--radius-lg) 0 0;border-bottom:none;padding:18px 16px;padding-bottom:calc(18px + env(safe-area-inset-bottom));}
+  .modal{width:100%!important;max-height:92vh;max-height:92dvh;border-radius:var(--radius-lg) var(--radius-lg) 0 0;border-bottom:none;padding:18px 16px;padding-bottom:calc(18px + env(safe-area-inset-bottom));}
+  .modal>.modal-btns{bottom:calc(-18px - env(safe-area-inset-bottom));margin-bottom:calc(-18px - env(safe-area-inset-bottom));padding-bottom:calc(18px + env(safe-area-inset-bottom));}
+  /* La nota del pie («solo lectura», avisos) ocupa su propia línea: los botones quedan en una sola fila */
+  .modal>.modal-btns>span{flex-basis:100%;text-align:right;}
   /* Tablas */
   .tbl,.week-grid{overflow-x:auto;-webkit-overflow-scrolling:touch;}
   /* Inputs: 16px evita zoom automático en iOS Safari */
@@ -281,6 +287,11 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
   /* Sync badge: compacto en mobile */
   #sp-status-badge{max-width:68px;overflow:hidden;flex-shrink:1;}
   #sp-status-badge span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+}
+
+/* Pantallas táctiles: espacio inferior en el login para desplazar los botones por encima del teclado */
+@media(max-width:1023px) and (pointer:coarse){
+  .login-wrap{padding-bottom:140px;}
 }
 
 /* Teléfonos muy pequeños: ≤ 374px */
@@ -956,7 +967,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026090605; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026101001; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -2484,6 +2495,7 @@ function _archCandidates(){
   var cut=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   return tasks.filter(function(t){
     if(t.status!=='approved')return false;
+    if(microPending(t))return false; // sigue en gestión hasta recibir el resultado micro
     var ap=t.approvedDate||(t.approvedTs?tsToYMD(t.approvedTs):'');
     return !!ap&&ap<cut;
   });
@@ -4727,7 +4739,7 @@ function renderMgmtList(isSup, weekOccs, myOccs){
               :isMyOcc?(function(){
                   var _td=today();
                   var _dOld=o.occDate<_td?Math.round((new Date(_td+'T12:00:00')-new Date(o.occDate+'T12:00:00'))/86400000):0;
-                  var _canAct=o.occDate<=_td&&_dOld<=3;
+                  var _canAct=o.occDate<=_td; // atrasadas sin límite (hasta que el supervisor la registre)
                   if(!_canAct) return '';
                   return myCompl
                     ?(myCompl.status==='confirmed'||!myCompl.status
@@ -5671,7 +5683,12 @@ function renderAprobados(){
     var anaAv=assigns.map(function(a){var u=getU(a.analyst);return u?'<div class="av '+u.av+'" style="width:20px;height:20px;font-size:8px" title="'+escH(u.name)+'">'+escH(u.avInit)+'</div>':'';}).join('');
     var realH=assigns.reduce(function(s,a){return s+(a.realHours||0);},0);
     var approverName=_approverName(t);
-    var tipoCell='<div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+extBadge(t)+'</div>';
+    var _microAct='';
+    if(t.tipo==='EE'&&_microCanAct()){
+      if(microPending(t))_microAct='<button class="btn sm suc" onclick="event.stopPropagation();openMicroReceived('+t.id+')" style="font-size:10px;padding:1px 6px" title="Tildar que se recibió el resultado microbiológico">✓ Micro recibido</button>';
+      else if(!t.micro)_microAct='<button class="btn sm" onclick="event.stopPropagation();markMicroPending('+t.id+')" style="font-size:10px;padding:1px 6px" title="Punto final (fin de vida útil / fin de estudio) con resultado microbiológico pendiente">🦠 Micro pend.</button>';
+    }
+    var tipoCell='<div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+extBadge(t)+microBadge(t)+_microAct+'</div>';
     var _cmts=[];
     if(t.reviewComment)_cmts.push('Revisión: '+t.reviewComment);
     if(t.approvalComment)_cmts.push('Aprobación: '+t.approvalComment);
@@ -5763,7 +5780,14 @@ function renderEstabilidades(){
   var sup=isSupRole();
   var allEE=activeTasks().filter(function(t){return (t.tipo||'')==='EE';});
   var activas=sortTasks(allEE.filter(function(t){return t.status!=='approved';}),taskSort,taskSortDir);
-  var aprobadas=sortTasks(allEE.filter(function(t){return t.status==='approved';}),taskSort,taskSortDir);
+  // Archivo histórico: estabilidades aprobadas hace >45 d (micro pendiente puede vivir ahí)
+  var archEE=(window._archTasks||[]).filter(function(t){return t&&!t._deleted&&(t.tipo||'')==='EE';});
+  if(estabTab==='micro'||(estabTab==='aprobadas'&&window.estabIncludeArch))_ensureArchForHours();
+  var aprobadas=sortTasks(allEE.filter(function(t){return t.status==='approved';}).concat(estabTab==='aprobadas'&&window.estabIncludeArch?archEE:[]),taskSort,taskSortDir);
+  // Sub-estado posterior a la aprobación: puntos finales con resultado micro en curso (más antiguo primero)
+  var microPend=allEE.filter(microPending).concat(archEE.filter(microPending)).sort(function(a,b){return (a.approvedDate||'').localeCompare(b.approvedDate||'');});
+  var _mSel=window._estabMicroSel||{};
+  var _mSelN=estabTab==='aprobadas'?aprobadas.filter(function(t){return _mSel[t.id]&&!t.micro;}).length:0;
 
   if(typeof window.estabSearch==='undefined')window.estabSearch='';
   var _eq=(window.estabSearch||'').toLowerCase().trim();
@@ -5771,6 +5795,7 @@ function renderEstabilidades(){
   var tabs='<div style="display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid var(--border)">'
     +'<button onclick="estabTab=\'activas\';render()" style="padding:8px 18px;border:none;border-bottom:'+(estabTab==='activas'?'2px solid var(--blue);font-weight:700;color:var(--blue)':'2px solid transparent;color:var(--text2)')+';background:transparent;cursor:pointer;font-size:13px">Activas ('+activas.length+')</button>'
     +'<button onclick="estabTab=\'aprobadas\';render()" style="padding:8px 18px;border:none;border-bottom:'+(estabTab==='aprobadas'?'2px solid var(--blue);font-weight:700;color:var(--blue)':'2px solid transparent;color:var(--text2)')+';background:transparent;cursor:pointer;font-size:13px">Aprobadas ('+aprobadas.length+')</button>'
+    +'<button onclick="estabTab=\'micro\';render()" title="Estabilidades aprobadas con resultado microbiológico pendiente (puntos finales). No afectan los indicadores de LCC." style="padding:8px 18px;border:none;border-bottom:'+(estabTab==='micro'?'2px solid #b45309;font-weight:700;color:#b45309':'2px solid transparent;color:var(--text2)')+';background:transparent;cursor:pointer;font-size:13px">🦠 Micro pendiente ('+microPend.length+')</button>'
     +'</div>';
 
   var searchBar='<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">'
@@ -5778,10 +5803,16 @@ function renderEstabilidades(){
     +' oninput="_srch(\'estabSearch\',this.value,\'srch-estab\')"'
     +' style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
     +(_eq?'<button class="btn sm" onclick="window.estabSearch=\'\';render()">✕ Limpiar</button>':'')
+    +(estabTab==='aprobadas'?'<button class="btn sm'+(window.estabIncludeArch?' pri':'')+'" onclick="toggleArchView(\'estabIncludeArch\')" title="Incluir estabilidades del archivo histórico (aprobadas hace más de '+ARCHIVE_APPROVED_AFTER_DAYS+' días)">📦 '+(window.estabIncludeArch?'Archivadas: sí':'Ver archivadas')+'</button>':'')
     +(sup?'<button class="btn sm" onclick="exportTipoXLSX(\'EE\',\'estabilidades\')">↓ Excel</button>':'')
-    +'</div>';
+    +'</div>'
+    +(estabTab==='aprobadas'&&_microCanAct()?'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:'+(_mSelN?'var(--blue-bg)':'var(--bg)')+';border-radius:var(--radius);padding:7px 12px;margin-bottom:10px;font-size:12px;color:'+(_mSelN?'var(--blue-text)':'var(--text2)')+'">'
+      +(_mSelN?'<b>'+_mSelN+' seleccionada'+(_mSelN>1?'s':'')+'</b><button class="btn sm pri" style="font-size:11px" onclick="markMicroPendingBulk()">🦠 Marcar micro pendiente</button><button class="btn sm" style="font-size:11px" onclick="window._estabMicroSel={};render()">✕ Limpiar</button>'
+        :'🦠 Marcá con la casilla las estabilidades aprobadas que quedaron con el resultado microbiológico pendiente (puntos finales) y aplicá en bloque. La fecha de aprobación no cambia.'+(window._archHoursLoading?' <span style="color:var(--amber-text)">⏳ cargando archivo…</span>':''))
+      +'</div>':'')
+    +(estabTab==='micro'&&window._archHoursLoading?'<div style="font-size:11px;color:var(--amber-text);margin-bottom:8px">⏳ Cargando el archivo histórico…</div>':'');
 
-  var list=(estabTab==='activas'?activas:aprobadas).filter(function(t){
+  var list=(estabTab==='activas'?activas:estabTab==='micro'?microPend:aprobadas).filter(function(t){
     return !_eq||t.producto.toLowerCase().includes(_eq)||(t.lote||'').toLowerCase().includes(_eq);
   });
 
@@ -5791,7 +5822,7 @@ function renderEstabilidades(){
     +sortHdr('producto','Producto / Lote')
     +'<div>Analistas</div>'
     +sortHdr('created','Ingreso')
-    +sortHdr('due','F. límite')
+    +(estabTab==='micro'?'<div title="Días desde la aprobación">En espera</div>':sortHdr('due','F. límite'))
     +(estabTab==='activas'?sortHdr('status','Estado'):'<div>F. aprobación</div>')
     +sortHdr('priority','Prioridad')
     +'<div>Acciones</div>'
@@ -5820,7 +5851,7 @@ function renderEstabilidades(){
           var _iPCE=_maE&&_maE._pendingConfirm&&!_maE._supervisorConfirmed;
           var _iSE=!!(_maE&&_maE._started);
           var _diffE=_maE&&_maE.date?Math.round((new Date(_maE.date+'T12:00:00')-_tdDE)/(1000*60*60*24)):0;
-          var _inWE=(_diffE>=-4&&_diffE<=1);
+          var _inWE=(_diffE<=1); // sin límite hacia atrás: un día atrasado que el supervisor no cerró sigue siendo completable por el analista
           var _tActE=['pending','scheduled','progress','pending-confirm','observed'].indexOf(t.status)>=0;
           var _pRE=replanNotifs.find(function(n){return n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';});
           if(!_iDE&&!_iPCE&&!_iSE&&_inWE&&_tActE)actBtns+='<button class="btn sm pri" onclick="event.stopPropagation();markProg('+t.id+_dpE+')">▶ Iniciar</button>';
@@ -5831,12 +5862,20 @@ function renderEstabilidades(){
         }
       }
     }
+    else if(_microCanAct()){
+      // Aprobadas / Micro pendiente: gestión del sub-estado micro (revisor o supervisor)
+      if(microPending(t))actBtns+='<button class="btn sm suc" onclick="event.stopPropagation();openMicroReceived('+t.id+')" style="font-size:10px;padding:2px 6px" title="Tildar que se recibió el resultado microbiológico — el informe físico puede almacenarse">✓ Micro recibido</button>';
+      else if(!t.micro)actBtns+='<button class="btn sm" onclick="event.stopPropagation();markMicroPending('+t.id+')" style="font-size:10px;padding:2px 6px" title="Punto final (fin de vida útil / fin de estudio) con resultado microbiológico pendiente">🦠 Micro pend.</button>';
+    }
+    var _cbE=(estabTab==='aprobadas'&&_microCanAct()&&!t.micro)?'<input type="checkbox" onclick="event.stopPropagation();_estabMicroToggle('+t.id+')"'+(_mSel[t.id]?' checked':'')+' title="Seleccionar para marcar micro pendiente" style="width:14px;height:14px;margin-right:6px;vertical-align:-2px;flex-shrink:0">':'';
     return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
-      +'<div><div class="cell-trunc" style="font-weight:500">'+escH(t.producto)+'</div>'
-      +'<div class="cell-sub cell-trunc">'+escH(t.lote)+'</div></div>'
+      +'<div><div class="cell-trunc" style="font-weight:500">'+_cbE+escH(t.producto)+(t._archived?' <span style="font-size:9px;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 5px;font-weight:600" title="En archivo histórico">📦</span>':'')+'</div>'
+      +'<div class="cell-sub cell-trunc">'+escH(t.lote)+(t.micro?' '+microBadge(t):'')+'</div></div>'
       +'<div style="display:flex;gap:2px;flex-wrap:wrap">'+(anaAv||'—')+'</div>'
       +'<div class="u-mono11">'+(t.created?fmtDDMMYY(t.created):'—')+'</div>'
-      +'<div style="font-size:11px">'+(t.due?dueBadge(t):'<span class="u-fg3">—</span>')+'</div>'
+      +(estabTab==='micro'
+        ?(function(){var d=_microWaitDays(t);return '<div class="u-mono11" style="font-weight:600;color:'+(d>30?'var(--red)':d>14?'#b45309':'var(--text2)')+'">'+d+' d</div>';})()
+        :'<div style="font-size:11px">'+(t.due?dueBadge(t):'<span class="u-fg3">—</span>')+'</div>')
       +(estabTab==='activas'
         ?'<div><span class="pill '+t.status+'" style="font-size:10px">'+statusLabel(t.status)+'</span></div>'
         :'<div class="u-mono11">'+(t.approvedDate?fmtDDMMYY(t.approvedDate):'—')+'</div>')
@@ -5848,7 +5887,7 @@ function renderEstabilidades(){
   return'<div class="sec">🧪 Estabilidades</div>'
     +tabs+searchBar
     +(list.length===0
-      ?'<div class="empty">'+(allEE.length===0?'No hay muestras clasificadas como EE aún. Para agregar: crear o editar un análisis y elegir tipo EE.':'Sin resultados para "'+escH(_eq)+'"')+'</div>'
+      ?'<div class="empty">'+(estabTab==='micro'&&!_eq?'Sin estabilidades con micro pendiente ✓ — se marcan al aprobar (casilla «Micro pendiente») o desde la pestaña Aprobadas.':'')+(estabTab==='micro'&&!_eq?'':(allEE.length===0?'No hay muestras clasificadas como EE aún. Para agregar: crear o editar un análisis y elegir tipo EE.':'Sin resultados para "'+escH(_eq)+'"'))+'</div>'
       :'<div class="tbl">'+hdr+rows+'</div>');
 }
 
@@ -5929,7 +5968,7 @@ function renderLimpVal(){
           var _iPCL=_maL&&_maL._pendingConfirm&&!_maL._supervisorConfirmed;
           var _iSL=!!(_maL&&_maL._started);
           var _diffL=_maL&&_maL.date?Math.round((new Date(_maL.date+'T12:00:00')-_tdDL)/(1000*60*60*24)):0;
-          var _inWL=(_diffL>=-4&&_diffL<=1);
+          var _inWL=(_diffL<=1);
           var _tActL=['pending','scheduled','progress','pending-confirm','observed'].indexOf(t.status)>=0;
           var _pRL=replanNotifs.find(function(n){return n.taskId===t.id&&n.analystId===currentUser.id&&n.status==='pending';});
           if(!_iDL&&!_iPCL&&!_iSL&&_inWL&&_tActL)actBtns+='<button class="btn sm pri" onclick="event.stopPropagation();markProg('+t.id+_dpL+')">▶ Iniciar</button>';
@@ -5984,11 +6023,13 @@ function exportTipoXLSX(tipos, filename){
         'Prioridad':t.priority||'Normal',
         'Horas reales':realH||'',
         'Aprobado por':_approverName(t),
+        'Micro':t.micro?(t.micro.status==='received'?'Recibido':(t.status==='approved'?'Pendiente':'')):'',
+        'F. recepción micro':t.micro&&t.micro.recvDate?fmtDF(t.micro.recvDate):'',
         'Notas':t.notes||''
       };
     });
     var ws=xlsxSheet(rows);
-    ws['!cols']=[{wch:24},{wch:14},{wch:6},{wch:20},{wch:16},{wch:28},{wch:12},{wch:14},{wch:14},{wch:10},{wch:10},{wch:18},{wch:30}];
+    ws['!cols']=[{wch:24},{wch:14},{wch:6},{wch:20},{wch:16},{wch:28},{wch:12},{wch:14},{wch:14},{wch:10},{wch:10},{wch:18},{wch:10},{wch:14},{wch:30}];
     var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Datos');
     xlsxDownload(wb,filename+'_'+today()+'.xlsx');
   });
@@ -6224,7 +6265,7 @@ function renderLogin(){
       _manualSection='<details style="margin-top:8px"><summary style="font-size:11px;color:var(--text3);cursor:pointer;user-select:none;padding:2px 0">Configuración manual (avanzado)</summary>'
         +'<div style="margin-top:8px">'
         +'<label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Gist ID</label>'
-        +'<input type="text" id="ls-gistid" value="" placeholder="Identificador del Gist" autocomplete="off" style="'+_inp+'">'
+        +'<input type="text" id="ls-gistid" value="" placeholder="Identificador del Gist" autocomplete="off" onkeydown="if(event.key===\'Enter\'){event.preventDefault();loginSyncSave();}" style="'+_inp+'">'
         +'</div>'
         +'</details>';
     }
@@ -6234,7 +6275,7 @@ function renderLogin(){
       +'<div style="margin-bottom:8px">'
       +'<label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Token de GitHub</label>'
       +'<div style="display:flex;gap:6px">'
-      +'<input type="password" id="ls-token" value="" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" style="'+_inp+';flex:1">'
+      +'<input type="password" id="ls-token" value="" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" onkeydown="if(event.key===\'Enter\'){event.preventDefault();loginDiscover();}" style="'+_inp+';flex:1">'
       +'<button class="btn" onclick="loginDiscover()" style="font-size:11px;padding:6px 10px;white-space:nowrap;flex-shrink:0"'+(_discoverState==='loading'?' disabled':'')+'>🔍 Descubrir</button>'
       +'</div>'
       +'</div>'
@@ -6719,13 +6760,45 @@ function dupGroups(){
     var k=_dupKeyOf(s.producto,s.lote,s.tipo);
     (map[k]=map[k]||[]).push({kind:'sugg',ref:s});
   });
-  var out=[];
+  var out=[],seenSig={};
   Object.keys(map).forEach(function(k){
     var members=map[k];
     if(members.length<2)return;
     var sig=members.map(function(m){return(m.kind==='task'?'T':'S')+m.ref.id;}).sort().join('|');
+    seenSig[sig]=true;
     if(dupAcks.some(function(a){return a.key===sig&&!a.revoked;}))return;
     out.push({key:k,sig:sig,members:members});
+  });
+  // Nivel laxo: mismo lote y mismo nombre sin dosis/presentación (clave del catálogo),
+  // cualquier tipo — atrapa grafías distintas del producto y tipos no equivalentes
+  // (p. ej. PT y EE del mismo lote). Solo detección; se acepta igual con "No es duplicado".
+  // Agrupación: por lote normalizado; dentro del lote, nombres iguales o contenidos
+  // («Amoxicilina 500 mg» ⊂ «Amoxicilina 500mg comprimidos») → _catSimScore ≥ 70.
+  var byLote={};
+  function _laxAdd(kind,ref){
+    var ck=_catCmpKey(ref.producto),lk=_dupNormLote(ref.lote);
+    if(!ck||!lk)return;
+    (byLote[lk]=byLote[lk]||[]).push({kind:kind,ref:ref,ck:ck});
+  }
+  activeTasks().forEach(function(t){_laxAdd('task',t);});
+  productSuggestions.forEach(function(s){if(s.status==='pending')_laxAdd('sugg',s);});
+  Object.keys(byLote).forEach(function(lk){
+    var ms=byLote[lk];
+    if(ms.length<2)return;
+    var clusters=[];
+    ms.forEach(function(m){
+      var c=clusters.find(function(cl){return cl.some(function(x){return _catSimScore(m.ck,x.ck)>=70;});});
+      if(c)c.push(m);else clusters.push([m]);
+    });
+    clusters.forEach(function(cl){
+      if(cl.length<2)return;
+      var members=cl.map(function(m){return {kind:m.kind,ref:m.ref};});
+      var sig=members.map(function(m){return(m.kind==='task'?'T':'S')+m.ref.id;}).sort().join('|');
+      if(seenSig[sig])return; // ya cubierto por un grupo estricto
+      seenSig[sig]=true;
+      if(dupAcks.some(function(a){return a.key===sig&&!a.revoked;}))return;
+      out.push({key:'L|'+lk+'|'+cl[0].ck,sig:sig,members:members,lax:true});
+    });
   });
   return out;
 }
@@ -6772,7 +6845,7 @@ function renderSugerencias(){
         +'<div style="font-size:14px;font-weight:700;color:var(--amber-text)">⚠ Posibles duplicados</div>'
         +'<span style="background:var(--amber-text);color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700">'+_dg.length+'</span>'
         +'</div>'
-        +'<div style="font-size:11px;color:var(--text3);margin-bottom:10px">Ingresos activos y sugerencias pendientes con el mismo producto y lote. PT y Val se consideran el mismo análisis (la validación incluye el PT); EE, Limp y MP solo matchean entre sí.</div>';
+        +'<div style="font-size:11px;color:var(--text3);margin-bottom:10px">Ingresos activos y sugerencias pendientes con el mismo producto y lote. PT y Val se consideran el mismo análisis (la validación incluye el PT); EE, Limp y MP solo matchean entre sí. Los grupos «≈ similar» coinciden en lote y en el nombre sin dosis/presentación, o son tipos no equivalentes del mismo lote: revisalos con más cuidado.</div>';
       html+=_dg.map(function(g){
         var r0=g.members[0].ref;
         var hasEquiv=g.members.some(function(m){return (m.ref.tipo||'')!==(r0.tipo||'');});
@@ -6780,7 +6853,8 @@ function renderSugerencias(){
           +'<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px">'
           +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:13px">'+escH(r0.producto)+'</b>'
           +'<span style="font-size:11px;font-family:var(--mono);color:var(--text2)">Lote: '+escH(r0.lote)+'</span>'
-          +(hasEquiv?'<span style="font-size:10px;background:#ede9fe;color:#7c3aed;border:1px solid #8b5cf6;border-radius:4px;padding:1px 6px;font-weight:600" title="Tipos distintos pero equivalentes: analizar la validación de proceso incluye el análisis del PT">PT ≈ Val</span>':'')
+          +(g.lax?'<span style="font-size:10px;background:#fef3c7;color:#92400e;border:1px solid #f59e0b;border-radius:4px;padding:1px 6px;font-weight:600" title="Coincidencia laxa: mismo lote y mismo nombre sin dosis/presentación, o tipos no equivalentes — revisar">≈ similar</span>':'')
+          +(!g.lax&&hasEquiv?'<span style="font-size:10px;background:#ede9fe;color:#7c3aed;border:1px solid #8b5cf6;border-radius:4px;padding:1px 6px;font-weight:600" title="Tipos distintos pero equivalentes: analizar la validación de proceso incluye el análisis del PT">PT ≈ Val</span>':'')
           +'</div>'
           +(isSupRole()?'<button class="btn sm" onclick="supDupAck(\''+g.sig+'\')" title="Dejar de avisar por este grupo. Si aparece otro ingreso igual, vuelve a avisar.">✓ No es duplicado</button>':'')
           +'</div>'
@@ -7103,7 +7177,18 @@ function _catSuggestFor(kind,name){
   // convenciones del catálogo (comprimidos/comp → compr; inyectable/amp → iny;
   // solución oftálmica → sol oft) para que «FARMAZEPAN 2 MG (20 COMP)» matchee
   // «Farmazepan 2 mg compr».
-  function _cmp(s){
+  var _cmp=_catCmpKey;
+  var n=_cmp(name);
+  if(!n)return null;
+  var best=null,bestScore=0;
+  activeCatalog(kind).forEach(function(p){
+    var score=_catSimScore(n,_cmp(p.name));
+    if(score>bestScore){bestScore=score;best=p;}
+  });
+  return bestScore>=35?{entry:best,score:bestScore}:null;
+}
+// Clave de comparación de nombres de producto (solo para SUGERIR/DETECTAR, nunca escribe sola)
+function _catCmpKey(s){
     var x=_normProd(s).replace(/(\d)([a-z])/g,'$1 $2').replace(/([a-z])(\d)/g,'$1 $2');
     x=x.replace(/\b(x\s*)?\d+([.,]\d+)?\s*(mg|ml|mcg|g|ui|l)\b/g,' ');
     x=x.replace(/\bcomprimidos?\b|\bcomp\b/g,'compr')
@@ -7111,13 +7196,10 @@ function _catSuggestFor(kind,name){
        .replace(/\bsoluci?on\b/g,'sol').replace(/\boftalmicas?\b/g,'oft');
     x=x.replace(/\b\d+([.,]\d+)?\b/g,' '); // números sueltos residuales («(20 COMP)», «10%»)
     return x.replace(/\s+/g,' ').trim();
-  }
-  var n=_cmp(name);
-  if(!n)return null;
-  var best=null,bestScore=0;
-  activeCatalog(kind).forEach(function(p){
-    var c=_cmp(p.name);
-    if(!c)return;
+}
+// Puntaje de similitud entre dos claves _catCmpKey (0 = nada; 100 = iguales)
+function _catSimScore(n,c){
+    if(!n||!c)return 0;
     var score=0;
     if(c===n)score=100;
     else if(n.indexOf(c)>=0)score=80+Math.min(c.length,15);      // catálogo contenido en el nombre viejo
@@ -7127,9 +7209,84 @@ function _catSuggestFor(kind,name){
       var shared=wa.filter(function(w){return w.length>2&&wb.indexOf(w)>=0;}).length;
       if(shared)score=shared*10+((shared===wb.length||shared===wa.length)?15:0);
     }
-    if(score>bestScore){bestScore=score;best=p;}
+    return score;
+}
+// Hasta N candidatos del catálogo ordenados por similitud (importación con resolución de nombres)
+function _catCandidatesFor(kind,name,max){
+  var n=_catCmpKey(name);
+  if(!n)return[];
+  // Empate de puntaje (p. ej. dos entradas con la misma clave): gana la más usada en análisis
+  var use={};
+  activeTasks().forEach(function(t){if(catKindForTipo(t.tipo)!==kind)return;var k=_catNorm(t.producto);use[k]=(use[k]||0)+1;});
+  return activeCatalog(kind).map(function(p){return {entry:p,score:_catSimScore(n,_catCmpKey(p.name)),use:use[_catNorm(p.name)]||0};})
+    .filter(function(x){return x.score>=35;})
+    .sort(function(a,b){return b.score-a.score||b.use-a.use||a.entry.name.localeCompare(b.entry.name,'es');})
+    .slice(0,max||5);
+}
+// ── Posibles duplicados del catálogo ──
+// Grupos por familia: misma clave de comparación (dosis/presentación/espacios fuera) o
+// un nombre contenido en otro («Suero fisiológico» ⊂ «Suero fisiológico 100 mL»).
+// Solo detecta: el supervisor decide unificar (⛓) o dar de baja (🗑).
+function _catDupGroups(kind){
+  var list=activeCatalog(kind);
+  var keyed={};
+  list.forEach(function(p){var k=_catCmpKey(p.name);if(!k)return;(keyed[k]=keyed[k]||[]).push(p);});
+  var groups=[],inGroup={};
+  Object.keys(keyed).forEach(function(k){
+    if(keyed[k].length<2)return;
+    groups.push({reason:'Mismo nombre sin dosis/presentación',items:keyed[k]});
+    keyed[k].forEach(function(p){inGroup[p.id]=true;});
   });
-  return bestScore>=35?{entry:best,score:bestScore}:null;
+  // Contención (clave corta dentro de clave larga, ≥4 letras, límite de palabra)
+  var keys=Object.keys(keyed).filter(function(k){return k.length>=4;});
+  keys.forEach(function(a){
+    keys.forEach(function(b){
+      if(a===b||a.length>=b.length)return;
+      if(!(new RegExp('(^| )'+a.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'( |$)')).test(b))return;
+      var items=keyed[a].concat(keyed[b]).filter(function(p,i,arr){return arr.indexOf(p)===i;});
+      if(items.every(function(p){return inGroup[p.id];}))return;
+      groups.push({reason:'Un nombre contenido en otro',items:items});
+      items.forEach(function(p){inGroup[p.id]=true;});
+    });
+  });
+  return groups;
+}
+function catDupUnify(ids){
+  if(!isSupRole()){alert('Solo el Supervisor administra el catálogo.');return;}
+  window._pcSel={};
+  (ids||[]).forEach(function(id){window._pcSel[id]=true;});
+  openUnifyModal();
+}
+function catRemoveEntryById(id){
+  var i=(window._pcRows||[]).indexOf(id);
+  if(i<0){window._pcRows=(window._pcRows||[]).concat([id]);i=window._pcRows.length-1;}
+  catRemoveEntry(i);
+}
+// Exportar el listado maestro (para preparar cargas masivas con los nombres vigentes)
+function exportCatalogXLSX(){
+  if(!canViewSup()&&!isReviewerRole()){showToast('Solo supervisores, revisores y auditores pueden exportar.','warn');return;}
+  _lazyXLSX(function(){
+    var useCount={};
+    activeTasks().forEach(function(t){var k=catKindForTipo(t.tipo);if(!k)return;var key=k+'|'+_catNorm(t.producto);useCount[key]=(useCount[key]||0)+1;});
+    var rows=[];
+    ['PT','MP'].forEach(function(kind){
+      activeCatalog(kind).forEach(function(p){
+        rows.push({'Producto':p.name,'Familia':kind,'Familia descripción':kind==='PT'?'Producto terminado (PT / EE / Val / Limp)':'Materia prima (MP)',
+          'Análisis externo':(p.ext&&(p.ext.items||[]).length)?_extSummary(p):'',
+          'Análisis activos':useCount[kind+'|'+_catNorm(p.name)]||0,
+          'Alta':p._ts?tsToYMD(p._ts):''});
+      });
+    });
+    var wb=XLSX.utils.book_new();
+    var ws=xlsxSheet(rows);ws['!cols']=[{wch:40},{wch:8},{wch:30},{wch:36},{wch:14},{wch:12}];
+    XLSX.utils.book_append_sheet(wb,ws,'Catalogo');
+    // Hoja 2: nombres en uso NO catalogados (pendientes de rectificar)
+    var rect={};
+    activeTasks().forEach(function(t){var k=catKindForTipo(t.tipo);if(!k||catFindByName(k,t.producto))return;var key=k+'|'+_catNorm(t.producto);if(!rect[key])rect[key]={'Nombre en uso':(t.producto||'').trim(),'Familia':k,'Análisis':0};rect[key]['Análisis']++;});
+    var rr=Object.values(rect);
+    if(rr.length){var ws2=xlsxSheet(rr);ws2['!cols']=[{wch:40},{wch:8},{wch:10}];XLSX.utils.book_append_sheet(wb,ws2,'No catalogados');}
+    xlsxDownload(wb,'catalogo_productos_'+today()+'.xlsx');
+  });
 }
 // Datalists de autocompletado para el campo Producto del modal (una por familia)
 function _catDatalistsHtml(){
@@ -7181,6 +7338,194 @@ function _extSummary(p){
 function extCatalogList(){
   return activeCatalog().filter(function(p){return p.ext&&(p.ext.items||[]).length;});
 }
+// ══════════════════════════════════════════════════════════════
+// MICRO PENDIENTE — sub-estado POSTERIOR a la aprobación, solo estabilidades (EE).
+// Los puntos finales (fin de vida útil / fin de estudio) llevan análisis microbiológico,
+// cuyo resultado demora más que el análisis de LCC. El producto se APRUEBA igual
+// (t.status='approved', approvedDate = fecha real de aprobación → Informes y demoras
+// NO cargan los tiempos de Microbiología a LCC) y queda t.micro.status='pending'
+// hasta que el revisor/supervisor tilda «Micro recibido» → el informe físico ya puede
+// almacenarse. Se marca al aprobar (casilla, desmarcada por defecto) o después sobre
+// una EE aprobada. Datos: t.micro={status:'pending'|'received',by,byName,ts,
+// recvBy,recvByName,recvTs,recvDate,recvNote}. Viaja como escalar de la tarea
+// (merge por t._ts → toda mutación bumpea t._ts). Mientras está pendiente NO se archiva.
+// ══════════════════════════════════════════════════════════════
+function microPending(t){return !!(t&&!t._deleted&&t.status==='approved'&&t.micro&&t.micro.status==='pending');}
+function _microCanAct(){return !!currentUser&&(isSupRole()||isReviewerRole());}
+// Aprobadas viejas (>45 d) viven en labtrack_archive.json: el sub-estado micro también
+// se gestiona ahí (varias estabilidades se aprobaron sin la herramienta y ya se archivaron)
+function _microFind(id){
+  return tasks.find(function(x){return x.id===id&&!x._deleted;})
+    ||(window._archTasks||[]).find(function(x){return x.id===id;})||null;
+}
+function _microPersist(t){
+  if(t._archived){_archPersistTasks([t]);return;}
+  saveLS();
+  saveNow().catch(function(e){console.error('saveNow micro:',e);});
+}
+// Reescribe productos en el archivo histórico (GET fresco → reemplazo por id → PATCH).
+// Único camino de escritura al archivo fuera de archiveOldApproved; escrituras raras.
+async function _archPersistTasks(list){
+  if(window._appOutdated)return false;
+  if(!GIST_CONFIG.configured||!currentUser||isAuditorRole())return false;
+  try{
+    var path='/'+GIST_CONFIG.gistId;
+    delete _gistETags[path]; // sin ETag: la respuesta trae el contenido completo
+    var gist=await _gistFetch('GET',path);
+    if(!gist)throw new Error('sin respuesta del gist');
+    var arr=JSON.parse((await _gistFileContent(gist,GIST_FILE_ARCHIVE))||'[]');
+    list.forEach(function(t){
+      var c=Object.assign({},t,{_archived:true});
+      var i=arr.findIndex(function(x){return x.id===t.id;});
+      if(i>=0)arr[i]=c; else arr.push(c);
+    });
+    var res=await _gistFetch('PATCH',path,{files:{[GIST_FILE_ARCHIVE]:{content:JSON.stringify(arr)}}});
+    if(!res)throw new Error('escritura rechazada');
+    window._archTasks=arr;
+    return true;
+  }catch(e){
+    console.warn('_archPersistTasks:',e);
+    showToast('⚠ No se pudo guardar en el archivo histórico: '+e.message,'warn');
+    return false;
+  }
+}
+// Marcado en bloque desde Estabilidades → Aprobadas (casillas)
+function _estabMicroToggle(id){
+  if(!window._estabMicroSel)window._estabMicroSel={};
+  if(window._estabMicroSel[id])delete window._estabMicroSel[id];else window._estabMicroSel[id]=true;
+  render();
+}
+function markMicroPendingBulk(){
+  if(!_microCanAct()){alert('Solo el Supervisor o el Revisor pueden gestionar el estado micro.');return;}
+  var ids=Object.keys(window._estabMicroSel||{}).map(Number);
+  var list=ids.map(_microFind).filter(function(t){return t&&t.tipo==='EE'&&t.status==='approved'&&!t.micro;});
+  if(!list.length){alert('No hay estabilidades seleccionadas pendientes de marcar.');return;}
+  if(!confirm('Marcar '+list.length+' estabilidad'+(list.length>1?'es':'')+' aprobada'+(list.length>1?'s':'')+' como «Aprobado — micro pendiente»?\n\n'
+    +list.slice(0,10).map(function(t){return '· '+t.producto+' — '+t.lote;}).join('\n')+(list.length>10?'\n… y '+(list.length-10)+' más':'')
+    +'\n\nLa fecha de aprobación no cambia.'))return;
+  var arch=[];
+  list.forEach(function(t){_microStampPending(t);if(t._archived)arch.push(t);});
+  window._estabMicroSel={};
+  if(arch.length)_archPersistTasks(arch);
+  if(arch.length<list.length){saveLS();saveNow().catch(function(e){console.error('saveNow microBulk:',e);});}
+  render();
+  showToast('🦠 '+list.length+' marcada'+(list.length>1?'s':'')+' como micro pendiente','success');
+}
+function _microWaitDays(t){
+  var from=t.approvedDate||(t.micro&&t.micro.ts?tsToYMD(t.micro.ts):'');
+  if(!from)return 0;
+  return Math.max(0,Math.round((new Date(today()+'T12:00:00')-new Date(from+'T12:00:00'))/86400000));
+}
+function microBadge(t){
+  if(!t||!t.micro||t.status!=='approved')return'';
+  if(microPending(t)){
+    var d=_microWaitDays(t);
+    return '<span title="Aprobado con resultado microbiológico pendiente ('+d+' día'+(d===1?'':'s')+' desde la aprobación). El informe físico se almacena al recibir el resultado." style="background:#fef3c7;color:#92400e;border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap;cursor:help">🦠 Micro pend.</span>';
+  }
+  var m=t.micro;
+  return '<span title="Resultado microbiológico recibido'+(m.recvDate?' el '+fmtDF(m.recvDate):'')+(m.recvByName?' — '+escH(m.recvByName):'')+'" style="background:#d1fae5;color:#065f46;border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap;cursor:help">🦠 Micro ✓</span>';
+}
+// Recuadro para el detalle del producto
+function _microInfoBox(t){
+  if(!t||t.tipo!=='EE'||t.status!=='approved')return'';
+  var m=t.micro;
+  var _archNote=t._archived?' <span style="font-size:9px;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 5px;font-weight:600">📦 archivado</span>':'';
+  var can=_microCanAct();
+  if(!m){
+    return can?'<div style="font-size:11px;color:var(--text3);margin-bottom:12px">🦠 ¿Punto final (fin de vida útil / fin de estudio) con micro en curso? '
+      +'<button class="btn sm" onclick="markMicroPending('+t.id+')" style="font-size:10px">Marcar micro pendiente</button></div>':'';
+  }
+  var pend=m.status==='pending';
+  return '<div style="background:'+(pend?'#fffbeb':'#ecfdf5')+';border:1px solid '+(pend?'#f59e0b':'#10b981')+';border-radius:var(--radius);padding:8px 12px;margin-bottom:12px;font-size:12px;color:'+(pend?'#92400e':'#065f46')+'">'
+    +'<b>🦠 '+(pend?'Aprobado — resultado microbiológico pendiente':'Resultado microbiológico recibido')+'</b>'+_archNote
+    +'<div style="font-size:11px;margin-top:3px">Marcado por '+escH(m.byName||'')+(m.ts?' el '+fmtDF(tsToYMD(m.ts)):'')+'.'
+    +(pend?' '+_microWaitDays(t)+' día(s) desde la aprobación. El informe físico se almacena cuando llegue el resultado.'
+          :' Recibido el '+(m.recvDate?fmtDF(m.recvDate):'—')+' por '+escH(m.recvByName||'')+' — el informe físico puede almacenarse.')
+    +'</div>'
+    +(!pend&&m.recvNote?'<div style="font-size:11px;margin-top:2px;opacity:.85">📝 '+escH(m.recvNote)+'</div>':'')
+    +(can?'<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'
+      +(pend?'<button class="btn sm suc" onclick="openMicroReceived('+t.id+')" style="font-size:10px">✓ Micro recibido…</button>':'')
+      +(isSupRole()?'<button class="btn sm" onclick="undoMicro('+t.id+')" style="font-size:10px" title="Deshacer el último paso (p. ej. si se marcó por error). Queda en el Audit Trail.">✕ '+(pend?'Quitar marca':'Volver a pendiente')+'</button>':'')
+      +'</div>':'')
+    +'</div>';
+}
+// Sella el sub-estado en la tarea SIN guardar (el caller persiste) — usado por la aprobación
+function _microStampPending(t){
+  t.micro={status:'pending',by:currentUser.id,byName:currentUser.name,ts:Date.now()};
+  t._ts=Date.now();
+  auditLog('MICRO_PENDING','TASK',t.id,{field:'micro',oldVal:'',newVal:'pending',
+    description:'Aprobado con micro pendiente: '+t.producto+' '+t.lote,lote:t.lote},'');
+}
+function markMicroPending(id){
+  if(!_microCanAct()){alert('Solo el Supervisor o el Revisor pueden gestionar el estado micro.');return;}
+  var t=_microFind(id);
+  if(!t)return;
+  if(t.tipo!=='EE'||t.status!=='approved'){alert('El estado «Micro pendiente» aplica solo a estabilidades aprobadas.');return;}
+  if(t.micro){alert('Este producto ya tiene registrado el estado micro.');return;}
+  if(!confirm('Marcar '+t.producto+' '+t.lote+' como «Aprobado — micro pendiente»?\n\nCorresponde a puntos finales (fin de vida útil / fin de estudio) cuyo resultado microbiológico todavía no llegó. La fecha de aprobación no cambia.'))return;
+  _microStampPending(t);
+  _microPersist(t);render();
+  showToast('🦠 Marcado como micro pendiente','success');
+}
+function openMicroReceived(id){
+  if(!_microCanAct()){alert('Solo el Supervisor o el Revisor pueden gestionar el estado micro.');return;}
+  var t=_microFind(id);
+  if(!t||!microPending(t))return;
+  var minD=t.approvedDate||'';
+  var ov=document.createElement('div');
+  ov.className='modal-overlay';ov.id='micro-recv-ov';ov.style.zIndex='600';
+  ov.innerHTML='<div class="modal" style="width:min(380px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:6px;border-bottom:none;padding-bottom:0">🦠 Resultado microbiológico recibido</h3>'
+    +'<p style="font-size:12px;color:var(--text2);margin:0 0 14px">'+escH(t.producto)+' — '+escH(t.lote)+'</p>'
+    +'<div class="frow"><label>Fecha de recepción *</label>'
+    +'<input type="date" id="micro-recv-date" value="'+today()+'" min="'+minD+'" max="'+today()+'" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></div>'
+    +'<div class="frow"><label>Nota (opcional)</label>'
+    +'<input type="text" id="micro-recv-note" placeholder="Ej.: cumple; informe micro N°…" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></div>'
+    +'<div style="font-size:11px;color:var(--text3);margin-top:6px">Al confirmar, el informe físico queda habilitado para almacenarse.</div>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
+    +'<button class="btn" onclick="document.getElementById(\'micro-recv-ov\').remove()">Cancelar</button>'
+    +'<button class="btn pri" onclick="_saveMicroReceived('+id+')">✓ Confirmar recepción</button>'
+    +'</div></div>';
+  document.body.appendChild(ov);
+}
+function _saveMicroReceived(id){
+  var t=_microFind(id);
+  var ov=document.getElementById('micro-recv-ov');
+  if(!t||!microPending(t)){if(ov)ov.remove();return;}
+  var d=((document.getElementById('micro-recv-date')||{}).value||'');
+  var note=((document.getElementById('micro-recv-note')||{}).value||'').trim();
+  if(!d){alert('Indicá la fecha de recepción.');return;}
+  if(d>today()){alert('La fecha de recepción no puede ser futura.');return;}
+  if(t.approvedDate&&d<t.approvedDate){alert('La fecha de recepción no puede ser anterior a la aprobación ('+fmtDF(t.approvedDate)+').');return;}
+  if(ov)ov.remove();
+  t.micro=Object.assign({},t.micro,{status:'received',recvBy:currentUser.id,recvByName:currentUser.name,recvTs:Date.now(),recvDate:d});
+  if(note)t.micro.recvNote=note; else delete t.micro.recvNote;
+  t._ts=Date.now();
+  auditLog('MICRO_RECEIVED','TASK',id,{field:'micro',oldVal:'pending',newVal:'received',
+    description:'Resultado micro recibido ('+fmtDF(d)+'): '+t.producto+' '+t.lote+(note?' — '+note:''),lote:t.lote},'');
+  _microPersist(t);render();
+  showToast('✓ Micro recibido — el informe puede almacenarse','success');
+}
+// Deshacer (solo supervisor): recibido → pendiente; pendiente → sin marca
+function undoMicro(id){
+  if(!isSupRole()){alert('Solo el Supervisor puede deshacer el estado micro.');return;}
+  var t=_microFind(id);
+  if(!t||!t.micro)return;
+  var wasPend=t.micro.status==='pending';
+  if(!confirm(wasPend?'¿Quitar la marca «micro pendiente» de '+t.producto+' '+t.lote+'?':'¿Volver '+t.producto+' '+t.lote+' a «micro pendiente»? Se borra el registro de recepción.'))return;
+  if(wasPend){delete t.micro;}
+  else{
+    var m=Object.assign({},t.micro,{status:'pending'});
+    delete m.recvBy;delete m.recvByName;delete m.recvTs;delete m.recvDate;delete m.recvNote;
+    t.micro=m;
+  }
+  t._ts=Date.now();
+  auditLog('MICRO_UNDO','TASK',id,{field:'micro',oldVal:wasPend?'pending':'received',newVal:wasPend?'':'pending',
+    description:'Deshacer estado micro: '+t.producto+' '+t.lote,lote:t.lote},'');
+  _microPersist(t);render();
+  showToast('Estado micro actualizado','info');
+}
+
 // Badge 🔬 para tarjetas/listados: cian = falta solicitar; verde ✓ = ya solicitado.
 // En históricos (done/reviewed/approved) solo se muestra si quedó solicitado (registro).
 function extBadge(t){
@@ -8933,7 +9278,7 @@ function renderShell(){
   const myT=sup?activeTasks():activeTasks().filter(t=>isMyTask(t));
   const lateC=myT.filter(t=>t._dueStatus==='late').length;
   const pendC=myT.filter(t=>t.status==='pending').length;
-  // Tareas con acción pendiente del analista actual (dentro de ventana de 4 días)
+  // Tareas con acción pendiente del analista actual (atrasadas sin límite, hasta mañana)
   const actionC=(()=>{
     if(sup)return 0;
     const _myId=currentUser.id,_todStr=today(),_todDate=new Date(_todStr+'T12:00:00');
@@ -8947,7 +9292,7 @@ function renderShell(){
         if(done)return false;
         if(ma._pendingConfirm&&!ma._supervisorConfirmed)return false;
         var diff=Math.round((new Date((ma.date||_todStr)+'T12:00:00')-_todDate)/(1000*60*60*24));
-        return diff>=-4&&diff<=1;
+        return diff<=1; // atrasados sin límite (hasta que el supervisor los cierre)
       });
     }).length;
   })();
@@ -8957,7 +9302,7 @@ function renderShell(){
     {id:'tasks',label:'Análisis',icon:'🔬',badge:pendC>0?pendC:'',bc:'w'},
     {id:'pending',label:'Pendientes',icon:'⏰',badge:(()=>{const pc=activeTasks().filter(t=>t.status==='pending-confirm').length;const sc=productSuggestions.filter(s=>s.status==='pending').length;return lateC>0||pc>0||sc>0?(lateC+pc+sc):'';})(),bc:'d'},
     {id:'revision',label:'Revisión',icon:'✅',badge:(()=>{const d=activeTasks().filter(t=>t.status==='done').length,r=activeTasks().filter(t=>t.status==='reviewed').length,o=activeTasks().filter(t=>t.status==='observed').length;const tot=d+r+o;return tot>0?tot:'';})(),bc:'w'},
-    {id:'especiales',label:'Especiales',icon:'🧪',badge:(()=>{const c=activeTasks().filter(t=>(t.tipo==='EE'||t.tipo==='Limp'||t.tipo==='Val')&&t.status!=='approved').length;return c>0?c:'';})()},
+    {id:'especiales',label:'Especiales',icon:'🧪',badge:(()=>{const c=activeTasks().filter(t=>(t.tipo==='EE'||t.tipo==='Limp'||t.tipo==='Val')&&t.status!=='approved').length+activeTasks().filter(microPending).length;return c>0?c:'';})()},
     {id:'mgmt',label:'Gestión',icon:'🗂'},
     {id:'week',label:'Calendario',icon:'📅'},
     {id:'informes',label:'Informes',icon:'📊'},
@@ -9329,8 +9674,8 @@ function renderDashboard(){
   var _myFTToday=freeTasks.filter(function(ft){return ft.analystId===_myId&&ft.status==='pending'&&(ft.date||'')=== _todayStr;});
   var _myFTUpcoming=freeTasks.filter(function(ft){return ft.analystId===_myId&&ft.status==='pending'&&(ft.date||'')>_todayStr;});
 
-  // Actividades de gestión en ventana ±3 días (pendientes de marcar como realizadas)
-  var _mgmtWindow=mgmtTasks.flatMap(function(mt){return expandMgmt(mt,_relDate(-3),_relDate(3));})
+  // Actividades de gestión pendientes de registrar: 14 días hacia atrás (atrasadas) y 3 adelante
+  var _mgmtWindow=mgmtTasks.flatMap(function(mt){return expandMgmt(mt,_relDate(-14),_relDate(3));})
     .filter(function(o){
       if(!(o.analysts||[]).includes(_myId))return false;
       return!(o.completions||[]).some(function(c){return c.date===o.occDate&&c.analystId===_myId&&(c.status==='confirmed'||!c.status);});
@@ -9365,7 +9710,7 @@ function renderDashboard(){
       actionHtml='<button class="btn sm suc" onclick="event.stopPropagation();openMgmtComplModal('+o.id+',\''+o.occDate+'\')" style="font-size:11px">✓ Realizada</button>';
     } else {
       var _dOldM=o.occDate<_todayStr?Math.round((new Date(_todayStr+'T12:00:00')-new Date(o.occDate+'T12:00:00'))/86400000):0;
-      var _canActM=o.occDate<=_todayStr&&_dOldM<=3;
+      var _canActM=o.occDate<=_todayStr;
       if(!myCompl){
         if(_canActM){
           actionHtml='<button class="btn sm suc" onclick="event.stopPropagation();openMgmtComplModal('+o.id+',\''+o.occDate+'\')" style="font-size:11px">✓ Realizada</button>'
@@ -9647,8 +9992,9 @@ function tRowAna(t,maOverride){
   var assignedDate=new Date((md||todayStr)+'T12:00:00');
   // diffDays: signed — negative=past, positive=future
   var diffDays=Math.round((assignedDate-todayDate)/(1000*60*60*24));
-  // Ventana de acción: 4 días atrás hasta 1 día adelante (aplica siempre, incluso si la tarea está vencida)
-  var inActionWindow=(diffDays>=-4&&diffDays<=1);
+  // Ventana de acción: cualquier día pasado (atrasados incluidos — mientras el supervisor
+  // no haya cerrado la porción, el analista puede completarla) hasta 1 día adelante
+  var inActionWindow=(diffDays<=1);
   // Per-assignment state (independent per date)
   var iThisAssignDone=ma&&((ma.realHours>0)||(ma.sessions&&ma.sessions.length>0)||!!ma._completedBySup);
   var iThisAssignPendConf=ma&&ma._pendingConfirm&&!ma._supervisorConfirmed;
@@ -12022,6 +12368,31 @@ function renderProductCatalogTab(){
     });
     return h+'</div></div>';
   }
+  // Posibles duplicados del catálogo (detección; el supervisor unifica o da de baja)
+  var dupHtml='';
+  if(!q){
+    var _dupG=[];
+    ['PT','MP'].forEach(function(kind){_catDupGroups(kind).forEach(function(g){g.kind=kind;_dupG.push(g);});});
+    if(_dupG.length){
+      if(typeof window._pcDupOpen==='undefined')window._pcDupOpen=false;
+      dupHtml='<div class="sec" style="margin-top:20px;display:flex;align-items:center;gap:8px">🔎 Posibles duplicados del catálogo <span style="font-size:11px;color:var(--amber-text);font-weight:400">('+_dupG.length+' grupo'+(_dupG.length>1?'s':'')+')</span>'
+        +'<button class="btn sm" style="margin-left:auto;font-size:10px" onclick="window._pcDupOpen=!window._pcDupOpen;render()">'+(window._pcDupOpen?'▲ Ocultar':'▼ Ver')+'</button></div>'
+        +'<div style="font-size:12px;color:var(--text2);margin-bottom:8px">Entradas que coinciden al quitar dosis, presentación y espacios, o cuyo nombre está contenido en otro. Es una detección: revisá cada grupo y <b>unificalo</b> (los análisis se rectifican al nombre elegido) o <b>dá de baja</b> la entrada sobrante.</div>'
+        +(window._pcDupOpen?_dupG.map(function(g){
+          return '<div style="background:var(--amber-bg);border-radius:var(--radius);padding:7px 10px;margin-bottom:6px;font-size:12px">'
+            +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px"><span class="u-xs3">'+(g.kind==='PT'?'Producto terminado':'Materia prima')+' · '+escH(g.reason)+'</span>'
+            +(isSup?'<button class="btn sm pri" style="margin-left:auto;font-size:11px" onclick="catDupUnify('+JSON.stringify(g.items.map(function(p){return p.id;})).replace(/"/g,'&quot;')+')">⛓ Unificar grupo</button>':'')+'</div>'
+            +g.items.map(function(p){
+              var uc=useCount[g.kind+'|'+_catNorm(p.name)]||0;
+              return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;border-top:1px solid rgba(0,0,0,.06)"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escH(p.name)+'</span>'
+                +'<span class="u-xs3" style="flex-shrink:0">'+uc+' uso'+(uc===1?'':'s')+'</span>'
+                +(isSup?'<button class="btn sm" style="font-size:10px;padding:2px 6px;color:var(--red);flex-shrink:0" title="Dar de baja esta entrada" onclick="catRemoveEntryById(\''+p.id+'\')">🗑</button>':'')
+                +'</div>';
+            }).join('')
+            +'</div>';
+        }).join(''):'');
+    }
+  }
   // Nombres en uso NO catalogados (rectificación) — agrupados por nombre normalizado y familia
   var rect={};
   activeTasks().forEach(function(t){
@@ -12086,7 +12457,8 @@ function renderProductCatalogTab(){
   }
   return '<div class="admin-wrap">'
     +_pcTabBar
-    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><h4 style="margin-bottom:0">📦 Catálogo maestro de productos</h4></div>'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap"><h4 style="margin-bottom:0">📦 Catálogo maestro de productos</h4>'
+    +'<button class="btn sm" style="margin-left:auto" onclick="exportCatalogXLSX()" title="Descargar el listado maestro vigente (hoja «Catalogo» + hoja «No catalogados») — útil para adaptar planillas internas a los nombres de LabTrack antes de una carga masiva">↓ Excel</button></div>'
     +'<div class="sub">Los análisis <b>PT / EE / Val / Limp</b> se nombran desde los productos terminados (una limpieza es de un producto) y las <b>MP</b> desde las materias primas (los demás tipos siguen con texto libre). El campo Producto autocompleta desde este catálogo y no admite nombres fuera de la lista. Marcá con la casilla productos <b>analíticamente equivalentes</b> (p. ej. presentaciones que solo difieren en volumen) para <b>⛓ unificarlos</b>; con <b>🗑 Vaciar</b> podés sustituir el listado completo por uno nuevo y rectificar lo existente contra él.</div>'
     +(isSup?'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">'
       +'<input type="text" id="pc-new-name" placeholder="Nombre del producto…" style="flex:1;min-width:200px;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--surface);color:var(--text)">'
@@ -12121,6 +12493,7 @@ function renderProductCatalogTab(){
     +_section('PT','🏷','Productos terminados')
     +_section('MP','🧪','Materias primas')
     +'</div>'
+    +dupHtml
     +rectHtml
     +fixHtml
     +'</div>';
@@ -13521,6 +13894,7 @@ function renderTaskModal(){
       +'<div style="font-size:12px;color:var(--text3);font-family:var(--mono);margin-bottom:16px">'+escH(t.lote)+'</div>'
       +_stdSecInfoBox(t)
       +_extInfoBox(t)
+      +_microInfoBox(t)
       +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px;margin-bottom:16px;font-size:12px">'
       +'<div><span class="u-fg3">Tipo </span>'+sampleTypeBadge(t.tipo)+'</div>'
       +'<div><span class="u-fg3">Estado </span><span class="pill '+t.status+'" style="font-size:10px">'+statusLabel(t.status)+'</span></div>'
@@ -13635,7 +14009,7 @@ function renderTaskModal(){
   return'<div class="modal-overlay"><div class="modal">'
     +'<h3>'+(isEdit?'Editar análisis de lote':(newTaskPrefill.suggId?'Confirmar ingreso sugerido':'Nuevo análisis de lote'))+'</h3>'
     +_reqBanner+_ilBanner+_suggBanner
-    +(isEdit?_stdSecInfoBox(t)+_extInfoBox(t):'')
+    +(isEdit?_stdSecInfoBox(t)+_extInfoBox(t)+_microInfoBox(t):'')
     +'<div class="form-grid">'
     +'<div class="frow"><label>Tipo de muestra'+(t.tipo==='IL'?'':' <span style="color:var(--red)">*</span>')+'</label>'+(t.tipo==='IL'?'<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 11px;border:1px solid #1d4ed8;border-radius:20px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8">🔗 IL · Inter-laboratorio</span><input type="hidden" id="f-tipo" value="IL">':renderTipoPillsHtml(t.tipo||''))+'</div>'
     +'<div class="frow"><label>Producto</label><input type="text" id="f-prod" autocomplete="off"'+(function(){var k=catKindForTipo(t.tipo||'');var l=k?('pc-dl-'+k):'';return l?' list="'+l+'"':'';})()+' value="'+escH(t.producto||'')+'" placeholder="Ej: Amoxicilina 500mg">'+_catDatalistsHtml()+'</div>'
@@ -13754,9 +14128,22 @@ function renderTaskComments(t){
     events.push({ts:t.approvedTs||0,type:'approval',by:_approverName(t),
       comment:t.approvalComment||(t.approvedDate?'Aprobado el '+fmtDF(t.approvedDate):'Aprobado')});
   }
+  if(t.micro){
+    events.push({ts:t.micro.ts||0,type:'micro',by:t.micro.byName||'',comment:'Aprobado con resultado microbiológico pendiente (punto final)'});
+    if(t.micro.status==='received')events.push({ts:t.micro.recvTs||0,type:'micro',by:t.micro.recvByName||'',
+      comment:'Resultado microbiológico recibido'+(t.micro.recvDate?' el '+fmtDF(t.micro.recvDate):'')+' — informe físico habilitado para almacenar'+(t.micro.recvNote?' · '+t.micro.recvNote:'')});
+  }
   events.sort(function(a,b){return (a.ts||0)-(b.ts||0);});
   if(!events.length)return'';
+  // Historiales largos (tablet/celular): se muestran los últimos 6 hitos y un botón
+  // despliega el resto — el pie del modal dejaba de verse con 20+ entradas
+  var _HIST_SHOW=6,_histAll=events.length,_histHidden=0;
+  if(_histAll>_HIST_SHOW+1&&!((window._histExpand||{})[t.id])){
+    _histHidden=_histAll-_HIST_SHOW;
+    events=events.slice(_histHidden);
+  }
   var typeConf={
+    micro:      {icon:'🦠',label:'Microbiología',color:'#b45309',bg:'#fef3c7'},
     observation:{icon:'⚑',label:'Observación',color:'var(--amber)',bg:'var(--amber-bg)'},
     resubmit:   {icon:'↩',label:'Re-envío',   color:'var(--blue)', bg:'var(--blue-bg)'},
     completion: {icon:'💬',label:'Comentario del analista',color:'var(--green)',bg:'var(--green-bg,#e8f5e9)'},
@@ -13780,8 +14167,10 @@ function renderTaskComments(t){
       +'</div></div>';
   }).join('');
   return'<div class="frow form-full" style="margin-top:4px">'
-    +'<label>Historial del producto ('+events.length+')</label>'
-    +'<div style="display:flex;flex-direction:column;gap:8px;padding:4px 0">'+rows+'</div>'
+    +'<label>Historial del producto ('+_histAll+')</label>'
+    +'<div style="display:flex;flex-direction:column;gap:8px;padding:4px 0">'
+    +(_histHidden?'<button class="btn sm" style="align-self:flex-start;font-size:11px" onclick="(window._histExpand=window._histExpand||{})['+t.id+']=true;render()">▲ Ver los '+_histHidden+' hitos anteriores</button>':'')
+    +rows+'</div>'
     +'</div>';
 }
 
@@ -14151,13 +14540,75 @@ function confirmImport(){
     });
     var _pcNewList=Object.values(_pcNews);
     if(_pcNewList.length){
-      var _pcMsg='Estos productos no están en el catálogo maestro:\n\n'
-        +_pcNewList.slice(0,12).map(function(x){return '· '+x.name+' ('+catKindLabel(x.kind)+')';}).join('\n')
-        +(_pcNewList.length>12?'\n… y '+(_pcNewList.length-12)+' más':'')
-        +'\n\n¿Agregarlos al catálogo y continuar con la importación?';
-      if(!confirm(_pcMsg))return;
-      _pcNewList.forEach(function(x){addCatalogProduct(x.kind,x.name,true);});
+      // Resolución asistida: por cada nombre, elegir un producto similar del catálogo
+      // (la planilla interna suele traer otra grafía) o crearlo nuevo. Continúa en
+      // _confirmImportStage2 al aceptar el modal.
+      _openImportResolveModal(_pcNewList,toImport,duplicates);
+      return;
     }
+    _confirmImportStage2(toImport,duplicates);
+  }catch(e){
+    alert('Error al importar: '+e.message+'. Los datos anteriores no fueron modificados.');
+    pastePreview=[];showImportModal=false;render();
+  }
+}
+function _openImportResolveModal(newList,toImport,duplicates){
+  if(document.getElementById('imp-resolve-modal'))return;
+  window._impResolve={newList:newList,toImport:toImport,duplicates:duplicates};
+  var rows=newList.map(function(x,i){
+    var cands=_catCandidatesFor(x.kind,x.name,5);
+    var all=activeCatalog(x.kind);
+    var candIds={};cands.forEach(function(c){candIds[c.entry.id]=true;});
+    var top=cands.length&&cands[0].score>=70?cands[0].entry.id:'';
+    return '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg);border-radius:var(--radius);margin-bottom:5px;font-size:12px;flex-wrap:wrap">'
+      +'<div style="flex:1;min-width:160px"><b>'+escH(x.name)+'</b> <span class="u-xs3">('+(x.kind==='PT'?'PT/EE/Val':'MP')+')</span>'
+      +(top?'<div style="font-size:10px;color:#065f46">✦ similar encontrado — revisá la elección</div>':'<div style="font-size:10px;color:var(--text3)">sin similar claro — se crea nuevo salvo que elijas uno</div>')+'</div>'
+      +'<select id="impres-'+i+'" style="max-width:280px;padding:5px 8px;border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;background:var(--surface);color:var(--text)">'
+      +'<option value=""'+(top?'':' selected')+'>➕ Crear nuevo: «'+escH(x.name)+'»</option>'
+      +(cands.length?'<optgroup label="Similares">'+cands.map(function(c){return '<option value="'+c.entry.id+'"'+(c.entry.id===top?' selected':'')+'>'+escH(c.entry.name)+'</option>';}).join('')+'</optgroup>':'')
+      +'<optgroup label="Todo el catálogo">'+all.filter(function(p){return !candIds[p.id];}).map(function(p){return '<option value="'+p.id+'">'+escH(p.name)+'</option>';}).join('')+'</optgroup>'
+      +'</select></div>';
+  }).join('');
+  var div=document.createElement('div');
+  div.innerHTML='<div class="modal-overlay" style="z-index:600" id="imp-resolve-modal">'
+    +'<div class="modal" style="width:min(640px,calc(100vw - 32px))">'
+    +'<h3 style="margin-bottom:4px;border-bottom:none;padding-bottom:0">Productos no catalogados ('+newList.length+')</h3>'
+    +'<p style="font-size:12px;color:var(--text2);margin:0 0 10px">Estos nombres no están en el catálogo maestro. Para cada uno elegí el producto <b>equivalente</b> del catálogo (los registros se importan con el nombre vigente) o crealo como producto nuevo.</p>'
+    +rows
+    +'<div class="modal-btns">'
+    +'<button class="btn" data-esc onclick="document.getElementById(\'imp-resolve-modal\').remove();window._impResolve=null">Cancelar importación</button>'
+    +'<button class="btn pri" onclick="_applyImportResolve()">Continuar importación</button>'
+    +'</div></div></div>';
+  document.body.appendChild(div);
+}
+function _applyImportResolve(){
+  var st=window._impResolve;if(!st)return;
+  var m=document.getElementById('imp-resolve-modal');
+  try{
+    var map={},created=[],mapped=[];
+    st.newList.forEach(function(x,i){
+      var v=((document.getElementById('impres-'+i)||{}).value||'');
+      var entry=v?productCatalog.find(function(p){return p.id===v&&!p._removed;}):null;
+      if(!entry){entry=addCatalogProduct(x.kind,x.name,true);created.push(x.name);}
+      else mapped.push(x.name+' → '+entry.name);
+      if(entry)map[x.kind+'|'+_catNorm(x.name)]=entry.name;
+    });
+    st.toImport.forEach(function(g){
+      var k=catKindForTipo((g.tipo||'').trim());if(!k)return;
+      var nm=map[k+'|'+_catNorm(g.producto)];
+      if(nm){g.producto=nm;g.rows.forEach(function(r){r.producto=nm;});}
+    });
+    if(mapped.length||created.length)auditLog('IMPORT','CATALOG','resolve',{mapped:mapped,created:created,description:'Importación: '+mapped.length+' nombre(s) asignado(s) a productos del catálogo, '+created.length+' creado(s)'},'');
+    if(m)m.remove();window._impResolve=null;
+    _confirmImportStage2(st.toImport,st.duplicates);
+  }catch(e){
+    if(m)m.remove();window._impResolve=null;
+    alert('Error al importar: '+e.message+'. Los datos anteriores no fueron modificados.');
+    pastePreview=[];showImportModal=false;render();
+  }
+}
+function _confirmImportStage2(toImport,duplicates){
+  try{
     if(duplicates.length>0){
       var msg='Los siguientes registros YA EXISTEN y no seran importados (mismo Producto y Lote):\n\n'
         +duplicates.slice(0,10).join('\n')
@@ -15714,6 +16165,9 @@ function markApproved(id){
     +(t.reviewedDate?'<div style="font-size:11px;color:var(--text2);background:var(--bg);border-radius:var(--radius);padding:6px 10px;margin-bottom:10px">📋 Revisado el <b class="u-mono">'+fmtDF(t.reviewedDate)+'</b> — la fecha de aprobación no puede ser anterior.</div>':'')
     +'<div class="frow"><label>Fecha de aprobación *</label>'
     +'<input type="date" id="ap-date" value="'+((t.reviewedDate&&t.reviewedDate>today())?t.reviewedDate:today())+'" min="'+(t.reviewedDate||'')+'" style="width:100%;padding:7px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text)"></div>'
+    +(t.tipo==='EE'?'<label style="display:flex;gap:8px;align-items:flex-start;font-size:12px;background:#fffbeb;border:1px solid #fcd34d;border-radius:var(--radius);padding:8px 10px;margin-top:8px;cursor:pointer">'
+      +'<input type="checkbox" id="ap-micro" style="margin-top:2px">'
+      +'<span><b>🦠 Micro pendiente</b><br><span style="color:var(--text2);font-size:11px">Punto final (fin de vida útil / fin de estudio) con resultado microbiológico aún no recibido. Se aprueba igual con esta fecha; el informe físico se almacena cuando se tilde «Micro recibido».</span></span></label>':'')
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">'
     +'<button onclick="document.body.removeChild(this.closest(\'.modal-overlay,div[style*=fixed]\').parentElement)" class="btn">Cancelar</button>'
     +'<button onclick="window[\'_doApproved_\'+'+id+']('+id+')" class="btn pri">✓ Aprobar</button>'
@@ -15721,6 +16175,7 @@ function markApproved(id){
   document.body.appendChild(apDiv);
   window['_doApproved_'+id]=function(tid){
     var _aDate=((document.getElementById('ap-date')||{}).value||today());
+    var _aMicro=t.tipo==='EE'&&!!((document.getElementById('ap-micro')||{}).checked);
     if(t.reviewedDate&&_aDate<t.reviewedDate){alert('⚠ La fecha de aprobación ('+fmtDF(_aDate)+') no puede ser anterior a la fecha de revisión ('+fmtDF(t.reviewedDate)+').');return;}
     document.body.removeChild(apDiv);
     if(t.due&&_aDate>t.due){
@@ -15754,8 +16209,9 @@ function markApproved(id){
           }
           t._revApproved=false; // se conserva _revApprovedBy/Name/Ts como registro histórico
         }
+        if(_aMicro&&!t.micro)_microStampPending(t);
         saveLS();render();
-        showToast('✅ Aprobado','success');
+        showToast(_aMicro?'✅ Aprobado — 🦠 micro pendiente':'✅ Aprobado','success');
         saveNow().catch(e=>console.error('saveNow approved:',e));
       };
     if(t._revApproved){

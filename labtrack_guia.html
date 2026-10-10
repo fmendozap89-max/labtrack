@@ -48,7 +48,7 @@
   .stp .st-w{font-size:11.5px;color:var(--ink3)}
   .stp .pill{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:999px;margin-top:6px}
   .pill.ai{background:#ede9fe;color:#5b21b6}.pill.pe{background:#e0e7ff;color:#3730a3}.pill.pr{background:#dbeafe;color:#1e40af}
-  .pill.do{background:#dcfce7;color:#166534}.pill.re{background:#ccfbf1;color:#115e59}.pill.ap{background:#d1fae5;color:#065f46}.pill.ob{background:#fef9c3;color:#854d0e}
+  .pill.do{background:#dcfce7;color:#166534}.pill.re{background:#ccfbf1;color:#115e59}.pill.ap{background:#d1fae5;color:#065f46}.pill.mi{background:#fef3c7;color:#92400e}.pill.ob{background:#fef9c3;color:#854d0e}
   .arrow{align-self:center;color:var(--ink3);font-size:18px}
   .step{border-left:3px solid var(--green);padding:2px 0 6px 18px;margin:26px 0}
   .step.sx{border-left-color:var(--brand)} .step.rx{border-left-color:var(--amber)} .step.mx{border-left-color:var(--blue)} .step.stx{border-left-color:var(--ink3)} .step.aux{border-left-color:#7c3aed}
@@ -190,8 +190,11 @@
       <span class="pill do">completado (conf. pendiente)</span><span class="sep">→</span>
       <span class="pill do">completado p/ revisar</span><span class="sep">→</span>
       <span class="pill re">revisado</span><span class="sep">→</span>
-      <span class="pill ap">aprobado</span>
+      <span class="pill ap">aprobado</span><span class="sep">→</span>
+      <span class="pill mi" title="Solo estabilidades de punto final">🦠 aprobado — micro pendiente</span><span class="sep">→</span>
+      <span class="pill ap">🦠 micro recibido</span>
     </div>
+    <div class="tip"><b>🦠 Estabilidades en punto final (fin de vida útil / fin de estudio):</b> llevan análisis microbiológico, cuyo resultado demora más que el de LCC. El producto se <b>aprueba igual</b> en la fecha real (así los indicadores de LCC no cargan los tiempos de Microbiología) y queda con la marca <span class="pill mi">micro pendiente</span> hasta que el revisor o el supervisor tilda <span class="btnref">✓ Micro recibido</span>: recién entonces el informe físico se almacena. No es un estado nuevo del flujo, es una marca posterior a la aprobación y solo para estabilidades.</div>
     <div class="warn"><b>Desvío — observación:</b> si en la revisión algo no está bien, se <b>observa</b> (<span class="pill ob">observado</span>) y vuelve al analista responsable para corregirlo y re-enviarlo. Solo el analista elegido recibe la observación.</div>
   </section>
 
@@ -223,7 +226,7 @@
     <div class="step sx">
       <h4>2 · «Análisis»: tu tablero de control <span class="who s">Supervisor</span></h4>
       <p>El centro de la operación, con tres pestañas: <b>🔬 Análisis</b> (todos los lotes activos: estado, analistas, fechas, prioridad — desde cada fila editás, asignás o anulás), <b>💡 Ingresos</b> (las sugerencias de producto del personal, para confirmarlas como análisis reales) y <b>⭐ Estándares</b> (el desarrollo de estándares secundarios, en su pestaña propia para no enterrar los ingresos pendientes).</p>
-      <div class="warn"><b>⚠ Posibles duplicados:</b> arriba de la pestaña <b>💡 Ingresos</b> la app te muestra los grupos de <b>ingresos activos y sugerencias pendientes que comparten producto y lote</b> — el caso típico es que dos personas ingresen el mismo lote sin saberlo. <b>PT y Val se consideran el mismo análisis</b> (analizar la validación de proceso incluye el análisis del PT); EE, Limp y MP solo se comparan entre sí. Cuando hay grupos, la pestaña muestra el indicador <b>⚠</b> con el conteo. En cada grupo decidís vos: <span class="btnref">✎ Abrir</span> el ingreso para editarlo o anularlo, <span class="btnref">✍ Revisar</span> / <span class="btnref">✗ Rechazar</span> la sugerencia, o <span class="btnref">✓ No es duplicado</span> si la coincidencia es legítima (p. ej. un re-análisis) — el aviso desaparece y solo vuelve si aparece <i>otro</i> ingreso igual.</div>
+      <div class="warn"><b>⚠ Posibles duplicados:</b> arriba de la pestaña <b>💡 Ingresos</b> la app te muestra los grupos de <b>ingresos activos y sugerencias pendientes que comparten producto y lote</b> — el caso típico es que dos personas ingresen el mismo lote sin saberlo. <b>PT y Val se consideran el mismo análisis</b> (analizar la validación de proceso incluye el análisis del PT); EE, Limp y MP solo se comparan entre sí. Cuando hay grupos, la pestaña muestra el indicador <b>⚠</b> con el conteo. En cada grupo decidís vos: <span class="btnref">✎ Abrir</span> el ingreso para editarlo o anularlo, <span class="btnref">✍ Revisar</span> / <span class="btnref">✗ Rechazar</span> la sugerencia, o <span class="btnref">✓ No es duplicado</span> si la coincidencia es legítima (p. ej. un re-análisis) — el aviso desaparece y solo vuelve si aparece <i>otro</i> ingreso igual. Los grupos marcados <b>≈ similar</b> son una coincidencia más amplia: mismo lote y nombres iguales al quitar dosis y presentación (p. ej. «Amoxicilina 500 mg» y «Amoxicilina 500mg comprimidos»), o tipos no equivalentes del mismo lote — revisalos con más cuidado.</div>
       <div class="tip"><b>⭐ Estándares secundarios — el flujo:</b> cuando el estándar secundario de una materia prima activa está por vencer o queda poca cantidad, cualquiera del equipo registra la <b>necesidad de desarrollo</b> eligiendo la MP del <b>listado maestro</b> (si no está en el catálogo, solo vos podés darla de alta en el momento). Cada vez que un ingreso activo <b>matchea</b> una necesidad (por la entrada del catálogo — sin confusiones entre MP de nombre parecido), te llega una notificación a la campana para <span class="btnref">✓ Validar p/ desarrollo</span> (el lote queda marcado ⭐ como lote de desarrollo del estándar) o <span class="btnref">✗ Falso match</span> (descarta el aviso para ese ingreso). Al muestreador el aviso le pide <b>cantidad adicional</b> al registrar el muestreo; el muestreo extra deja la necesidad como «muestreado» y vos la <b>cerrás</b> cuando el estándar quedó fraccionado y en uso. Con <span class="btnref">✎ Editar</span> corregís los datos de una necesidad abierta (MP, fecha límite, notas) — si cambiás la MP, los avisos se recalculan; todo queda en el Audit Trail. <b>Validar, rechazar matches, editar, cerrar y eliminar necesidades son acciones exclusivas tuyas.</b></div>
       <div class="warn"><b>⏰ Fecha límite de la necesidad:</b> si la necesidad tiene fecha límite y sigue <b>sin muestrear</b>, la campana te avisa desde <b>7 días antes</b> («vence en X días» → «vence HOY» → «vencida hace X días», en rojo). El aviso te dice si hay ingresos activos de esa MP para coordinar el muestreo adicional — y si no hay ninguno previsto, es la señal para <b>muestrear un lote antiguo</b> (p. ej. retenido) para el desarrollo. Desde el mismo aviso podés ir a ⭐ Estándares o <span class="btnref">✎ Editar / extender límite</span>. El aviso desaparece solo al muestrear, cerrar o mover la fecha.</div>
       <div class="tip"><b>Filtrar el desarrollo de estándares:</b> el lote validado conserva su tipo MP y lleva la marca ⭐ permanente — el botón <span class="btnref">⭐ STD</span> en los filtros de la tabla de Análisis y de Informes muestra solo los lotes de desarrollo, para seguirlos o analizar sus tiempos.</div>
@@ -243,6 +246,7 @@
       <div class="tip"><b>⚠ Aviso de duplicado:</b> al guardar, si ya existe un ingreso activo o una sugerencia pendiente con el <b>mismo producto y lote</b> (contando PT y Val como el mismo análisis), la app te lo muestra antes de confirmar — <b>sin bloquear</b>: si el ingreso corresponde igual, lo guardás y listo. Los casos dudosos quedan agrupados en la pestaña 💡 Ingresos (paso 2) para resolverlos cuando quieras.</div>
       <div class="tip"><b>Coherencia de fechas:</b> la <b>fecha de ingreso no puede ser futura</b> — si la muestra todavía no llegó, corresponde crearla como <span class="pill ai">a ingresar</span> con su fecha estimada de llegada (al confirmar la recepción, la fecha de ingreso pasa a ser la real). Tampoco puede quedar después de un hito ya cumplido (completado, revisión o aprobación). Las fechas de <i>planificación</i> siguen siendo flexibles: si quedan anteriores al ingreso la app solo lo avisa, para que puedas adecuar el plan a la realidad.</div>
       <figure class="shot" data-snap="sup_modal_nuevo" data-modal="1"><figcaption>Formulario real «Nuevo producto».</figcaption></figure>
+      <div class="tip"><b>↑ Importar — nombres fuera del catálogo:</b> si la planilla trae productos que no están en el maestro (otra grafía, dosis escrita distinto), antes de importar se abre un cuadro con una fila por nombre: elegís el producto <b>equivalente</b> del catálogo (la app propone los similares y preselecciona cuando la coincidencia es clara) o <b>➕ Crear nuevo</b>. Los registros se importan con el nombre vigente, así la planilla interna no ensucia el catálogo.</div>
       <figure class="shot" data-snap="sup_modal_import" data-modal="1"><figcaption>Cuadro real de importación / carga masiva.</figcaption></figure>
     </div>
 
@@ -275,6 +279,7 @@
         <li><span class="btnref">✓ Revisar</span> confirma el trabajo (con tu firma) → <span class="pill re">revisado</span>.</li>
         <li><span class="btnref">⚑ Observar</span> lo devuelve para corregir → <span class="pill ob">observado</span>. Elegís el <b>analista responsable</b>: solo él recibe la observación y la ve en sus actividades.</li>
         <li><span class="btnref">✓ Aprobar</span> cierra el análisis (con tu firma) → <span class="pill ap">aprobado</span>. Si el revisor lo <b>pre-aprobó</b> (ya fechó y firmó su aprobación), tu confirmación es un simple aceptar — sin volver a autenticar con contraseña; <b>rechazar</b> la pre-aprobación sí pide tu firma.</li>
+        <li><b>🦠 Micro pendiente (solo EE):</b> al aprobar una estabilidad el cuadro trae la casilla <b>Micro pendiente</b>, desmarcada por defecto. Marcala en los <b>puntos finales</b> (fin de vida útil / fin de estudio) cuyo resultado microbiológico todavía no llegó: se aprueba igual con esa fecha y el producto queda señalado hasta que alguien tilde <span class="btnref">✓ Micro recibido</span>. También podés marcarla después, desde «✅ Aprobados» o desde Especiales → Estabilidades.</li>
       </ul>
       <figure class="shot" data-snap="sup_revision"><figcaption>Vista real «Revisión» del Supervisor.</figcaption></figure>
       <figure class="shot" data-snap="sup_modal_revisar" data-modal="1"><figcaption>Cuadro real «Revisar».</figcaption></figure>
@@ -287,6 +292,7 @@
     <div class="step sx">
       <h4>7 · «Especiales»: estabilidades, limpiezas y validaciones <span class="who s">Supervisor</span></h4>
       <p>El mismo flujo de análisis, agrupado aparte para los tipos EE, Limpieza y Validación — así el tablero principal queda enfocado en la rutina de PT/MP.</p>
+      <p><b>🧪 Estabilidades</b> tiene tres pestañas: <b>Activas</b>, <b>Aprobadas</b> y <b>🦠 Micro pendiente</b>. En <b>Aprobadas</b> marcás con la casilla las estabilidades que quedaron con el resultado microbiológico pendiente y aplicás en bloque con <span class="btnref">🦠 Marcar micro pendiente</span> (también por fila); con <span class="btnref">📦 Ver archivadas</span> alcanzás las aprobadas hace más de 45 días. La pestaña <b>Micro pendiente</b> lista las que esperan resultado con los <b>días transcurridos desde la aprobación</b> (ámbar a partir de 15, rojo a partir de 31) y el botón <span class="btnref">✓ Micro recibido</span>, que pide la fecha de recepción y una nota opcional (p. ej. el N° de informe micro). Mientras esperan resultado no pasan al archivo histórico. El Excel de Estabilidades incluye las columnas «Micro» y «F. recepción micro».</p>
       <figure class="shot" data-snap="sup_especiales"><figcaption>Vista real «Especiales».</figcaption></figure>
     </div>
 
@@ -332,6 +338,8 @@
         <li><b>⛓ Unificar equivalentes:</b> marcá productos analíticamente iguales (p. ej. «Suero fisiológico 100 mL» y «250 mL») y unificalos en un solo nombre — todos los análisis con esos nombres se renombran solos.</li>
         <li><b>🛠 Rectificación asistida:</b> los nombres históricos que no están en el catálogo aparecen con un <b>destino propuesto (✦)</b> por similitud; revisás y con <span class="btnref">✔ Aplicar todas las elegidas</span> se renombran todos los lotes de una vez.</li>
         <li><b>✎ Corrección individual:</b> buscá cualquier análisis y corregí <b>producto, tipo y lote</b> juntos (p. ej. «Hisopado Ranical» → producto Ranical, tipo Limp, lote «X hisopado»).</li>
+        <li><b>↓ Excel:</b> descarga el listado maestro vigente (hoja «Catalogo» con familia, análisis externo y usos, y hoja «No catalogados» con los nombres en uso que faltan rectificar). Es la referencia para adaptar una planilla interna — p. ej. la carga mensual de estabilidades — a los nombres de LabTrack antes de importarla.</li>
+        <li><b>🔎 Posibles duplicados del catálogo:</b> la app agrupa las entradas que coinciden al quitar dosis, presentación y espacios, o cuyo nombre está contenido en otro («Suero fisiológico» ⊂ «Suero fisiológico 100 mL»). Es solo detección: en cada grupo elegís <span class="btnref">⛓ Unificar grupo</span> (abre la unificación con esas entradas ya marcadas) o <span class="btnref">🗑</span> para dar de baja la sobrante.</li>
       </ul>
       <div class="tip">Todas estas correcciones son <b>de datos, no de flujo</b>: alcanzan análisis en cualquier estado (aprobados incluidos) y <b>no modifican el estado</b>, las horas ni las fechas — solo el nombre. Todo queda registrado en el Audit Trail. Con <b>🗑 Vaciar</b> podés sustituir una familia completa del catálogo por un listado nuevo y rectificar lo existente contra él.</div>
       <p><b>🔬 Análisis externos — el listado y sus avisos.</b> Algunos productos requieren ensayos que se <b>tercerizan</b> (p. ej. nitrosaminas, endotoxinas). En la sub-pestaña «🔬 Análisis externos» definís, por producto del catálogo, <b>qué análisis</b> se realiza afuera y <b>dónde</b>, con notas de coordinación (demoras, retiro de muestra). El buscador matchea <b>PT y MP a la vez</b> (cada opción lleva el sufijo « — PT» o « — MP»), y el campo «dónde» se elige entre los <b>laboratorios reales</b> de solicitudes inter-lab — si escribís uno que no existe, la app ofrece crearlo como laboratorio de seguimiento manual. A partir de ahí:</p>
@@ -368,6 +376,7 @@
         <li><span class="btnref">✓ Revisar</span> confirmar el trabajo (con tu firma) → <span class="pill re">revisado</span>.</li>
         <li><span class="btnref">⚑ Observar</span> devolverlo para corregir → <span class="pill ob">observado</span>. Elegís el <b>analista responsable</b>: solo él recibe la observación.</li>
         <li><span class="btnref">✓ Pre-aprobar</span> dejarlo listo para que el supervisor confirme la aprobación final. <b>Para qué:</b> es el doble control — tu pre-aprobación adelanta el trabajo y el supervisor solo confirma o rechaza.</li>
+        <li><b>🦠 Micro de estabilidades:</b> en <b>✅ Aprobados</b> y en Especiales → Estabilidades podés marcar una EE aprobada como <span class="pill mi">micro pendiente</span> (punto final cuyo resultado microbiológico no llegó) y, cuando llega, tildar <span class="btnref">✓ Micro recibido</span> con la fecha de recepción — ahí el informe físico se puede almacenar. El estado del producto no cambia: sigue aprobado en su fecha.</li>
       </ul>
       <figure class="shot" data-snap="rev_revision"><figcaption>Vista real «Revisión» del Revisor.</figcaption></figure>
       <figure class="shot" data-snap="rev_modal_revisar" data-modal="1"><figcaption>Cuadro real «Revisar».</figcaption></figure>
@@ -418,7 +427,7 @@
       <h4>3 · Pestaña «🔬 Mis análisis»: tu lista de trabajo <span class="who a">Analista</span></h4>
       <p>La lista completa de tus análisis asignados, con estado, fecha y horas. Desde cada fila trabajás:</p>
       <ul class="clean">
-        <li><span class="btnref">▶ Iniciar</span> pone el análisis <span class="pill pr">en curso</span>. La ventana de acción va desde <b>un día antes</b> de la fecha asignada hasta <b>4 días después</b> — pasada la ventana, corresponde replanificar.</li>
+        <li><span class="btnref">▶ Iniciar</span> pone el análisis <span class="pill pr">en curso</span>. Podés iniciarlo desde <b>un día antes</b> de la fecha asignada y, hacia atrás, <b>sin límite</b>: un día atrasado sigue siendo tuyo para completar mientras el supervisor no lo haya cerrado por vos. Los atrasos se marcan en ámbar — registralos cuanto antes o pedí replanificación.</li>
         <li><span class="btnref">✓ Completar</span> abre el registro de horas cuando terminás.</li>
       </ul>
       <figure class="shot" data-snap="ana_tasks"><figcaption>«Mis análisis» — pestaña 🔬 con estados y acciones reales.</figcaption></figure>
@@ -478,7 +487,7 @@
       <p>El trabajo que no es análisis de un lote, para que tus horas queden completas:</p>
       <ul class="clean">
         <li><b>🎯 Tareas únicas</b>: trabajo puntual (capacitación, orden de laboratorio, preparación de reactivos) — lo registrás con <span class="btnref">+ Registrar tarea única</span> y el supervisor lo confirma.</li>
-        <li><b>🔁 Recurrentes</b>: actividades planificadas que se repiten; marcás cada día <span class="btnref">✓ Realizada</span> con las horas.</li>
+        <li><b>🔁 Recurrentes</b>: actividades planificadas que se repiten; marcás cada día <span class="btnref">✓ Realizada</span> con las horas. Los días anteriores que quedaron sin marcar también se pueden registrar (en «Mi día» aparecen los últimos 14 días; en la Lista, cualquier fecha).</li>
       </ul>
       <figure class="shot" data-snap="ana_mgmt"><figcaption>Vista real «Gestión» del Analista — pestaña Tareas únicas.</figcaption></figure>
     </div>
