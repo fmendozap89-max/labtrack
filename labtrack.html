@@ -969,7 +969,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026101002; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026101101; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -3073,6 +3073,18 @@ function dueBadge(t){
   var label=ds==='late'?'Vencido':ds==='near'?'Próx. a vencer':'';
   if(!label)return fmtDDMMYY(t.due);
   return fmtDDMMYY(t.due)+'<span class="due-badge '+ds+'" style="margin-left:4px">'+label+'</span>';
+}
+// Línea «Límite» para las filas del analista (debajo de la fecha asignada): la fecha
+// límite de aprobación con color según urgencia — rojo vencida, ámbar próxima, gris normal.
+// Pedido de Fabricio 2026-10-11: el analista debe ver la fecha límite de forma sencilla.
+function _anaDueLine(t){
+  if(!t||!t.due)return'';
+  if(t.status==='approved')return'';
+  var ds=t._dueStatus||'ok';
+  var days=Math.round((new Date(t.due+'T12:00:00')-new Date(today()+'T12:00:00'))/86400000);
+  var col=ds==='late'?'var(--red)':ds==='near'?'var(--amber-text)':'var(--text3)';
+  var tail=ds==='late'?' · vencida'+(days<0?' hace '+(-days)+' d':''):(days===0?' · hoy':days===1?' · mañana':days>1&&days<=7?' · en '+days+' d':'');
+  return '<div style="font-size:10px;color:'+col+';font-weight:'+(ds==='ok'?'400':'700')+';margin-top:2px;white-space:nowrap" title="Fecha límite de aprobación del lote">⏱ Límite '+fmtDDMMYY(t.due)+tail+'</div>';
 }
 function fmtDF(d){if(!d)return'';const p=d.split('-');return p[2]+'/'+p[1]+'/'+p[0];}
 function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
@@ -9598,7 +9610,7 @@ function renderDashboard(){
     if(_myRevTasks.length>0){
       _revRet+='<div class="sec">Mis análisis asignados</div>';
       _revRet+='<div style="font-size:11px;color:var(--text3);margin:-4px 0 8px">Tareas en las que colaborás como analista — podés iniciarlas y completarlas como un analista.</div>';
-      _revRet+='<div class="tbl"><div class="thead" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr"><div>Producto / Lote</div><div>Fecha</div><div>Horas</div><div>Estado</div><div>Acciones</div></div>';
+      _revRet+='<div class="tbl"><div class="thead" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr"><div>Producto / Lote</div><div title="Día asignado y, debajo, la fecha límite de aprobación del lote">Fecha / Límite</div><div>Horas</div><div>Estado</div><div>Acciones</div></div>';
       // Una fila por asignación (analista/día), ordenadas por fecha descendente (reciente arriba)
       var _revRows=[];
       _myRevTasks.forEach(function(t){
@@ -10030,7 +10042,8 @@ function tRowAna(t,maOverride){
   return'<div>'
     +'<div class="trow" style="grid-template-columns:1.4fr .7fr .75fr .55fr 1.1fr'+(showOverdueWarn?';border-left:3px solid var(--amber)':'')+'">'
     +'<div><div class="cell-trunc">'+escH(t.producto)+'</div><div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+extBadge(t)+'<span>'+escH(t.lote)+'</span></div></div>'
-    +'<div style="font-family:var(--mono);font-size:12px">'+fmtD(md)+(replanLabel?'<br>'+replanLabel:'')+'</div>'
+    +'<div style="font-family:var(--mono);font-size:12px">'+fmtD(md)+(replanLabel?'<br>'+replanLabel:'')
+      +_anaDueLine(t)+'</div>'
     +'<div>'+hoursCol+'</div>'
     +'<div>'
     +'<span class="pill '+(taskDisplayStatus(t)==='partial'?'partial':t.status)+'">'+statusLabel(taskDisplayStatus(t))+'</span>'
@@ -10214,7 +10227,7 @@ function tRowAnaHist(t,ma){
   return'<div class="trow" onclick="openEdit('+t.id+')" style="grid-template-columns:1.8fr .8fr .55fr .9fr;cursor:pointer">'
     +'<div><div class="cell-trunc" style="font-weight:600">'+escH(t.producto)+'</div>'
     +'<div class="cell-sub" style="display:flex;align-items:center;gap:4px">'+sampleTypeBadge(t.tipo)+stdSecBadge(t)+extBadge(t)+'<span class="u-mono11">'+escH(t.lote)+'</span></div></div>'
-    +'<div style="font-family:var(--mono);font-size:12px">'+fmtD(md)+'</div>'
+    +'<div style="font-family:var(--mono);font-size:12px">'+fmtD(md)+_anaDueLine(t)+'</div>'
     +'<div>'+(maRealH?'<span style="font-size:11px;font-weight:700;font-family:var(--mono);color:var(--green)">'+maRealH.toFixed(1)+'h</span>':'<span class="u-xs3">—</span>')+'</div>'
     +'<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">'
     +'<span class="pill '+(taskDisplayStatus(t)==='partial'?'partial':t.status)+'">'+statusLabel(taskDisplayStatus(t))+'</span>'
