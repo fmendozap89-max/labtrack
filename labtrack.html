@@ -166,6 +166,8 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14
 .filter-row{display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap}
 .filter-row select{padding:6px 10px;font-size:11px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--surface);color:var(--text);font-family:var(--font);transition:border-color var(--transition),box-shadow var(--transition)}
 .filter-row select:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px rgba(26,79,138,.12)}
+/* Cajas de búsqueda: ancho mínimo útil aunque la fila de filtros se llene (celular/tablet) */
+input[id^="srch-"],#search-bar-input,#fix-search,#pc-search{min-width:170px}
 .count-lbl{font-size:11px;color:var(--text3);margin-left:auto;font-family:var(--mono)}
 .empty{padding:36px 22px;text-align:center;font-size:12px;color:var(--text3);line-height:1.7}
 .av-stack{display:flex;gap:2px;flex-wrap:wrap}
@@ -967,7 +969,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026101001; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026101002; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -10064,39 +10066,57 @@ function tRowAna(t,maOverride){
     +'</div>';
 }
 function searchBarHtml(){
-  return '<div style="position:relative;flex:1;max-width:300px">'
+  // flex-basis + min-width: en la fila de filtros de An\u00e1lisis el buscador se achicaba a
+  // unos 40 px cuando los selects ocupaban el ancho (celular en modo escritorio / tablet)
+  return '<div style="position:relative;flex:1 1 220px;min-width:180px;max-width:320px">'
     +'<input type="text" id="search-bar-input" placeholder="Buscar producto o lote\u2026" value="'+escH(filterSearch)+'"'
     +' oninput="filterSearch=this.value;_doSearchRender()"'
     +' style="width:100%;padding:7px 30px 7px 28px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:12px">'
     +(filterSearch?'<span onclick="filterSearch=\'\';render()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;color:var(--text3);font-size:16px">×</span>':'')
     +'</div>';
 }
+// ── Búsqueda con re-render diferido ──
+// El re-render reemplaza el <input> mientras el usuario escribe. En celulares eso
+// perdía letras: el teclado Android escribe por COMPOSICIÓN (predicción de palabras)
+// y al cambiar el elemento a mitad de palabra la composición se corta; además con
+// listas largas el render tarda y un debounce de 60-80 ms caía entre tecla y tecla.
+// Reglas: debounce de 350 ms, nunca re-renderizar durante una composición IME,
+// tomar el valor VIVO del input antes de reemplazarlo y restaurar foco y cursor
+// solo si el input seguía enfocado.
+window._imeComposing=false;
+document.addEventListener('compositionstart',function(){window._imeComposing=true;},true);
+document.addEventListener('compositionend',function(){window._imeComposing=false;},true);
 let _searchRenderTimer=null;
-function _doSearchRender(){
+function _srchCommit(inputId,getVal,setVal){
   if(_searchRenderTimer)clearTimeout(_searchRenderTimer);
-  _searchRenderTimer=setTimeout(function(){
-    const el=document.getElementById('app');
-    if(!el)return;
-    const html=renderShell();
-    if(html!==_lastHtml){_lastHtml=html;el.innerHTML=html;attachLogin&&attachLogin();_syncTopScrollbars();_auditorStripActions();}
-    const inp=document.getElementById('search-bar-input');
-    if(inp){const v=filterSearch;inp.focus();inp.value=v;inp.setSelectionRange(v.length,v.length);}
-  },80);
-}
-// Función genérica para search inputs fuera del main search bar:
-// actualiza la variable, re-renderiza con debounce y restaura el foco al input por su id.
-let _srchTimer=null;
-function _srch(varName,value,inputId){
-  window[varName]=value;
-  if(_srchTimer)clearTimeout(_srchTimer);
-  _srchTimer=setTimeout(function(){
+  var run=function(){
+    if(window._imeComposing){_searchRenderTimer=setTimeout(run,150);return;}
+    var live=document.getElementById(inputId);
+    if(live)setVal(live.value); // lo último tecleado, aunque el oninput todavía no haya corrido
+    var hadFocus=!!live&&document.activeElement===live;
+    var caret=live?live.selectionStart:null;
     const app=document.getElementById('app');
     if(!app)return;
     const html=renderShell();
     if(html!==_lastHtml){_lastHtml=html;app.innerHTML=html;attachLogin&&attachLogin();_syncTopScrollbars();_auditorStripActions();}
     const el=document.getElementById(inputId);
-    if(el){const v=window[varName]||'';el.focus();el.value=v;el.setSelectionRange(v.length,v.length);}
-  },60);
+    if(el&&hadFocus){
+      const v=getVal()||'';
+      el.value=v;el.focus({preventScroll:true});
+      var pos=(caret==null||caret>v.length)?v.length:caret;
+      try{el.setSelectionRange(pos,pos);}catch(e){}
+    }
+  };
+  _searchRenderTimer=setTimeout(run,350);
+}
+function _doSearchRender(){
+  _srchCommit('search-bar-input',function(){return filterSearch;},function(v){filterSearch=v;});
+}
+// Función genérica para search inputs fuera del main search bar:
+// actualiza la variable, re-renderiza con debounce y restaura el foco al input por su id.
+function _srch(varName,value,inputId){
+  window[varName]=value;
+  _srchCommit(inputId,function(){return window[varName];},function(v){window[varName]=v;});
 }
 function renderTasks(){
   const sup=isSupRole()||isReviewerRole()||isAuditorRole();
