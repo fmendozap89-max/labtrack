@@ -969,7 +969,7 @@ const ARCHIVE_APPROVED_AFTER_DAYS = 45;
 // remoto es una VERSIÓN VIEJA → bloquea sync y escrituras, muestra aviso y se
 // recarga para tomar la versión publicada. Nota: solo obliga a versiones que ya
 // contienen este candado; a las anteriores a él solo las corta rotar el token.
-const APP_BUILD = 2026111101; // AAAAMMDDNN (NN = publicación del día)
+const APP_BUILD = 2026111102; // AAAAMMDDNN (NN = publicación del día)
 let minAppBuild = 0; // mayor build exigido visto en el estado (viaja en snapshots)
 
 // Configuración — persiste solo en localStorage (token + gist ID, no datos operativos)
@@ -2502,34 +2502,102 @@ function _archCandidates(){
     return !!ap&&ap<cut;
   });
 }
+// ── Particiones del archivo (2026-11) ──
+// El archivo único llegó a 823 KB (la API de Gist trunca/rechaza cerca de 1 MB). Ahora
+// cada producto vive en el archivo del TRIMESTRE de su aprobación:
+// labtrack_archive_<AAAA>Q<1-4>.json (~120 KB/mes medidos → ~360 KB por trimestre).
+// El archivo legado (labtrack_archive.json) se reparte una sola vez y se elimina; la
+// lectura une legado + particiones con dedup por id, así toda la app (Informes,
+// calendario, conciliación, buscador) sigue viendo UN solo archivo histórico.
+var ARCH_PART_RE=/^labtrack_archive_(\d{4})Q([1-4])\.json$/;
+function _archPartFile(t){
+  var ap=(t&&(t.approvedDate||(t.approvedTs?tsToYMD(t.approvedTs):'')||(t._archivedTs?tsToYMD(t._archivedTs):'')))||today();
+  var y=ap.slice(0,4),m=parseInt(ap.slice(5,7),10)||1;
+  return 'labtrack_archive_'+y+'Q'+(Math.floor((m-1)/3)+1)+'.json';
+}
+// Lee TODOS los archivos de archivo del gist → {nombre:[tareas]}. Un archivo ilegible
+// LANZA (nunca se interpreta como vacío: se reescribiría la partición perdiendo datos).
+async function _archReadParts(gist){
+  var parts={};
+  var names=Object.keys((gist&&gist.files)||{}).filter(function(n){return n===GIST_FILE_ARCHIVE||ARCH_PART_RE.test(n);});
+  for(var i=0;i<names.length;i++){
+    var raw=await _gistFileContent(gist,names[i]);
+    var arr=(raw&&raw.trim())?JSON.parse(raw):[];
+    if(!Array.isArray(arr))throw new Error('archivo histórico inválido: '+names[i]);
+    parts[names[i]]=arr;
+  }
+  return parts;
+}
+// Une particiones (+ legado) en una sola lista, dedup por id (gana el _ts más nuevo)
+function _archFlatten(parts){
+  var map={};
+  Object.keys(parts).forEach(function(f){
+    parts[f].forEach(function(t){
+      if(!t||t.id==null)return;
+      var ex=map[t.id];
+      if(!ex||(t._ts||0)>(ex._ts||0))map[t.id]=t;
+    });
+  });
+  return Object.keys(map).map(function(k){return map[k];});
+}
+// Único camino de ESCRITURA al archivo: GET fresco → reparte el legado si aún existe →
+// aplica los upserts en la partición de cada producto → PATCH por partición modificada →
+// elimina el legado. Lanza si alguna escritura falla (el llamador NO debe podar el estado).
+// Idempotente: repetirlo tras un fallo parcial converge (merge por id).
+async function _archSync(upserts){
+  var path='/'+GIST_CONFIG.gistId;
+  delete _gistETags[path]; // sin ETag: la respuesta trae el contenido completo
+  var gist=await _gistFetch('GET',path);
+  if(!gist)throw new Error('sin respuesta del gist');
+  var parts=await _archReadParts(gist);
+  var hadLegacy=Object.prototype.hasOwnProperty.call(parts,GIST_FILE_ARCHIVE);
+  var legacy=parts[GIST_FILE_ARCHIVE]||[];
+  delete parts[GIST_FILE_ARCHIVE];
+  var dirty={};
+  function put(t,force){
+    if(!t||t.id==null)return;
+    var f=_archPartFile(t);
+    var arr=parts[f]||(parts[f]=[]);
+    var i=arr.findIndex(function(x){return x.id===t.id;});
+    if(i<0){arr.push(t);dirty[f]=1;}
+    else if(force?(t._ts||0)>=(arr[i]._ts||0):(t._ts||0)>(arr[i]._ts||0)){arr[i]=t;dirty[f]=1;}
+  }
+  legacy.forEach(function(t){put(t,false);});
+  (upserts||[]).forEach(function(t){put(t,true);});
+  var files=Object.keys(dirty);
+  for(var i=0;i<files.length;i++){
+    var content=JSON.stringify(parts[files[i]]);
+    if(content.length>850000)console.warn('Archivo histórico: '+files[i]+' pesa '+Math.round(content.length/1024)+' KB — cerca del límite de la API');
+    var res=await _gistFetch('PATCH',path,{files:{[files[i]]:{content:content}}});
+    if(!res)throw new Error('escritura rechazada ('+files[i]+')');
+  }
+  if(hadLegacy){
+    // Todo el legado ya está en particiones (escrituras confirmadas) → eliminar el archivo único
+    try{await _gistFetch('PATCH',path,{files:{[GIST_FILE_ARCHIVE]:null}});}
+    catch(e){console.warn('No se pudo eliminar el archivo legado (se reintenta en el próximo archivado):',e);}
+  }
+  try{localStorage.setItem('lt-arch-parts-v1','1');}catch(e){}
+  return (window._archTasks=_archFlatten(parts));
+}
 async function archiveOldApproved(){
   if(window._appOutdated)return; // versión vieja bloqueada
   if(!currentUser||isAuditorRole())return; // requiere sesión con permiso de escritura
   if(!GIST_CONFIG.configured)return;
   var cand=_archCandidates();
-  if(cand.length===0)return;
+  // Sin candidatos solo se entra una vez por dispositivo, para repartir el archivo legado
+  var _partsDone=false;try{_partsDone=localStorage.getItem('lt-arch-parts-v1')==='1';}catch(e){}
+  if(cand.length===0&&_partsDone)return;
   try{
-    var gist=await _gistFetch('GET','/'+GIST_CONFIG.gistId);
-    if(!gist)return;
-    var prev=[];
-    try{prev=JSON.parse((await _gistFileContent(gist,GIST_FILE_ARCHIVE))||'[]');}catch(e){prev=[];}
-    var map={};
-    prev.forEach(function(t){map[t.id]=t;});
-    cand.forEach(function(t){
-      var c=Object.assign({},t,{_archived:true,_archivedTs:Date.now()});
-      var ex=map[t.id];
-      if(!ex||(c._ts||0)>=(ex._ts||0))map[t.id]=c;
-    });
-    var arr=Object.values(map);
-    var res=await _gistFetch('PATCH','/'+GIST_CONFIG.gistId,{files:{[GIST_FILE_ARCHIVE]:{content:JSON.stringify(arr)}}});
-    if(!res)return; // escritura falló → NO podar el estado; se reintenta en el próximo boot
+    var _now=Date.now();
+    // Si falla lanza → NO se poda el estado; se reintenta en el próximo boot
+    var arr=await _archSync(cand.map(function(t){return Object.assign({},t,{_archived:true,_archivedTs:_now});}));
+    if(cand.length===0){console.info('Archivo histórico particionado por trimestre. Total: '+arr.length);return;}
     var ids=new Set(cand.map(function(t){return t.id;}));
     tasks=tasks.filter(function(t){return !ids.has(t.id);});
     // Registrar el archivado (viaja en el snapshot): el merge y applySnapshot filtran
     // estos ids — sin esto, dispositivos con copia local previa resucitaban las tareas
     cand.forEach(function(t){_regDeletion('archivedTasks',t.id);});
-    window._archTasks=arr;
-    auditLog('ARCHIVE','TASK','batch',{count:cand.length,description:'Archivado automático: '+cand.length+' producto(s) aprobado(s) hace más de '+ARCHIVE_APPROVED_AFTER_DAYS+' días → '+GIST_FILE_ARCHIVE},'');
+    auditLog('ARCHIVE','TASK','batch',{count:cand.length,description:'Archivado automático: '+cand.length+' producto(s) aprobado(s) hace más de '+ARCHIVE_APPROVED_AFTER_DAYS+' días → archivo histórico trimestral'},'');
     saveLS();
     await saveNow();
     render();
@@ -2549,8 +2617,7 @@ async function loadArchivedTasks(){
     delete _gistETags[path];
     var gist=await _gistFetch('GET',path);
     if(!gist)throw new Error('respuesta vacía del gist (304 sin contenido)');
-    var raw=await _gistFileContent(gist,GIST_FILE_ARCHIVE);
-    window._archTasks=JSON.parse(raw||'[]');
+    window._archTasks=_archFlatten(await _archReadParts(gist)); // legado + particiones trimestrales
   }catch(e){
     // No cachear el fallo como "archivo vacío": permitir reintento pasado 1 minuto
     console.warn('loadArchivedTasks:',e);
@@ -2558,6 +2625,71 @@ async function loadArchivedTasks(){
     return [];
   }
   return window._archTasks;
+}
+// ── BUSCADOR GLOBAL (🔍 en la barra superior, todos los roles) ──
+// Busca por producto / lote / tipo / analista en los productos vivos Y en el archivo
+// histórico (carga perezosa, solo GET). Los archivados se marcan 📦 y abren el modal de
+// solo lectura. Overlay createElement: vive fuera de render() (no pierde foco ni texto).
+function _gsNorm(s){return String(s==null?'':s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');}
+function _gsDate(t){return t.approvedDate||(t.approvedTs?tsToYMD(t.approvedTs):'')||t.created||'';}
+function _gsSearch(q){
+  var toks=_gsNorm(q).split(/\s+/).filter(Boolean);
+  if(!toks.length)return {rows:[],total:0};
+  var live=activeTasks(),ids={};
+  live.forEach(function(t){ids[t.id]=1;});
+  var pool=live.concat((window._archTasks||[]).filter(function(t){return t&&!t._deleted&&!ids[t.id];}));
+  var hits=pool.filter(function(t){
+    var names=(t.assignments||[]).filter(function(a){return !a._removed;}).map(function(a){var u=getU(a.analyst);return u?u.name:'';}).join(' ');
+    var hay=_gsNorm([t.producto,t.lote,t.tipo,names].join(' '));
+    return toks.every(function(k){return hay.indexOf(k)>=0;});
+  }).sort(function(a,b){return _gsDate(b).localeCompare(_gsDate(a));});
+  return {rows:hits.slice(0,60),total:hits.length};
+}
+function _gsRender(){
+  var box=document.getElementById('gsearch-results');if(!box)return;
+  var q=(document.getElementById('gsearch-input')||{}).value||'';
+  var note=window._gsArchState==='loading'?'<div style="font-size:11px;color:var(--amber-text);padding:6px 2px">⏳ Cargando el archivo histórico…</div>'
+    :window._gsArchState==='error'?'<div style="font-size:11px;color:var(--red);padding:6px 2px">⚠ No se pudo cargar el archivo histórico: se muestran solo los productos vigentes. <span class="sb-link" onclick="_gsLoadArch()">Reintentar</span></div>'
+    :'<div style="font-size:10px;color:var(--text3);padding:6px 2px">Incluye '+(window._archTasks||[]).length+' productos del archivo histórico 📦</div>';
+  if(!q.trim()){box.innerHTML=note+'<div class="empty" style="padding:18px">Escribí producto, lote, tipo o analista</div>';return;}
+  var r=_gsSearch(q);
+  if(!r.total){box.innerHTML=note+'<div class="empty" style="padding:18px">Sin resultados</div>';return;}
+  box.innerHTML=note+r.rows.map(function(t){
+    return '<div data-id="'+escH(String(t.id))+'" onclick="_gsOpen(this.dataset.id)" style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:6px;cursor:pointer;background:var(--surface)">'
+      +'<div class="u-12b">'+escH(t.producto||'—')
+      +(t._archived?' <span style="font-size:9px;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 5px;font-weight:600">📦 Archivado</span>':'')+'</div>'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:2px"><span class="u-mono">'+escH(t.lote||'—')+'</span>'
+      +(t.tipo?' · '+escH(t.tipo):'')+' · '+escH(statusLabel(t.status))+(_gsDate(t)?' · '+fmtDF(_gsDate(t)):'')+'</div>'
+      +'</div>';
+  }).join('')+(r.total>r.rows.length?'<div style="font-size:11px;color:var(--text3);text-align:center;padding:6px">Mostrando '+r.rows.length+' de '+r.total+' — afiná la búsqueda</div>':'');
+}
+function _gsLoadArch(){
+  if(window._archTasks){window._gsArchState='ok';_gsRender();return;}
+  window._gsArchState='loading';window._archRetryAt=0;_gsRender();
+  loadArchivedTasks().then(function(){window._gsArchState=window._archTasks?'ok':'error';_gsRender();})
+    .catch(function(){window._gsArchState='error';_gsRender();});
+}
+function _gsClose(){var m=document.getElementById('gsearch-modal');if(m&&m.parentNode)m.parentNode.remove();}
+function _gsOpen(id){
+  var pool=tasks.concat(window._archTasks||[]);
+  var t=pool.find(function(x){return String(x.id)===String(id);});
+  _gsClose();
+  if(t)openEdit(t.id);
+}
+function openGlobalSearch(){
+  _gsClose();
+  var div=document.createElement('div');
+  div.innerHTML='<div class="modal-overlay" style="z-index:600;align-items:flex-start" id="gsearch-modal" onclick="if(event.target===this)_gsClose()">'
+    +'<div class="modal" style="width:min(560px,calc(100vw - 32px));margin-top:6vh;max-height:82vh;display:flex;flex-direction:column">'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
+    +'<h3 style="margin:0;border-bottom:none;padding-bottom:0;flex:1">🔍 Buscar análisis</h3>'
+    +'<button class="btn sm" onclick="_gsClose()">✕</button></div>'
+    +'<input id="gsearch-input" type="text" autocomplete="off" placeholder="Producto, lote, tipo o analista — incluye el archivo histórico…" oninput="_gsRender()" onkeydown="if(event.key===\'Escape\')_gsClose()" style="width:100%;box-sizing:border-box">'
+    +'<div id="gsearch-results" style="overflow-y:auto;margin-top:8px;flex:1;min-height:80px"></div>'
+    +'</div></div>';
+  document.body.appendChild(div);
+  var inp=document.getElementById('gsearch-input');if(inp)inp.focus();
+  _gsLoadArch();
 }
 // Toggle de "incluir archivados" para listas (Aprobados, Informes)
 function toggleArchView(flagName){
@@ -5482,7 +5614,7 @@ function getTableData(tableId){
     }
     taskList=f;
   } else if(tableId==='tbl-dash'){
-    taskList=(dashFilter&&dashFilter!=='all')?activeTasks().filter(t=>t.status===dashFilter):[...activeTasks()].reverse();
+    taskList=(dashFilter&&dashFilter!=='all')?activeTasks().filter(_tipoMatch).filter(t=>_dashMatch(t,dashFilter)):[...activeTasks().filter(_tipoMatch)].reverse();
   } else if(tableId==='tbl-late'){
     taskList=activeTasks().filter(t=>t._dueStatus==='late'&&t.status!=='approved');
   } else if(tableId==='tbl-pend'){
@@ -5709,7 +5841,7 @@ function renderAprobados(){
     if(t.approvalComment)_cmts.push('Aprobación: '+t.approvalComment);
     return'<div class="trow" style="'+cols+'" onclick="openEdit('+t.id+')">'
       +'<div><div class="cell-trunc" style="font-weight:500;font-size:12px">'+escH(t.producto)
-      +(t._archived?' <span style="font-size:9px;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 5px;font-weight:600" title="En archivo histórico ('+GIST_FILE_ARCHIVE+')">📦 Archivado</span>':'')+'</div>'
+      +(t._archived?' <span style="font-size:9px;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 5px;font-weight:600" title="En archivo histórico ('+_archPartFile(t)+')">📦 Archivado</span>':'')+'</div>'
       +'<div class="cell-sub cell-trunc" style="font-size:10px">'+escH(t.lote)+'</div>'
       +(_cmts.length?'<div style="font-size:10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escH(_cmts.join(' — '))+'">💬 '+escH(_cmts.join(' · ').slice(0,50))+(_cmts.join(' · ').length>50?'…':'')+'</div>':'')
       +'</div>'
@@ -7384,19 +7516,8 @@ async function _archPersistTasks(list){
   if(window._appOutdated)return false;
   if(!GIST_CONFIG.configured||!currentUser||isAuditorRole())return false;
   try{
-    var path='/'+GIST_CONFIG.gistId;
-    delete _gistETags[path]; // sin ETag: la respuesta trae el contenido completo
-    var gist=await _gistFetch('GET',path);
-    if(!gist)throw new Error('sin respuesta del gist');
-    var arr=JSON.parse((await _gistFileContent(gist,GIST_FILE_ARCHIVE))||'[]');
-    list.forEach(function(t){
-      var c=Object.assign({},t,{_archived:true});
-      var i=arr.findIndex(function(x){return x.id===t.id;});
-      if(i>=0)arr[i]=c; else arr.push(c);
-    });
-    var res=await _gistFetch('PATCH',path,{files:{[GIST_FILE_ARCHIVE]:{content:JSON.stringify(arr)}}});
-    if(!res)throw new Error('escritura rechazada');
-    window._archTasks=arr;
+    // Escribe en la partición trimestral de cada producto (y reparte el legado si quedaba)
+    await _archSync(list.map(function(t){return Object.assign({},t,{_archived:true});}));
     return true;
   }catch(e){
     console.warn('_archPersistTasks:',e);
@@ -9291,7 +9412,11 @@ function renderShell(){
   const sup=canViewSup(); // supervisor o auditor (solo lectura): misma navegación y alcance
   const isReviewer=isReviewerRole();
   const myT=sup?activeTasks():activeTasks().filter(t=>isMyTask(t));
-  const lateC=myT.filter(t=>t._dueStatus==='late').length;
+  // Vencidos que cuenta el badge = los que el módulo Pendientes realmente lista (estados
+  // previos a revisión). Antes contaba TODO _dueStatus 'late', incluidos aprobados (que
+  // lo conservan congelado) y los que esperan revisión: 180 en el badge vs 10 en la lista.
+  const _openSt=['pending','scheduled','progress','pending-confirm'];
+  const lateC=myT.filter(t=>t._dueStatus==='late'&&_openSt.includes(t.status)).length;
   const pendC=myT.filter(t=>t.status==='pending').length;
   // Tareas con acción pendiente del analista actual (atrasadas sin límite, hasta mañana)
   const actionC=(()=>{
@@ -9315,7 +9440,7 @@ function renderShell(){
   const navs=sup?[
     {id:'dashboard',label:'Panel general',icon:'🏠'},
     {id:'tasks',label:'Análisis',icon:'🔬',badge:pendC>0?pendC:'',bc:'w'},
-    {id:'pending',label:'Pendientes',icon:'⏰',badge:(()=>{const pc=activeTasks().filter(t=>t.status==='pending-confirm').length;const sc=productSuggestions.filter(s=>s.status==='pending').length;return lateC>0||pc>0||sc>0?(lateC+pc+sc):'';})(),bc:'d'},
+    {id:'pending',label:'Pendientes',icon:'⏰',badge:(()=>{const pc=activeTasks().filter(t=>t.status==='pending-confirm'&&t._dueStatus!=='late').length;/* los vencidos ya están en lateC: sin doble conteo */const sc=productSuggestions.filter(s=>s.status==='pending').length;const fc=freeTasks.filter(ft=>ft.status==='pending-confirm').length;const tot=lateC+pc+sc+fc;return tot>0?tot:'';})(),bc:'d'},
     {id:'revision',label:'Revisión',icon:'✅',badge:(()=>{const d=activeTasks().filter(t=>t.status==='done').length,r=activeTasks().filter(t=>t.status==='reviewed').length,o=activeTasks().filter(t=>t.status==='observed').length;const tot=d+r+o;return tot>0?tot:'';})(),bc:'w'},
     {id:'especiales',label:'Especiales',icon:'🧪',badge:(()=>{const c=activeTasks().filter(t=>(t.tipo==='EE'||t.tipo==='Limp'||t.tipo==='Val')&&t.status!=='approved').length+activeTasks().filter(microPending).length;return c>0?c:'';})()},
     {id:'mgmt',label:'Gestión',icon:'🗂'},
@@ -9376,6 +9501,7 @@ function renderShell(){
     <div class="main">
       <div class="topbar">
         <div class="topbar-title">${titles[currentView]||''}</div>
+        ${currentUser?'<button class="btn" onclick="openGlobalSearch()" style="padding:6px 12px" title="Buscar análisis por producto, lote, tipo o analista (incluye el archivo histórico)" aria-label="Buscar análisis">🔍</button>':''}
         ${currentUser?renderNotifBtn():''}
         <div id="sp-status-badge" style="margin-right:4px"></div>
         ${isSupRole()&&currentView!=='admin'?`<button class="btn amb" onclick="showImportModal=true;modalTab='paste';pastePreview=[];render()">↑ <span class="btn-txt">Importar</span></button><button class="btn pri" onclick="openNewTask()">+ <span class="btn-txt">Nuevo Producto</span></button>`:''}
@@ -9498,6 +9624,16 @@ function renderSamplerView(){
   return html;
 }
 
+// Filtro de las tarjetas del Panel general — ÚNICA definición, usada por la tabla y por
+// "Copiar" (antes 'Pendientes' contaba ingresados+programados pero listaba solo
+// ingresados, y Copiar con Vencidos/Completados/En curso salía vacío o distinto).
+function _dashMatch(t,f){
+  if(f==='late')return t._dueStatus==='late'&&t.status!=='approved';
+  if(f==='done')return ['done','reviewed','approved'].includes(t.status);
+  if(f==='progress')return t.status==='progress'||t.status==='pending-confirm';
+  if(f==='pending')return t.status==='pending'||t.status==='scheduled';
+  return t.status===f;
+}
 function renderDashboard(){
   const sup=canViewSup(); // auditor: mismo panel general que el supervisor (solo lectura)
   if(sup){
@@ -9509,7 +9645,8 @@ function renderDashboard(){
     const toConfirm=_at.filter(t=>t.status==='pending-confirm').length;
     const aIngresar=_at.filter(t=>t.status==='a-ingresar').length;
     const aIngresarOverdue=_at.filter(t=>t.status==='a-ingresar'&&t.expectedArrival&&t.expectedArrival<today()).length;
-    let filtered=((dashFilter&&dashFilter!=='all')?_at.filter(t=>dashFilter==='late'?t._dueStatus==='late'&&t.status!=='approved':dashFilter==='done'?['done','reviewed','approved'].includes(t.status):dashFilter==='progress'?(t.status==='progress'||t.status==='pending-confirm'):t.status===dashFilter):sortTasks([..._at],taskSort,taskSortDir)).filter(t=>!filterSearch||t.producto.toLowerCase().includes(filterSearch.toLowerCase())||t.lote.toLowerCase().includes(filterSearch.toLowerCase()));
+    const _lateOpen=_at.filter(t=>t._dueStatus==='late'&&['pending','scheduled','progress','pending-confirm'].includes(t.status)).length;
+    let filtered=((dashFilter&&dashFilter!=='all')?_at.filter(t=>_dashMatch(t,dashFilter)):sortTasks([..._at],taskSort,taskSortDir)).filter(t=>!filterSearch||t.producto.toLowerCase().includes(filterSearch.toLowerCase())||t.lote.toLowerCase().includes(filterSearch.toLowerCase()));
     const filterLabel={'':`Todos (${_at.length})`,'pending':`Pendientes (${pend})`,'progress':`En curso (${prog})`,'late':`Vencidos (${late})`,'done':`Completados p/revisar (${done})`};
     return`
       ${_tipoFilterBar()}<div class="stats-row">
@@ -9525,7 +9662,7 @@ function renderDashboard(){
         <div class="scard" onclick="dashFilter=dashFilter==='done'?'':'done';render()" style="cursor:pointer;transition:box-shadow .15s${dashFilter==='done'?';box-shadow:0 0 0 2px var(--green)':''}">
           <div class="scard-lbl">COMPLETADOS</div><div class="scard-val" style="color:${done>0?'var(--green)':'inherit'}">${done}</div></div>
       </div>
-      ${late>0&&!dashFilter?`<div class="notif">⚠ ${late} análisis vencido${late>1?'s':''}. Revisá Pendientes.</div>`:''}
+      ${late>0&&!dashFilter?`<div class="notif">⚠ ${late} análisis vencido${late>1?'s':''} (límite de aprobación superado): ${_lateOpen} en Pendientes · ${late-_lateOpen} en Revisión/aprobación.</div>`:''}
     ${(()=>{const cc=checkAbsenceConflicts();return cc.length>0?`<div class="notif" style="background:var(--orange-bg);color:var(--orange-text);border-color:rgba(138,60,16,.2)">⚠ ${cc.length} análisis asignado${cc.length>1?'s':''} en días no laborables. <button class="btn sm" onclick="currentView='rrhh';rrhhTab='conflicts';render()" style="margin-left:6px;background:var(--orange-text);color:#fff;border-color:transparent">Ver conflictos</button></div>`:'';})()}
     ${(()=>{const devN=_recentUnackedOverCount(7);return devN>0?`<div class="notif" style="background:var(--red-bg);color:var(--red-text);border-color:rgba(138,32,32,.2)">⏱ ${devN} día${devN>1?'s':''} con desvío de horas sin aceptar en los últimos 7 días (más de ${_fmtH(getWorkdayMaxHours())} h, o actividades apartadas del declarado — de la jornada si no hubo cierre). <button class="btn sm" onclick="currentView='rrhh';rrhhTab='hours';render()" style="margin-left:6px;background:var(--red);color:#fff;border-color:transparent">Ver conciliación</button></div>`:'';})()}
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
@@ -13291,6 +13428,7 @@ function supForceFtStatus(){
     });
 }
 function renderMaintTools(){
+  autoResolveNotifs(); // los avisos caducados no deben contarse como activos ni huérfanos
   var actives=replanNotifs.filter(function(n){return n.status!=='resolved';}).sort(function(a,b){return (b.ts||0)-(a.ts||0);});
   var orphans=actives.filter(_maintIsOrphanNotif);
   if(typeof window.maintShowNotifs==='undefined')window.maintShowNotifs=false;
@@ -17374,9 +17512,29 @@ function autoResolveNotifs(){
         break;
       }
     }
+    // Sugerencia de ingreso ya gestionada (confirmada/rechazada/podada): el aviso no tiene acción
+    if(!stale&&n.type==='product_suggestion'){
+      var _sg=productSuggestions.find(function(x){return x.id===n.suggId;});
+      stale=!_sg||_sg.status!=='pending';
+    }
+    // Avisos INFORMATIVOS (solo "Visto", sin acción): caducan si su producto ya no está
+    // vigente (archivado o anulado) o si llevan más de NOTIF_INFO_MAX_DAYS sin leerse.
+    // Antes quedaban pendientes para siempre → cientos de "huérfanas" en Mantenimiento
+    // (140 de 259 activas, 2026-11) y peso muerto en el estado.
+    if(!stale&&NOTIF_INFO_TYPES[n.type]){
+      if(n.taskId!=null&&!task)stale=true;
+      else{
+        var _born=n.ts||n._ts||0;
+        if(_born&&_born<Date.now()-NOTIF_INFO_MAX_DAYS*24*60*60*1000)stale=true;
+      }
+    }
     if(stale) n.status='resolved';
   });
 }
+var NOTIF_INFO_MAX_DAYS=30;
+var NOTIF_INFO_TYPES={product_suggestion_response:1,day_released:1,reviewer_approval_decision:1,
+  planification_accepted:1,planification_rejected:1,replan_rejected:1,free_task_declined:1,
+  free_task_rejected:1,schedule_rejected:1,request_managed:1};
 
 function renderNotifPanel(){
   autoResolveNotifs(); // Re-evaluate stale notifications
